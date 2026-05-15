@@ -14,7 +14,12 @@ from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 DEFAULT_CONFIG_PATHS = (
     "/etc/frigate-sidecar/sidecar.yml",
@@ -46,6 +51,25 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
 
+class _StaticYamlSource(PydanticBaseSettingsSource):
+    """A pydantic-settings source backed by a pre-loaded YAML dict.
+
+    Implemented as a settings source (not as init kwargs) so env variables
+    can still override YAML values — env_settings runs first in the source
+    tuple returned by `settings_customise_sources`.
+    """
+
+    def __init__(self, settings_cls: type[BaseSettings], data: dict[str, Any]) -> None:
+        super().__init__(settings_cls)
+        self._data = data
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        return self._data.get(field_name), field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        return self._data
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -56,25 +80,37 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+def _discover_yaml_path(explicit: str | os.PathLike[str] | None) -> Path | None:
+    if explicit:
+        return Path(explicit)
+    if env_path := os.environ.get("FRIGATE_SIDECAR_CONFIG"):
+        return Path(env_path)
+    for candidate in DEFAULT_CONFIG_PATHS:
+        p = Path(candidate)
+        if p.exists():
+            return p
+    return None
+
+
 def load_settings(config_path: str | os.PathLike[str] | None = None) -> Settings:
-    """Load settings from YAML (if any) and merge with env-var overrides.
+    yaml_path = _discover_yaml_path(config_path)
+    yaml_data = _read_yaml(yaml_path) if yaml_path else {}
 
-    `config_path` overrides everything; otherwise FRIGATE_SIDECAR_CONFIG env var,
-    otherwise the first existing default search path.
-    """
-    chosen: Path | None = None
-    if config_path:
-        chosen = Path(config_path)
-    elif env_path := os.environ.get("FRIGATE_SIDECAR_CONFIG"):
-        chosen = Path(env_path)
-    else:
-        for candidate in DEFAULT_CONFIG_PATHS:
-            p = Path(candidate)
-            if p.exists():
-                chosen = p
-                break
+    class _BoundSettings(Settings):
+        @classmethod
+        def settings_customise_sources(
+            cls,
+            settings_cls: type[BaseSettings],
+            init_settings: PydanticBaseSettingsSource,
+            env_settings: PydanticBaseSettingsSource,
+            dotenv_settings: PydanticBaseSettingsSource,
+            file_secret_settings: PydanticBaseSettingsSource,
+        ) -> tuple[PydanticBaseSettingsSource, ...]:
+            return (
+                init_settings,
+                env_settings,
+                _StaticYamlSource(settings_cls, yaml_data),
+                file_secret_settings,
+            )
 
-    file_data: dict[str, Any] = _read_yaml(chosen) if chosen else {}
-    # Build via Settings(**file_data) so env vars layer on top (BaseSettings
-    # reads env at __init__).
-    return Settings(**file_data)
+    return _BoundSettings()
