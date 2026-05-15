@@ -6,6 +6,8 @@
     {% set _active = active_page|default('') %}
     <a href="/" class="page-link{% if _active == 'triage' %} active{% endif %}">Triage</a>
     <a href="/motion" class="page-link{% if _active == 'motion' %} active{% endif %}">Motion</a>
+    <a href="/score-histogram" class="page-link{% if _active == 'score_histogram' %} active{% endif %}">Scores</a>
+    <a href="/fps-budget" class="page-link{% if _active == 'fps_budget' %} active{% endif %}">FPS budget</a>
   </nav>
   <span class="stats">{{ summary or '' }}
     {% if counts and (counts.get('tp') or counts.get('fp') or counts.get('skip')) %}

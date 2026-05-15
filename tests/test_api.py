@@ -113,6 +113,43 @@ def test_list_has_active_nav(client: TestClient) -> None:
     assert "page-link active" in r.text
 
 
+def test_score_histogram_page(client: TestClient) -> None:
+    r = client.get("/score-histogram", params={"days": 7})
+    assert r.status_code == 200
+    # Filter form is present + nav highlights scores.
+    assert "Score Histogram" in r.text or "score-histogram" in r.text
+    assert ">Scores<" in r.text
+    # The fixture has events for alley-overview, etc.
+    assert "alley-overview" in r.text
+
+
+def test_score_histogram_camera_filter(client: TestClient) -> None:
+    r = client.get(
+        "/score-histogram",
+        params={"days": 7, "camera": "alley-east"},
+    )
+    assert r.status_code == 200
+    # Selected option markup present.
+    assert 'value="alley-east" selected' in r.text
+
+
+def test_fps_budget_page_error_when_api_down(client: TestClient) -> None:
+    # Test config points at a non-existent Frigate; page should still 200
+    # with an error banner.
+    r = client.get("/fps-budget")
+    assert r.status_code == 200
+    assert "Frigate API unreachable" in r.text
+
+
+def test_nav_appears_on_all_pages(client: TestClient) -> None:
+    # Same nav on all pages.
+    for path in ("/", "/motion", "/score-histogram", "/fps-budget"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        for label in ("Triage", "Motion", "Scores", "FPS budget"):
+            assert label in r.text, f"{label} missing on {path}"
+
+
 # ----- Analysis HTTP routes -----
 
 
