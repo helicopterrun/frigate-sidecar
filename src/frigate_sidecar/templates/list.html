@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Frigate Triage{% endblock %}
+
+{% block body %}
+{% set summary = events|length ~ ' matching event' ~ ('s' if events|length != 1 else '') %}
+{% include "_header.html" %}
+<main>
+  <form class="filters" method="get" action="/">
+    <label>camera
+      <select name="camera">
+        <option value="">all</option>
+        {% for c in cameras %}
+          <option value="{{ c }}"{% if c == filters.camera %} selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>object
+      <select name="label">
+        <option value="">all</option>
+        {% for l in labels %}
+          <option value="{{ l }}"{% if l == filters.label %} selected{% endif %}>{{ l }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>triage
+      <select name="triage">
+        {% for v in ['any', 'untriaged', 'triaged', 'tp', 'fp', 'skip'] %}
+          <option value="{{ v }}"{% if v == filters.triage %} selected{% endif %}>{{ v }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>days back <input type="number" name="days" value="{{ filters.days }}" min="1" max="365" style="width:70px"></label>
+    <label>limit <input type="number" name="limit" value="{{ filters.limit }}" min="1" max="500" style="width:70px"></label>
+    <label>order
+      <select name="order">
+        {% for v in ['newest', 'oldest'] %}
+          <option value="{{ v }}"{% if v == filters.order %} selected{% endif %}>{{ v }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">apply</button>
+    <button type="button" class="secondary" onclick="window.location='/'">reset</button>
+  </form>
+
+  {% if events %}
+  <div class="grid">
+    {% for ev in events %}
+    <a class="card" href="/event/{{ ev.id }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+      {% if ev.has_snapshot %}
+      <img class="thumb" src="{{ frigate_base }}/api/events/{{ ev.id }}/thumbnail.jpg" alt="" loading="lazy">
+      {% else %}
+      <div class="thumb thumb-missing">no snapshot</div>
+      {% endif %}
+      <div class="meta">
+        <div class="row">
+          <span class="cam">{{ ev.camera }}</span>
+          {% if ev.triage_label %}
+            <span class="badge {{ ev.triage_label }}">{{ ev.triage_label }}</span>
+          {% else %}
+            <span class="badge untriaged">untriaged</span>
+          {% endif %}
+        </div>
+        <div class="row">
+          <span class="lbl">{{ ev.label }}{% if ev.zones %} · {{ ev.zones|join(', ') }}{% endif %}</span>
+          <span class="score">{{ fmt_score(ev.top_score) }}</span>
+        </div>
+        <div class="row">
+          <span class="ts">{{ fmt_ts(ev.start_time) }}</span>
+          <span class="ts">{{ fmt_duration(ev.start_time, ev.end_time) }}</span>
+        </div>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">No events match these filters.</div>
+  {% endif %}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/list.js"></script>
+{% endblock %}

@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from frigate_sidecar import __version__
 from frigate_sidecar.config import Settings, load_settings
+from frigate_sidecar.routes import health as health_routes
+from frigate_sidecar.routes import triage as triage_routes
+
+_PACKAGE_ROOT = Path(__file__).parent
+_TEMPLATES_DIR = _PACKAGE_ROOT / "templates"
+_STATIC_DIR = _PACKAGE_ROOT / "static"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -17,15 +27,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
     )
     app.state.settings = settings
+    app.state.templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
-    @app.get("/healthz", tags=["meta"])
-    def healthz() -> dict[str, str]:
-        return {"status": "ok"}
-
-    @app.get("/version", tags=["meta"])
-    def version() -> dict[str, str]:
-        return {"version": __version__}
-
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+    app.include_router(health_routes.router)
+    app.include_router(triage_routes.router)
     return app
 
 

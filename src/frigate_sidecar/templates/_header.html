@@ -1,0 +1,9 @@
+<header>
+  <h1><a href="/" style="color:inherit;text-decoration:none;">Frigate Triage</a></h1>
+  <span class="stats">{{ summary }} &nbsp;·&nbsp; total labeled:
+    <span class="badge tp">{{ counts.get('tp', 0) }} TP</span>
+    <span class="badge fp">{{ counts.get('fp', 0) }} FP</span>
+    <span class="badge skip">{{ counts.get('skip', 0) }} SKIP</span>
+  </span>
+  <span class="session">session: <input id="session" type="text" placeholder="2026-05-09a" size="14"></span>
+</header>

@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}{{ event.camera }} / {{ event.label }} / {{ event.id }}{% endblock %}
+
+{% set qs = request.url.query %}
+{% set prev_url = ('/event/' ~ prev_id ~ ('?' ~ qs if qs else '')) if prev_id else '' %}
+{% set next_url = ('/event/' ~ next_id ~ ('?' ~ qs if qs else '')) if next_id else '' %}
+{% set list_url = '/' ~ ('?' ~ qs if qs else '') %}
+
+{% block body_attrs %} data-event-id="{{ event.id }}" data-prev-url="{{ prev_url }}" data-next-url="{{ next_url }}"{% endblock %}
+
+{% block body %}
+{% set summary = ('event ' ~ position[0] ~ ' of ' ~ position[1]) if position else 'event detail' %}
+{% include "_header.html" %}
+<main>
+  <div class="nav" style="margin-bottom:16px">
+    <a href="{{ list_url }}">← back to list</a>
+    {% if prev_id %}
+      <a href="{{ prev_url }}">← prev (k)</a>
+    {% else %}
+      <a class="disabled">← prev</a>
+    {% endif %}
+    {% if next_id %}
+      <a href="{{ next_url }}">next (j) →</a>
+    {% else %}
+      <a class="disabled">next →</a>
+    {% endif %}
+  </div>
+
+  <div class="detail-grid">
+    {% set snapshot_url = (frigate_base ~ '/api/events/' ~ event.id ~ '/snapshot.jpg') if event.has_snapshot else '' %}
+    {% set clip_url = (frigate_base ~ '/api/events/' ~ event.id ~ '/clip.mp4') if event.has_clip else '' %}
+
+    {% if snapshot_url or clip_url %}
+    <div class="detail-media">
+      <div class="detail-tabs">
+        {% if snapshot_url %}<button class="active" data-tab="snap">snapshot</button>{% endif %}
+        {% if clip_url %}<button{% if not snapshot_url %} class="active"{% endif %} data-tab="clip">clip</button>{% endif %}
+        {% if zone_polygons %}
+          <label class="zone-toggle"><input type="checkbox" id="zones-on" checked> zones (z)</label>
+        {% endif %}
+      </div>
+
+      {% set overlay -%}
+        {% if zone_polygons %}
+        <svg class="zones-overlay" viewBox="0 0 1 1" preserveAspectRatio="none">
+          {%- for p in zone_polygons -%}
+            <polygon class="{% if p.active %}active {% endif %}{% if p.full_frame %}full-frame{% endif %}"
+                     points="{{ p.points }}" fill="{{ p.color }}" stroke="{{ p.color }}">
+              <title>{{ p.name }}</title>
+            </polygon>
+          {%- endfor -%}
+        </svg>
+        {% endif %}
+      {%- endset %}
+
+      {% if snapshot_url %}
+      <div class="tab-pane" id="tab-snap">
+        <div class="media-wrap"><img src="{{ snapshot_url }}" alt="">{{ overlay|safe }}</div>
+      </div>
+      {% endif %}
+      {% if clip_url %}
+      <div class="tab-pane" id="tab-clip"{% if snapshot_url %} style="display:none"{% endif %}>
+        <div class="media-wrap"><video src="{{ clip_url }}" controls preload="metadata"></video>{{ overlay|safe }}</div>
+      </div>
+      {% endif %}
+
+      {% if zone_legend %}
+      <div class="zone-legend">
+        {% for z in zone_legend %}
+          <span class="zli {% if z.active %}active{% endif %}">
+            <span class="sw" style="background:{{ z.color }}"></span>{{ z.name }}
+          </span>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+    {% else %}
+    <div class="detail-media"><div class="empty">No snapshot or clip recorded.</div></div>
+    {% endif %}
+
+    <div class="detail-side">
+      <div class="panel">
+        <h2>Triage
+          {% if event.triage_label %}
+            <span class="badge {{ event.triage_label }}">{{ event.triage_label }}</span>
+          {% else %}
+            <span class="badge untriaged">untriaged</span>
+          {% endif %}
+        </h2>
+        <div class="label-buttons">
+          <button class="btn-tp {% if event.triage_label == 'tp' %}active{% endif %}" data-label="tp">TP (t)</button>
+          <button class="btn-fp {% if event.triage_label == 'fp' %}active{% endif %}" data-label="fp">FP (f)</button>
+          <button class="btn-skip {% if event.triage_label == 'skip' %}active{% endif %}" data-label="skip">skip (s)</button>
+        </div>
+        <div style="margin-top:8px">
+          <button class="btn-clear" data-clear style="width:100%;padding:6px;border:0;border-radius:4px;cursor:pointer">clear (c)</button>
+        </div>
+        <div style="margin-top:12px">
+          <textarea id="note" class="note-input" rows="2" placeholder="optional note">{{ event.triage_note or '' }}</textarea>
+        </div>
+        <div class="help">
+          <kbd>t</kbd>/<kbd>f</kbd>/<kbd>s</kbd> label · <kbd>c</kbd> clear · <kbd>j</kbd>/<kbd>k</kbd> next/prev · <kbd>z</kbd> zones
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Event</h2>
+        <dl class="kv">
+          <dt>id</dt><dd style="font-family:ui-monospace,monospace;font-size:11px">{{ event.id }}</dd>
+          <dt>camera</dt><dd>{{ event.camera }}</dd>
+          <dt>label</dt><dd>{{ event.label }}{% if event.sub_label %} / {{ event.sub_label }}{% endif %}</dd>
+          <dt>zones</dt><dd>{{ event.zones|join(', ') or '—' }}</dd>
+          <dt>start</dt><dd>{{ fmt_ts(event.start_time) }}</dd>
+          <dt>end</dt><dd>{{ fmt_ts(event.end_time) }}</dd>
+          <dt>duration</dt><dd>{{ fmt_duration(event.start_time, event.end_time) }}</dd>
+          <dt>top_score</dt><dd>{{ fmt_score(event.top_score) }}</dd>
+          <dt>score</dt><dd>{{ fmt_score(event.score) }}</dd>
+          <dt>severity</dt><dd>{{ event.max_severity or '—' }}</dd>
+          <dt>box</dt><dd>{% if event.box %}{{ event.box|map('round', 3)|join(', ') }}{% else %}—{% endif %}</dd>
+        </dl>
+      </div>
+
+      <div class="panel">
+        <h2>Raw</h2>
+        <div style="display:flex;flex-direction:column;gap:4px;font-size:12px">
+          {% if snapshot_url %}<a href="{{ snapshot_url }}" target="_blank">snapshot.jpg</a>{% endif %}
+          {% if clip_url %}<a href="{{ clip_url }}" target="_blank">clip.mp4</a>{% endif %}
+          <a href="{{ frigate_base }}/api/events/{{ event.id }}" target="_blank">api/events/{{ event.id }}</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/detail.js"></script>
+{% endblock %}
