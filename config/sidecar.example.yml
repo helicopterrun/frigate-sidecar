@@ -1,0 +1,21 @@
+# frigate-sidecar configuration
+#
+# Copy this file to config/sidecar.yml and edit. The non-example form is
+# gitignored so your real values stay out of the repo.
+
+frigate:
+  # Frigate's HTTP API base URL. Used to build snapshot/clip URLs in the UI.
+  base_url: http://frigate.lan:5000
+  # Path to Frigate's config.yml (inside the sidecar container).
+  config_path: /opt/frigate/config.yml
+  # Path to Frigate's main SQLite database (inside the sidecar container).
+  db_path: /opt/frigate/database/frigate.db
+
+sidecar:
+  # Path to the sidecar's own SQLite database (triage labels, etc.).
+  db_path: /data/frigate-sidecar.db
+  # Bind address. 0.0.0.0 + host networking exposes the service on the LAN.
+  bind_host: 0.0.0.0
+  bind_port: 5001
+
+log_level: INFO

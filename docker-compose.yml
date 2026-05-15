@@ -1,0 +1,20 @@
+services:
+  frigate-sidecar:
+    build: .
+    image: frigate-sidecar:dev
+    container_name: frigate-sidecar
+    restart: unless-stopped
+    # host networking is the simplest way to reach Frigate's API on the LAN.
+    # If you prefer bridge networking, drop this and set
+    # frigate.base_url to a name resolvable inside the container.
+    network_mode: host
+    volumes:
+      # Frigate inputs (read-only)
+      - /opt/frigate/config.yml:/opt/frigate/config.yml:ro
+      - /opt/frigate/database/frigate.db:/opt/frigate/database/frigate.db:ro
+      # Sidecar runtime data (read-write)
+      - /opt/frigate-sidecar/data:/data
+      # Configuration
+      - ./config/sidecar.yml:/etc/frigate-sidecar/sidecar.yml:ro
+    environment:
+      FRIGATE_SIDECAR_CONFIG: /etc/frigate-sidecar/sidecar.yml
