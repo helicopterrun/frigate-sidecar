@@ -109,11 +109,12 @@ def sample(
             ev = parse_event_data(row)
             top = ev["data_top_score"] if ev["data_top_score"] is not None else ev["top_score"]
             score = ev["data_score"] if ev["data_score"] is not None else ev["score"]
-            if top is None or ev.get("data_type") not in (None, "object"):
-                # `data_type` defaults to None for older events; skip non-object events.
-                if ev.get("data_type") is not None:
-                    continue
             if top is None:
+                continue
+            dtype = ev.get("data_type")
+            # `data_type` is None on older events; skip rows where it is set
+            # to something other than "object".
+            if dtype is not None and dtype != "object":
                 continue
             try:
                 zones = json.loads(ev["zones"]) if ev.get("zones") else []

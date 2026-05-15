@@ -22,6 +22,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+annotation = [
+    # Used by analysis.annotation_offset (template matching).
+    "opencv-python-headless>=4.10",
+    "numpy>=1.26",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

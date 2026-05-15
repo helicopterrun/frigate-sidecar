@@ -41,14 +41,15 @@ def frigate_db_path(tmp_path: Path) -> Path:
     now = time.time()
 
     rows = [
-        # id, camera, label, start_time delta-seconds, score, zones, top_score, has_clip, has_snapshot
-        ("e1", "alley-overview", "person", -300, 0.92, "parking_area_people", 0.94, 1, 1),
-        ("e2", "alley-overview", "person", -600, 0.61, "alley", 0.65, 1, 1),
-        ("e3", "alley-east", "dog", -900, 0.78, "back_walkway", 0.80, 1, 1),
-        ("e4", "street-overview", "car", -1200, 0.55, "49th_street", 0.58, 0, 1),
-        ("e5", "alley-overview", "person", -86400 * 30, 0.72, "alley", 0.75, 1, 1),  # old
+        # zones value matches Frigate's storage: a JSON-encoded list.
+        # id, camera, label, dt-seconds, score, zones, top_score, has_clip, has_snapshot
+        ("e1", "alley-overview", "person", -300, 0.92, ["parking_area_people"], 0.94, 1, 1),
+        ("e2", "alley-overview", "person", -600, 0.61, ["alley"], 0.65, 1, 1),
+        ("e3", "alley-east", "dog", -900, 0.78, ["back_walkway"], 0.80, 1, 1),
+        ("e4", "street-overview", "car", -1200, 0.55, ["49th_street"], 0.58, 0, 1),
+        ("e5", "alley-overview", "person", -86400 * 30, 0.72, ["alley"], 0.75, 1, 1),  # old
     ]
-    for eid, cam, label, dt, score, zones, top, has_clip, has_snap in rows:
+    for eid, cam, label, dt, score, zones_list, top, has_clip, has_snap in rows:
         data = json.dumps(
             {"score": score, "top_score": top, "box": [0.1, 0.2, 0.3, 0.4], "type": "object"}
         )
@@ -58,7 +59,7 @@ def frigate_db_path(tmp_path: Path) -> Path:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 eid, cam, label, now + dt, now + dt + 30, score, top,
-                5000.0, 1.5, zones, data, has_clip, has_snap,
+                5000.0, 1.5, json.dumps(zones_list), data, has_clip, has_snap,
             ),
         )
     conn.commit()

@@ -86,7 +86,7 @@ def parse_event_data(row: sqlite3.Row) -> dict[str, Any]:
     Frigate stores score/top_score/box/region nested under `data`. This
     keeps the row's columns and adds `data_*` keys for the parsed fields.
     """
-    out: dict[str, Any] = {k: row[k] for k in row.keys()}
+    out: dict[str, Any] = {k: row[k] for k in row.keys()}  # noqa: SIM118 (sqlite3.Row needs .keys())
     raw = out.get("data")
     parsed: dict[str, Any] = {}
     if raw:
