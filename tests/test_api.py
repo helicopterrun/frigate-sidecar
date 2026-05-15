@@ -86,3 +86,51 @@ def test_healthz(client: TestClient) -> None:
     r = client.get("/healthz")
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
+
+
+# ----- Analysis HTTP routes -----
+
+
+def test_analysis_motion_rate(client: TestClient) -> None:
+    r = client.get("/analysis/motion-rate", params={"days": 7})
+    assert r.status_code == 200
+    rows = r.json()
+    assert isinstance(rows, list)
+    assert any(row["camera"] == "alley-overview" for row in rows)
+
+
+def test_analysis_score_histogram(client: TestClient) -> None:
+    r = client.get("/analysis/score-histogram", params={"days": 7})
+    assert r.status_code == 200
+    body = r.json()
+    assert "rows" in body and "buckets" in body
+
+
+def test_analysis_zone_hits(client: TestClient) -> None:
+    r = client.get("/analysis/zone-hits", params={"days": 7})
+    assert r.status_code == 200
+    body = r.json()
+    assert "hits" in body and "mask_candidates" in body
+
+
+def test_analysis_pull_events(client: TestClient) -> None:
+    r = client.get("/analysis/pull-events", params={"days": 7, "limit": 100})
+    assert r.status_code == 200
+    rows = r.json()
+    ids = {row["id"] for row in rows}
+    assert ids == {"e1", "e2", "e3", "e4"}
+
+
+def test_analysis_pull_events_camera_filter(client: TestClient) -> None:
+    r = client.get(
+        "/analysis/pull-events", params={"days": 7, "camera": "alley-overview"}
+    )
+    assert r.status_code == 200
+    rows = r.json()
+    assert {row["camera"] for row in rows} == {"alley-overview"}
+
+
+def test_analysis_fps_budget_502_on_api_failure(client: TestClient) -> None:
+    # No real Frigate API at the configured base URL in this test -> 502.
+    r = client.get("/analysis/fps-budget")
+    assert r.status_code == 502

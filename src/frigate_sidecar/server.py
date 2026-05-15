@@ -10,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 
 from frigate_sidecar import __version__
 from frigate_sidecar.config import Settings, load_settings
+from frigate_sidecar.routes import analysis as analysis_routes
 from frigate_sidecar.routes import health as health_routes
 from frigate_sidecar.routes import triage as triage_routes
 
@@ -32,6 +33,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     app.include_router(health_routes.router)
     app.include_router(triage_routes.router)
+    app.include_router(analysis_routes.router)
     return app
 
 
