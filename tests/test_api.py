@@ -32,7 +32,7 @@ def client(frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path) -> Test
 def test_list_html(client: TestClient) -> None:
     r = client.get("/")
     assert r.status_code == 200
-    assert "Frigate Triage" in r.text
+    assert "frigate-sidecar" in r.text
     # Each fixture camera should appear in the camera filter.
     assert "alley-overview" in r.text
     assert "street-overview" in r.text
@@ -86,6 +86,31 @@ def test_healthz(client: TestClient) -> None:
     r = client.get("/healthz")
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
+
+
+def test_motion_blank_form(client: TestClient) -> None:
+    # No baseline/target: page renders the form + a "set a target" empty state.
+    r = client.get("/motion")
+    assert r.status_code == 200
+    assert "frigate-sidecar" in r.text
+    # Header nav renders both pages and motion is the active link.
+    assert 'class="page-link active"' in r.text
+    assert "Motion" in r.text
+    assert "Triage" in r.text
+
+
+def test_motion_error_on_unreachable_frigate(client: TestClient) -> None:
+    # Live API not reachable -> error banner, but page still 200.
+    r = client.get("/motion", params={"baseline": "yesterday", "target": "today"})
+    assert r.status_code == 200
+    assert "Frigate API unreachable" in r.text or "date parse error" in r.text
+
+
+def test_list_has_active_nav(client: TestClient) -> None:
+    r = client.get("/")
+    assert r.status_code == 200
+    # Verify the nav with active=triage shows up.
+    assert "page-link active" in r.text
 
 
 # ----- Analysis HTTP routes -----

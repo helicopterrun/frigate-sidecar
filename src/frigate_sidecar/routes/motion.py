@@ -1,0 +1,125 @@
+"""Motion tuning page: per-camera activity (single-window) or A/B comparison.
+
+Single-window mode (no `baseline`): one row per camera with class label and
+motion-units-per-hour, sorted by activity.
+
+Compare mode (`baseline` set): A/B with delta classification (noise spike,
+real activity spike, quiet drop, flat).
+"""
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+from typing import Any
+
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse
+
+from frigate_sidecar.analysis import motion_active, motion_compare
+from frigate_sidecar.frigate_api import FrigateAPIError
+
+router = APIRouter(tags=["motion"])
+
+
+def _classify_single(mu_per_hr: float, yield_per_kmu: float) -> str:
+    """css class for the activity bucket (mirrors motion_active.classify rubric)."""
+    if mu_per_hr < 50:
+        return "muted"
+    if mu_per_hr < 500:
+        return "ok" if yield_per_kmu >= 5 else "warn"
+    if mu_per_hr < 3000:
+        return "ok" if yield_per_kmu >= 2 else "noise"
+    return "ok" if yield_per_kmu >= 1 else "noise"
+
+
+def _delta_css(label: str) -> str:
+    if "noise spike" in label:
+        return "noise"
+    if "mixed spike" in label:
+        return "mixed"
+    if "real activity spike" in label or "quiet drop" in label:
+        return "muted"
+    return "muted"
+
+
+@router.get("/motion", response_class=HTMLResponse)
+def motion_view(
+    request: Request,
+    baseline: str = "",
+    target: str = "",
+) -> Any:
+    settings = request.app.state.settings
+    templates = request.app.state.templates
+
+    today = date.today()
+    presets = {
+        "today_only": ("", "today"),
+        "yesterday_only": ("", "yesterday"),
+        "today_vs_prior3": (
+            f"{(today - timedelta(days=3)).isoformat()}..{(today - timedelta(days=1)).isoformat()}",
+            "today",
+        ),
+        "last7_vs_prior7": (
+            f"{(today - timedelta(days=14)).isoformat()}"
+            f"..{(today - timedelta(days=8)).isoformat()}",
+            f"{(today - timedelta(days=7)).isoformat()}"
+            f"..{(today - timedelta(days=1)).isoformat()}",
+        ),
+    }
+
+    mode: str | None = None
+    rows: list[dict[str, Any]] = []
+    error: str | None = None
+    range_labels = {"baseline": "", "target": ""}
+
+    if baseline or target:
+        try:
+            if baseline:
+                mode = "compare"
+                result = motion_compare.analyze(
+                    frigate_base_url=settings.frigate.base_url,
+                    baseline=baseline,
+                    target=target or "today",
+                )
+                range_labels["baseline"] = result["baseline"]
+                range_labels["target"] = result["target"]
+                for row in result["rows"]:
+                    if "error" in row or "skip" in row:
+                        continue
+                    row["css"] = _delta_css(row.get("class", ""))
+                    rows.append(row)
+            else:
+                mode = "single"
+                result = motion_active.analyze(
+                    frigate_base_url=settings.frigate.base_url,
+                    days=1 if target in ("", "today") else 14,
+                )
+                range_labels["target"] = result.get("since", target or "today")
+                for row in result["rows"]:
+                    if "error" in row:
+                        continue
+                    row["css"] = _classify_single(
+                        float(row.get("mu_per_hr", 0)),
+                        float(row.get("yield_per_kmu", 0)),
+                    )
+                    rows.append(row)
+                rows.sort(key=lambda r: -float(r.get("mu_per_hr", 0)))
+        except FrigateAPIError as exc:
+            error = f"Frigate API unreachable: {exc}"
+        except ValueError as exc:
+            error = f"date parse error: {exc}"
+
+    return templates.TemplateResponse(
+        request,
+        "motion.html",
+        {
+            "baseline": baseline,
+            "target": target,
+            "mode": mode,
+            "rows": rows,
+            "error": error,
+            "presets": presets,
+            "range_labels": range_labels,
+            "counts": {},  # header expects this; motion page doesn't need counts
+        },
+    )

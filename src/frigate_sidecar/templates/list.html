@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{% block title %}Frigate Triage{% endblock %}
+{% set active_page = 'triage' %}
+{% block title %}Triage · frigate-sidecar{% endblock %}
 
 {% block body %}
 {% set summary = events|length ~ ' matching event' ~ ('s' if events|length != 1 else '') %}

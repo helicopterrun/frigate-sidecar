@@ -5,7 +5,28 @@ header h1 { margin: 0; font-size: 16px; font-weight: 600; }
 header .stats { font-size: 12px; color: #8a92a6; }
 header .session { margin-left: auto; font-size: 12px; }
 header input[type=text] { background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+header .pages { display: flex; gap: 4px; }
+header .page-link { display: inline-block; padding: 4px 10px; font-size: 12px; color: #8a92a6; text-decoration: none; border-radius: 4px; }
+header .page-link:hover { background: #1f2937; color: #e6e6e6; }
+header .page-link.active { background: #1f2937; color: #e6e6e6; box-shadow: inset 0 -2px 0 #3b82f6; }
 main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+
+/* Motion page */
+.motion-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+.motion-table th { text-align: left; padding: 8px 10px; background: #161922; color: #8a92a6; border-bottom: 1px solid #2a2f3a; font-weight: 600; }
+.motion-table td { padding: 8px 10px; border-bottom: 1px solid #1a1d26; font-variant-numeric: tabular-nums; }
+.motion-table tr:hover td { background: #161922; }
+.cell-class { display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; text-transform: lowercase; }
+.cell-class.muted { background: #1f2937; color: #8a92a6; }
+.cell-class.ok    { background: #14532d; color: #bbf7d0; }
+.cell-class.warn  { background: #78350f; color: #fde68a; }
+.cell-class.noise { background: #7f1d1d; color: #fecaca; }
+.cell-class.mixed { background: #5b21b6; color: #ddd6fe; }
+.presets { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; font-size: 12px; }
+.presets .preset-label { color: #6b7280; }
+.presets .preset { background: #1f2937; color: #e6e6e6; border: 0; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; }
+.presets .preset:hover { background: #374151; }
+code { background: #0f1115; padding: 2px 6px; border-radius: 3px; font-family: ui-monospace, monospace; font-size: 12px; color: #e6e6e6; }
 
 .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
 .filters label { font-size: 12px; color: #8a92a6; display: flex; flex-direction: column; gap: 2px; }

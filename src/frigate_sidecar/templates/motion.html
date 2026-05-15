@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% set active_page = 'motion' %}
+{% block title %}Motion · frigate-sidecar{% endblock %}
+
+{% block body %}
+{% include "_header.html" %}
+<main>
+  <form class="filters motion-form" method="get" action="/motion">
+    <label>baseline range (blank = single-window view)
+      <input type="text" name="baseline" value="{{ baseline }}"
+             placeholder="YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD" style="width:280px">
+    </label>
+    <label>target range
+      <input type="text" name="target" value="{{ target }}"
+             placeholder="today, yesterday, or YYYY-MM-DD[..YYYY-MM-DD]" style="width:280px">
+    </label>
+    <button type="submit">compute</button>
+  </form>
+
+  <div class="presets">
+    <span class="preset-label">presets:</span>
+    <button type="button" class="preset" data-base=""                          data-tgt="today">today only</button>
+    <button type="button" class="preset" data-base=""                          data-tgt="yesterday">yesterday only</button>
+    <button type="button" class="preset" data-base="{{ presets.today_vs_prior3[0] }}"   data-tgt="{{ presets.today_vs_prior3[1] }}">today vs prior 3</button>
+    <button type="button" class="preset" data-base="{{ presets.last7_vs_prior7[0] }}"   data-tgt="{{ presets.last7_vs_prior7[1] }}">last 7d vs prior 7d</button>
+  </div>
+
+  {% if error %}
+    <div class="empty" style="color:#f87171">{{ error }}</div>
+  {% elif mode == 'compare' %}
+    <h2 style="margin-top:24px;font-size:14px;color:#8a92a6">
+      baseline <code>{{ range_labels.baseline }}</code> vs target <code>{{ range_labels.target }}</code>
+    </h2>
+    {% if rows %}
+    <table class="motion-table">
+      <thead><tr>
+        <th>camera</th><th>class</th>
+        <th>base mu/hr</th><th>tgt mu/hr</th><th>ratio</th>
+        <th>base yield/kmu</th><th>tgt yield/kmu</th>
+        <th>thr</th><th>suggestion</th>
+      </tr></thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td>{{ r.camera }}</td>
+          <td><span class="cell-class {{ r.css }}">{{ r.class }}</span></td>
+          <td>{{ r.base_mu_per_hr }}</td>
+          <td>{{ r.tgt_mu_per_hr }}</td>
+          <td>{{ r.ratio }}{% if r.ratio is number %}x{% endif %}</td>
+          <td>{{ r.base_yield_per_kmu }}</td>
+          <td>{{ r.tgt_yield_per_kmu }}</td>
+          <td>{{ r.motion_threshold or '—' }}</td>
+          <td>{{ r.suggestion }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div class="empty">No qualifying rows for that window.</div>
+    {% endif %}
+  {% elif mode == 'single' %}
+    <h2 style="margin-top:24px;font-size:14px;color:#8a92a6">
+      single-window view · since <code>{{ range_labels.target }}</code>
+    </h2>
+    {% if rows %}
+    <table class="motion-table">
+      <thead><tr>
+        <th>camera</th><th>class</th>
+        <th>mu/hr</th><th>events/hr</th><th>yield/kmu</th>
+        <th>obs det.fps</th><th>cfg det.fps</th>
+        <th>thr</th><th>contour</th><th>hrs</th>
+      </tr></thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td>{{ r.camera }}</td>
+          <td><span class="cell-class {{ r.css }}">{{ r['class'] }}</span></td>
+          <td>{{ r.mu_per_hr }}</td>
+          <td>{{ r.events_per_hr }}</td>
+          <td>{{ r.yield_per_kmu }}</td>
+          <td>{{ r.obs_det_fps }}</td>
+          <td>{{ r.cfg_det_fps }}</td>
+          <td>{{ r.motion_threshold or '—' }}</td>
+          <td>{{ r.motion_contour_area or '—' }}</td>
+          <td>{{ r.hours_with_data }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div class="empty">No data for that window.</div>
+    {% endif %}
+  {% else %}
+    <div class="empty">Set a target range above or pick a preset.</div>
+  {% endif %}
+
+  <p class="help" style="margin-top:24px">
+    <strong>mu/hr</strong> = motion-units per recorded hour. Per-camera relative; not comparable
+    across cameras (different masks/FOVs). <strong>yield/kmu</strong> = surviving tracked events
+    per 1,000 motion-units. Low yield + high mu/hr = motion firing on stuff the object detector
+    rejects.
+  </p>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/motion.js"></script>
+{% endblock %}
