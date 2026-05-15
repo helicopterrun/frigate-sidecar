@@ -23,6 +23,8 @@ CREATE TABLE event (
     has_snapshot INTEGER NOT NULL DEFAULT 0,
     score        REAL,
     top_score    REAL,
+    area         REAL,
+    ratio        REAL,
     zones        TEXT,
     data         TEXT,
     false_positive INTEGER NOT NULL DEFAULT 0
@@ -52,9 +54,12 @@ def frigate_db_path(tmp_path: Path) -> Path:
         )
         conn.execute(
             "INSERT INTO event (id, camera, label, start_time, end_time, score, top_score, "
-            "zones, data, has_clip, has_snapshot) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (eid, cam, label, now + dt, now + dt + 30, score, top, zones, data, has_clip, has_snap),
+            "area, ratio, zones, data, has_clip, has_snapshot) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                eid, cam, label, now + dt, now + dt + 30, score, top,
+                5000.0, 1.5, zones, data, has_clip, has_snap,
+            ),
         )
     conn.commit()
     conn.close()
