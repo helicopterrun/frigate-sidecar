@@ -16,6 +16,13 @@ Runs as a single Docker container next to Frigate, bind-mounting Frigate's
 
 ## Setup
 
+Two supported deployment shapes. The Docker compose file is the canonical
+"spin it up" path; the systemd unit is useful when Docker isn't an option
+(e.g. running inside an LXC where Docker can't load AppArmor profiles
+during image build).
+
+### Option A — Docker compose (recommended)
+
 1. Clone the repo:
    ```sh
    git clone https://github.com/helicopterrun/frigate-sidecar
@@ -40,6 +47,21 @@ Runs as a single Docker container next to Frigate, bind-mounting Frigate's
    ```
 
 5. Open `http://<host>:5001`.
+
+### Option B — Systemd (host process)
+
+For environments where Docker image builds fail (e.g. unprivileged LXCs):
+
+```sh
+pip install .                 # or pipx / venv as you prefer
+sudo mkdir -p /opt/frigate-sidecar/data /etc/frigate-sidecar
+sudo cp config/sidecar.example.yml /etc/frigate-sidecar/sidecar.yml
+sudo $EDITOR /etc/frigate-sidecar/sidecar.yml
+# adjust sidecar.db_path to /opt/frigate-sidecar/data/frigate-sidecar.db
+sudo cp contrib/frigate-sidecar.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now frigate-sidecar.service
+```
 
 ## CLI
 

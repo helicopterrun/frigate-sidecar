@@ -1,0 +1,16 @@
+[Unit]
+Description=Frigate Sidecar (triage UI + analysis)
+Documentation=https://github.com/helicopterrun/frigate-sidecar
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/frigate-sidecar
+Environment="FRIGATE_SIDECAR_CONFIG=/opt/frigate-sidecar/config/sidecar.yml"
+ExecStart=/usr/bin/python3 -m frigate_sidecar serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
