@@ -112,7 +112,9 @@ a { color: #3b82f6; }
 .zones-overlay polygon.active { fill-opacity: 0.30; stroke-opacity: 1; stroke-width: 2.5; }
 .zones-overlay polygon.full-frame { fill-opacity: 0; stroke-opacity: 0.5; stroke-dasharray: 6 4; }
 .zones-overlay polygon.full-frame.active { fill-opacity: 0; stroke-opacity: 1; stroke-width: 3; stroke-dasharray: 6 4; }
-.detail-media.zones-hide .zones-overlay { display: none; }
+.zones-overlay polygon.tracked-box { fill: none; stroke-width: 2; stroke-opacity: 0.95; vector-effect: non-scaling-stroke; }
+.detail-media.zones-hide .zones-overlay polygon:not(.tracked-box) { display: none; }
+.detail-media.box-hide .zones-overlay polygon.tracked-box { display: none; }
 .zone-toggle { margin-left: auto; padding: 0 12px; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #8a92a6; cursor: pointer; user-select: none; }
 .zone-toggle input { margin: 0; cursor: pointer; }
 .zone-legend { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 12px; background: #0f1115; border-top: 1px solid #2a2f3a; font-size: 11px; }
