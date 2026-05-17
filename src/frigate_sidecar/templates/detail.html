@@ -80,12 +80,24 @@
     {% endif %}
 
     <div class="detail-side">
+      {# Frigate+ submission is gated client-side on these conditions, matched
+         to the Frigate API's own checks. Server re-validates before submitting. #}
+      {% set plus_submittable = plus_enabled and event.has_snapshot and event.box and event.end_time %}
+      {% set plus_state =
+          'tp' if event.plus_id and not event.plus_false_positive
+          else 'fp' if event.plus_false_positive
+          else '' %}
       <div class="panel">
         <h2>Triage
           {% if event.triage_label %}
             <span class="badge {{ event.triage_label }}">{{ event.triage_label }}</span>
           {% else %}
             <span class="badge untriaged">untriaged</span>
+          {% endif %}
+          {% if plus_state == 'tp' %}
+            <span class="badge plus-sent" title="submitted to Frigate+ as true positive">+TP</span>
+          {% elif plus_state == 'fp' %}
+            <span class="badge plus-sent" title="submitted to Frigate+ as false positive">+FP</span>
           {% endif %}
         </h2>
         <div class="label-buttons">
@@ -96,11 +108,26 @@
         <div style="margin-top:8px">
           <button class="btn-clear" data-clear style="width:100%;padding:6px;border:0;border-radius:4px;cursor:pointer">clear (c)</button>
         </div>
+        {% if plus_enabled %}
+        <div class="plus-toggle" style="margin-top:10px;font-size:12px">
+          <label title="Also submit TP/FP to Frigate+ when labeling">
+            <input type="checkbox" id="plus-submit"
+                   {% if not plus_submittable %}disabled{% endif %}>
+            also submit to Frigate+ (<kbd>p</kbd>)
+          </label>
+          <div id="plus-status" class="plus-status" style="margin-top:4px;color:#888;min-height:1em"></div>
+          {% if not plus_submittable %}
+            <div class="plus-skip-reason" style="margin-top:2px;color:#a66;font-size:11px">
+              {% if not event.has_snapshot %}no snapshot — can't submit{% elif not event.box %}no bounding box — can't submit{% elif not event.end_time %}in-progress event{% endif %}
+            </div>
+          {% endif %}
+        </div>
+        {% endif %}
         <div style="margin-top:12px">
           <textarea id="note" class="note-input" rows="2" placeholder="optional note">{{ event.triage_note or '' }}</textarea>
         </div>
         <div class="help">
-          <kbd>t</kbd>/<kbd>f</kbd>/<kbd>s</kbd> label · <kbd>c</kbd> clear · <kbd>j</kbd>/<kbd>k</kbd> next/prev · <kbd>z</kbd> zones
+          <kbd>t</kbd>/<kbd>f</kbd>/<kbd>s</kbd> label · <kbd>c</kbd> clear · <kbd>j</kbd>/<kbd>k</kbd> next/prev · <kbd>z</kbd> zones{% if plus_enabled %} · <kbd>p</kbd> Plus{% endif %}
         </div>
       </div>
 

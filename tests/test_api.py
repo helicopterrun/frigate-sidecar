@@ -64,10 +64,27 @@ def test_label_round_trip(client: TestClient) -> None:
         json={"event_id": "e1", "label": "fp", "note": "porch shadow"},
     )
     assert r.status_code == 200
-    assert r.json() == {"ok": True}
+    body = r.json()
+    assert body["ok"] is True
+    # Default `submit_plus=False` means no Plus call was attempted.
+    assert body["plus"] == {"status": "not_requested"}
     # The list view filtered to fp should now include e1.
     r2 = client.get("/", params={"triage": "fp"})
     assert "e1" in r2.text
+
+
+def test_label_with_plus_disabled_skips(client: TestClient) -> None:
+    """If submit_plus=True but the app's plus_enabled is False, we return
+    a `skipped/plus_not_enabled` status without making any HTTP calls."""
+    r = client.post(
+        "/label",
+        json={"event_id": "e1", "label": "fp", "submit_plus": True},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["plus"]["status"] == "skipped"
+    assert body["plus"]["reason"] == "plus_not_enabled"
 
 
 def test_label_invalid(client: TestClient) -> None:

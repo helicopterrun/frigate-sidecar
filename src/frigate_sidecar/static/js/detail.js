@@ -11,15 +11,48 @@ const eventId = document.body.dataset.eventId;
 const prevUrl = document.body.dataset.prevUrl;
 const nextUrl = document.body.dataset.nextUrl;
 
+// Frigate+ submit toggle: persisted opt-in across pages. Defaults to off so
+// the very first triage click can't surprise-submit to Plus.
+const plusToggle = document.getElementById('plus-submit');
+const plusStatus = document.getElementById('plus-status');
+if (plusToggle && !plusToggle.disabled) {
+  const saved = localStorage.getItem('triage_plus_submit');
+  plusToggle.checked = saved === '1';
+  plusToggle.addEventListener('change', () => {
+    localStorage.setItem('triage_plus_submit', plusToggle.checked ? '1' : '0');
+  });
+}
+
+function setPlusStatus(cls, text) {
+  if (!plusStatus) return;
+  plusStatus.classList.remove('sent', 'skipped', 'error');
+  if (cls) plusStatus.classList.add(cls);
+  plusStatus.textContent = text || '';
+}
+
 async function applyLabel(label) {
   const note = document.getElementById('note').value;
   const session = sessionInput ? sessionInput.value : '';
+  const submitPlus = !!(plusToggle && plusToggle.checked && !plusToggle.disabled);
   const res = await fetch('/label', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({event_id: eventId, label, note, session})
+    body: JSON.stringify({event_id: eventId, label, note, session, submit_plus: submitPlus})
   });
   if (!res.ok) { alert('Save failed: ' + await res.text()); return; }
+  const result = await res.json();
+  const plus = result.plus || {status: 'not_requested'};
+
+  // On Plus error, stop and surface the message so the user can decide.
+  // On sent/skipped/not_requested, continue to the next event as before.
+  if (plus.status === 'error') {
+    setPlusStatus('error', 'Plus: ' + (plus.reason || 'submission failed'));
+    return;
+  }
+  if (plus.status === 'sent') {
+    // Brief flash before navigating away.
+    setPlusStatus('sent', 'Plus: sent (' + (plus.plus_id || '') + ')');
+  }
   if (nextUrl) { window.location = nextUrl; }
   else { window.location.reload(); }
 }
@@ -64,6 +97,11 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'j' || e.key === 'ArrowRight') { if (nextUrl) window.location = nextUrl; }
   else if (e.key === 'k' || e.key === 'ArrowLeft') { if (prevUrl) window.location = prevUrl; }
   else if (e.key === 'z' && zonesToggle) { zonesToggle.checked = !zonesToggle.checked; applyZoneToggle(); }
+  else if (e.key === 'p' && plusToggle && !plusToggle.disabled) {
+    plusToggle.checked = !plusToggle.checked;
+    localStorage.setItem('triage_plus_submit', plusToggle.checked ? '1' : '0');
+    setPlusStatus('skipped', 'Plus submit ' + (plusToggle.checked ? 'ON' : 'OFF'));
+  }
 });
 
 document.querySelectorAll('.detail-tabs button[data-tab]').forEach(b => {

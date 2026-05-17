@@ -27,7 +27,8 @@ CREATE TABLE event (
     ratio        REAL,
     zones        TEXT,
     data         TEXT,
-    false_positive INTEGER NOT NULL DEFAULT 0
+    false_positive INTEGER NOT NULL DEFAULT 0,
+    plus_id      TEXT
 );
 """
 

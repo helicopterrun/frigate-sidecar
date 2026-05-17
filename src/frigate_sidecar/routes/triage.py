@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from frigate_sidecar.config import Settings
 from frigate_sidecar.db import open_joined
+from frigate_sidecar.frigate_api import FrigateClient, FrigatePlusError
 from frigate_sidecar.triage.recorder import (
     AlreadyLabeledError,
     EventNotFoundError,
@@ -84,6 +85,7 @@ def _query_events(
             e.id, e.camera, e.label, e.start_time, e.end_time,
             e.zones, e.has_clip, e.has_snapshot, e.sub_label, e.data,
             e.top_score AS col_top_score, e.score AS col_score,
+            e.plus_id, e.false_positive,
             t.label AS triage_label, t.note AS triage_note,
             t.labeled_at AS triage_at, t.session AS triage_session
         FROM event e
@@ -119,6 +121,8 @@ def _query_events(
                 "box": d.get("box"),
                 "region": d.get("region"),
                 "max_severity": d.get("max_severity"),
+                "plus_id": r["plus_id"],
+                "plus_false_positive": bool(r["false_positive"]),
                 "triage_label": r["triage_label"],
                 "triage_note": r["triage_note"],
                 "triage_at": r["triage_at"],
@@ -163,6 +167,8 @@ def _get_event_full(
         "box": d.get("box"),
         "region": d.get("region"),
         "max_severity": d.get("max_severity"),
+        "plus_id": r["plus_id"],
+        "plus_false_positive": bool(r["false_positive"]),
         "triage_label": r["triage_label"],
         "triage_note": r["triage_note"],
         "triage_at": r["triage_at"],
@@ -336,6 +342,7 @@ def detail_view(
             "position": position,
             "counts": opts["counts"],
             "frigate_base": s.frigate.base_url,
+            "plus_enabled": bool(getattr(request.app.state, "plus_enabled", False)),
             "zone_polygons": polygons,
             "zone_legend": zone_legend,
             "filters_qs": filters_qs,
@@ -354,10 +361,55 @@ class LabelPayload(BaseModel):
     label: str
     note: str | None = None
     session: str | None = None
+    submit_plus: bool = False
 
 
 class ClearPayload(BaseModel):
     event_id: str
+
+
+def _maybe_submit_plus(
+    *, request: Request, event_id: str, label: str
+) -> dict[str, Any]:
+    """Submit to Frigate+ when the user labels TP/FP and Plus is configured.
+
+    Returns a small status dict for the UI: status in {"sent", "skipped",
+    "error"} plus an optional reason/plus_id. Never raises — Plus failures
+    must not roll back the triage label write.
+    """
+    if not getattr(request.app.state, "plus_enabled", False):
+        return {"status": "skipped", "reason": "plus_not_enabled"}
+    if label not in ("tp", "fp"):
+        return {"status": "skipped", "reason": "label_not_submittable"}
+
+    # Pull the event row to gate on the same preconditions Frigate's own
+    # endpoint checks — saves a round-trip when we know it'll 400.
+    s = _settings(request)
+    ev = _get_event_full(
+        frigate_db=s.frigate.db_path, sidecar_db=s.sidecar.db_path, event_id=event_id,
+    )
+    if not ev:
+        return {"status": "error", "reason": "event_not_found"}
+    if not ev["has_snapshot"]:
+        return {"status": "skipped", "reason": "no_snapshot"}
+    if ev["box"] is None:
+        return {"status": "skipped", "reason": "no_box"}
+    if not ev["end_time"]:
+        return {"status": "skipped", "reason": "in_progress"}
+    if label == "tp" and ev["plus_id"]:
+        return {"status": "skipped", "reason": "already_submitted", "plus_id": ev["plus_id"]}
+    if label == "fp" and ev["plus_false_positive"]:
+        return {"status": "skipped", "reason": "already_submitted", "plus_id": ev["plus_id"]}
+
+    try:
+        with FrigateClient(s.frigate.base_url) as fc:
+            if label == "tp":
+                plus_id = fc.submit_plus(event_id, include_annotation=True)
+            else:
+                plus_id = fc.submit_false_positive(event_id)
+    except FrigatePlusError as exc:
+        return {"status": "error", "reason": str(exc), "status_code": exc.status_code}
+    return {"status": "sent", "plus_id": plus_id}
 
 
 @router.post("/label")
@@ -380,7 +432,13 @@ def post_label(payload: LabelPayload, request: Request) -> JSONResponse:
         raise HTTPException(status_code=404, detail="event not found") from exc
     except AlreadyLabeledError as exc:  # not reachable with force=True, kept for type-safety
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return JSONResponse({"ok": True})
+
+    plus_result: dict[str, Any] = {"status": "not_requested"}
+    if payload.submit_plus:
+        plus_result = _maybe_submit_plus(
+            request=request, event_id=payload.event_id, label=payload.label,
+        )
+    return JSONResponse({"ok": True, "plus": plus_result})
 
 
 @router.post("/clear-label")

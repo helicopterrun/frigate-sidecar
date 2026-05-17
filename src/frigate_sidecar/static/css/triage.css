@@ -64,6 +64,10 @@ code { background: #0f1115; padding: 2px 6px; border-radius: 3px; font-family: u
 .badge.fp { background: #991b1b; color: #fecaca; }
 .badge.skip { background: #374151; color: #d1d5db; }
 .badge.untriaged { background: transparent; color: #4a5160; }
+.badge.plus-sent { background: #1e40af; color: #bfdbfe; margin-left: 4px; }
+.plus-status.sent { color: #4ade80; }
+.plus-status.skipped { color: #888; }
+.plus-status.error { color: #f87171; }
 .empty { color: #6b7280; padding: 40px; text-align: center; }
 
 .detail-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
@@ -117,3 +121,46 @@ a { color: #3b82f6; }
 .zone-legend .zli .sw { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
 .zone-legend .zli.active .sw { box-shadow: 0 0 0 1.5px #fff; }
 .zone-legend .zli.empty { color: #4a5160; font-style: italic; }
+
+/* --- Mobile / narrow-window layout (phones in portrait) --- */
+@media (max-width: 720px) {
+  main { padding: 12px; }
+  header { padding: 10px 12px; gap: 10px; }
+  header h1 { font-size: 15px; }
+  /* Push session input back into the main row instead of margin-left:auto
+     so it doesn't get pinned to the right edge on a narrow header. */
+  header .session { margin-left: 0; width: 100%; }
+  header .session input[type=text] { width: 100%; }
+
+  /* Stack the detail page: media on top, controls below. */
+  .detail-grid { grid-template-columns: 1fr; gap: 12px; }
+  .detail-side { gap: 12px; }
+  .panel { padding: 12px; }
+
+  /* Bigger tap targets for the triage buttons. */
+  .label-buttons button { padding: 14px 10px; font-size: 15px; min-height: 48px; }
+  .btn-clear { padding: 12px; min-height: 44px; }
+  .nav a, .nav button { padding: 12px 8px; min-height: 44px; font-size: 14px; }
+
+  /* Plus toggle: bigger checkbox + label so it's easy to tap. */
+  .plus-toggle label { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 14px; }
+  .plus-toggle input[type=checkbox] { width: 20px; height: 20px; }
+
+  /* Hide keyboard-only hints on touch screens — they aren't actionable. */
+  .help { display: none; }
+  .label-buttons button { /* Drop the "(t)"/"(f)"/"(s)" hints visually too. */ }
+
+  /* List view: card grid already auto-fills; just tighten the per-tile size. */
+  .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .card .meta { font-size: 11px; padding: 6px 8px; }
+
+  /* Filters wrap into a more readable column-ish layout. */
+  .filters { gap: 6px; }
+  .filters label { font-size: 11px; }
+  .filters select, .filters input { font-size: 13px; padding: 6px 8px; }
+
+  /* kv table: stack dt/dd so long values don't overflow. */
+  .kv { grid-template-columns: 1fr; gap: 2px 0; }
+  .kv dt { font-size: 11px; margin-top: 6px; }
+  .kv dd { font-size: 13px; }
+}
