@@ -75,17 +75,17 @@ document.querySelectorAll('[data-clear]').forEach(b => {
 });
 
 const zonesToggle = document.getElementById('zones-on');
-const boxToggle = document.getElementById('box-on');
+const allZonesToggle = document.getElementById('all-zones-on');
 const detailMedia = document.querySelector('.detail-media');
 function applyZoneToggle() {
   if (!zonesToggle || !detailMedia) return;
   detailMedia.classList.toggle('zones-hide', !zonesToggle.checked);
   localStorage.setItem('triage_zones_on', zonesToggle.checked ? '1' : '0');
 }
-function applyBoxToggle() {
-  if (!boxToggle || !detailMedia) return;
-  detailMedia.classList.toggle('box-hide', !boxToggle.checked);
-  localStorage.setItem('triage_box_on', boxToggle.checked ? '1' : '0');
+function applyAllZonesToggle() {
+  if (!allZonesToggle || !detailMedia) return;
+  detailMedia.classList.toggle('show-all-zones', allZonesToggle.checked);
+  localStorage.setItem('triage_all_zones_on', allZonesToggle.checked ? '1' : '0');
 }
 if (zonesToggle && detailMedia) {
   const saved = localStorage.getItem('triage_zones_on');
@@ -93,11 +93,11 @@ if (zonesToggle && detailMedia) {
   applyZoneToggle();
   zonesToggle.addEventListener('change', applyZoneToggle);
 }
-if (boxToggle && detailMedia) {
-  const saved = localStorage.getItem('triage_box_on');
-  if (saved === '0') boxToggle.checked = false;
-  applyBoxToggle();
-  boxToggle.addEventListener('change', applyBoxToggle);
+if (allZonesToggle && detailMedia) {
+  const saved = localStorage.getItem('triage_all_zones_on');
+  if (saved === '1') allZonesToggle.checked = true;
+  applyAllZonesToggle();
+  allZonesToggle.addEventListener('change', applyAllZonesToggle);
 }
 
 document.addEventListener('keydown', (e) => {
@@ -109,7 +109,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'j' || e.key === 'ArrowRight') { if (nextUrl) window.location = nextUrl; }
   else if (e.key === 'k' || e.key === 'ArrowLeft') { if (prevUrl) window.location = prevUrl; }
   else if (e.key === 'z' && zonesToggle) { zonesToggle.checked = !zonesToggle.checked; applyZoneToggle(); }
-  else if (e.key === 'b' && boxToggle) { boxToggle.checked = !boxToggle.checked; applyBoxToggle(); }
+  else if (e.key === 'a' && allZonesToggle) { allZonesToggle.checked = !allZonesToggle.checked; applyAllZonesToggle(); }
   else if (e.key === 'p' && plusToggle && !plusToggle.disabled) {
     plusToggle.checked = !plusToggle.checked;
     localStorage.setItem('triage_plus_submit', plusToggle.checked ? '1' : '0');

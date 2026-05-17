@@ -26,7 +26,11 @@ from frigate_sidecar.triage.recorder import (
 from frigate_sidecar.triage.recorder import (
     record as recorder_record,
 )
-from frigate_sidecar.zones import is_full_frame, load_camera_zones
+from frigate_sidecar.zones import (
+    is_full_frame,
+    load_camera_zones,
+    zones_containing_box,
+)
 
 router = APIRouter(tags=["triage"])
 
@@ -227,13 +231,18 @@ def _format_duration(start: float | None, end: float | None) -> str:
 
 
 def _zone_overlay(
-    settings: Settings, camera: str, active: list[str]
+    settings: Settings, camera: str, box: list[float] | None, cumulative: list[str]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return (polygons, legend_items) for the given camera."""
+    """Return (polygons, legend_items) for the given camera.
+
+    A zone is "active" if the snapshot bbox's bottom-center point falls inside
+    it (Frigate's own zone-eval semantic). Falls back to the cumulative
+    event.zones list when the event has no box.
+    """
     zones = load_camera_zones(settings.frigate.config_path).get(camera, [])
     if not zones:
         return [], []
-    active_set = set(active or [])
+    active_set = zones_containing_box(zones, box) or set(cumulative or [])
     polygons: list[dict[str, Any]] = []
     legend: list[dict[str, Any]] = []
     for z in zones:
@@ -327,7 +336,7 @@ def detail_view(
         position = (i + 1, len(ids))
 
     opts = _get_filter_options(s.frigate.db_path, s.sidecar.db_path)
-    polygons, zone_legend = _zone_overlay(s, ev["camera"], ev["zones"])
+    polygons, zone_legend = _zone_overlay(s, ev["camera"], ev["box"], ev["zones"])
     filters_qs = {
         "camera": camera or "", "label": label or "", "triage": triage,
         "days": days, "limit": limit, "order": order,

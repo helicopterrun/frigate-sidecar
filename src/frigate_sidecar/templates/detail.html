@@ -38,14 +38,12 @@
         {% if clip_url %}<button{% if not snapshot_url %} class="active"{% endif %} data-tab="clip">clip</button>{% endif %}
         {% if zone_polygons %}
           <label class="zone-toggle"><input type="checkbox" id="zones-on" checked> zones (z)</label>
-        {% endif %}
-        {% if event.box and event.box|length == 4 %}
-          <label class="zone-toggle"><input type="checkbox" id="box-on" checked> box (b)</label>
+          <label class="zone-toggle"><input type="checkbox" id="all-zones-on"> all zones (a)</label>
         {% endif %}
       </div>
 
       {% set overlay -%}
-        {% if zone_polygons or (event.box and event.box|length == 4) %}
+        {% if zone_polygons %}
         <svg class="zones-overlay" viewBox="0 0 1 1" preserveAspectRatio="none">
           {%- for p in zone_polygons -%}
             <polygon class="{% if p.active %}active {% endif %}{% if p.full_frame %}full-frame{% endif %}"
@@ -53,15 +51,6 @@
               <title>{{ p.name }}</title>
             </polygon>
           {%- endfor -%}
-          {%- if event.box and event.box|length == 4 -%}
-            {%- set bx1 = event.box[0] -%}{%- set by1 = event.box[1] -%}
-            {%- set bx2 = event.box[2] -%}{%- set by2 = event.box[3] -%}
-            <polygon class="tracked-box"
-                     points="{{ '%.4f,%.4f %.4f,%.4f %.4f,%.4f %.4f,%.4f'|format(bx1, by1, bx2, by1, bx2, by2, bx1, by2) }}"
-                     fill="none" stroke="#ffd040">
-              <title>{{ event.label }}{% if event.score %} {{ '%.2f'|format(event.score) }}{% endif %}</title>
-            </polygon>
-          {%- endif -%}
         </svg>
         {% endif %}
       {%- endset %}
@@ -139,7 +128,7 @@
           <textarea id="note" class="note-input" rows="2" placeholder="optional note">{{ event.triage_note or '' }}</textarea>
         </div>
         <div class="help">
-          <kbd>t</kbd>/<kbd>f</kbd>/<kbd>s</kbd> label · <kbd>c</kbd> clear · <kbd>j</kbd>/<kbd>k</kbd> next/prev · <kbd>z</kbd> zones · <kbd>b</kbd> box{% if plus_enabled %} · <kbd>p</kbd> Plus{% endif %}
+          <kbd>t</kbd>/<kbd>f</kbd>/<kbd>s</kbd> label · <kbd>c</kbd> clear · <kbd>j</kbd>/<kbd>k</kbd> next/prev · <kbd>z</kbd> zones · <kbd>a</kbd> all-zones{% if plus_enabled %} · <kbd>p</kbd> Plus{% endif %}
         </div>
       </div>
 
