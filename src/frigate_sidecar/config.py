@@ -39,6 +39,25 @@ class SidecarSection(BaseModel):
     bind_port: int = 5001
 
 
+class FaceSection(BaseModel):
+    """Face-training-image quality curation (B1).
+
+    Scores Frigate's auto-saved face crops and promotes the good ones into the
+    named Face Library via Frigate's API. `auto_promote` starts off so the
+    first runs are observe-only — flip it on after reviewing the quality
+    histogram.
+    """
+
+    enabled: bool = False
+    # Frigate's clips/faces dir as seen from the sidecar host (LXC 105), not the
+    # container path. Holds the `train/` attempt pool + per-person library dirs.
+    clips_faces_dir: Path = Path("/mnt/frigate-storage/recordings/clips/faces")
+    auto_promote: bool = False
+    quality_threshold: float = 0.0  # min combined quality_score to auto-promote
+    min_recog_score: float = 0.9  # only auto-promote crops Frigate recognized this well
+    per_person_cap: int = 40  # don't let auto-promote overgrow one person's library
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="FRIGATE_SIDECAR_",
@@ -48,6 +67,7 @@ class Settings(BaseSettings):
 
     frigate: FrigateSection = Field(default_factory=FrigateSection)
     sidecar: SidecarSection = Field(default_factory=SidecarSection)
+    face: FaceSection = Field(default_factory=FaceSection)
     log_level: str = "INFO"
 
 

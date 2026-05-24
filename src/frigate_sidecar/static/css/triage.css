@@ -168,3 +168,21 @@ a { color: #3b82f6; }
   .kv dt { font-size: 11px; margin-top: 6px; }
   .kv dd { font-size: 13px; }
 }
+
+/* ----- Faces curation page ----- */
+.faces-bar { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+.faces-bar button { background: #3b82f6; color: white; border: 0; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.faces-bar .mode { font-size: 12px; color: #8a92a6; }
+.faces-bar .mode b { color: #e6e6e6; }
+.spark { display: inline-flex; align-items: flex-end; gap: 2px; height: 28px; }
+.spark span { width: 8px; background: #3b82f6; border-radius: 1px 1px 0 0; }
+.face-card .thumb { aspect-ratio: 1/1; object-fit: contain; image-rendering: auto; }
+.face-card .meta .q { color: #34d399; font-variant-numeric: tabular-nums; font-weight: 600; }
+.face-card .meta .raw { color: #6b7280; font-size: 11px; }
+.face-card .badge.recognized { background: #1e40af; color: #bfdbfe; }
+.face-card .badge.unknown { background: #374151; color: #9ca3af; }
+.face-controls { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid #2a2f3a; }
+.face-controls input { flex: 1; min-width: 0; background: #0a0c10; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 4px; padding: 4px 6px; font-size: 12px; }
+.face-controls button { border: 0; border-radius: 4px; padding: 4px 10px; font-size: 12px; cursor: pointer; color: white; }
+.face-controls button.promote { background: #166534; }
+.face-controls button.discard { background: #991b1b; }

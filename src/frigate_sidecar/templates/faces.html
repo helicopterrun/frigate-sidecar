@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% set active_page = 'faces' %}
+{% block title %}Faces · frigate-sidecar{% endblock %}
+
+{% block body %}
+{% set summary = crops|length ~ ' pending crop' ~ ('s' if crops|length != 1 else '') %}
+{% include "_header.html" %}
+<main>
+  <div class="faces-bar">
+    <button type="button" id="rescan">Rescan train/</button>
+    <span class="mode">
+      auto-promote:
+      <b>{{ 'ON' if auto_promote else 'OFF (observe-only)' }}</b>
+      · threshold <b>{{ '%.2f'|format(quality_threshold) }}</b>
+    </span>
+    <span class="mode">
+      quality: min <b>{{ '%.2f'|format(hist.quality_min) if hist.quality_min is not none else '—' }}</b>
+      · median <b>{{ '%.2f'|format(hist.quality_median) if hist.quality_median is not none else '—' }}</b>
+      · max <b>{{ '%.2f'|format(hist.quality_max) if hist.quality_max is not none else '—' }}</b>
+    </span>
+    {% set hmax = (hist.histogram|max) or 1 %}
+    <span class="spark" title="quality_score distribution (0..1)">
+      {% for c in hist.histogram %}
+        <span style="height: {{ (4 + (c / hmax) * 24)|round|int }}px" title="{{ c }}"></span>
+      {% endfor %}
+    </span>
+    <span class="mode">
+      {{ hist.by_recognition.recognized }} recognized · {{ hist.by_recognition.unknown }} unknown
+    </span>
+  </div>
+
+  <datalist id="library-names">
+    {% for lib in libraries %}<option value="{{ lib }}"></option>{% endfor %}
+  </datalist>
+
+  {% if crops %}
+  <div class="grid">
+    {% for c in crops %}
+    <div class="card face-card" data-filename="{{ c.filename }}">
+      <img class="thumb" src="/faces/crop/{{ c.filename }}" alt="" loading="lazy">
+      <div class="meta">
+        <div class="row">
+          {% if c.is_recognized %}
+            <span class="badge recognized">{{ c.recognized_name }}</span>
+            <span class="score">{{ '%.2f'|format(c.recog_score) }}</span>
+          {% else %}
+            <span class="badge unknown">unknown</span>
+            <span class="score">—</span>
+          {% endif %}
+        </div>
+        <div class="row">
+          <span class="q">q {{ '%.3f'|format(c.quality_score) }}</span>
+          <span class="raw">{{ c.sharpness|round|int }} sharp · {{ c.area_px }}px</span>
+        </div>
+      </div>
+      <div class="face-controls">
+        <input type="text" class="name" list="library-names" placeholder="name"
+               value="{{ c.suggested_name }}">
+        <button type="button" class="promote">promote</button>
+        <button type="button" class="discard">discard</button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">No pending face crops. Run a scan, or everything's been triaged.</div>
+  {% endif %}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/faces.js"></script>
+{% endblock %}

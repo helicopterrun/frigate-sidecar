@@ -1,0 +1,11 @@
+[Unit]
+Description=Frigate Sidecar — face-crop quality scan (oneshot)
+Documentation=https://github.com/helicopterrun/frigate-sidecar
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/frigate-sidecar
+Environment="FRIGATE_SIDECAR_CONFIG=/opt/frigate-sidecar/config/sidecar.yml"
+ExecStart=/usr/bin/python3 -m frigate_sidecar faces scan

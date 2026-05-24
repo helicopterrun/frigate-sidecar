@@ -60,6 +60,36 @@ class FrigateClient:
     def recordings_summary(self, camera: str) -> list[dict[str, Any]]:
         return self._get_json(f"/api/{camera}/recordings/summary")
 
+    def get_faces(self) -> dict[str, list[str]]:
+        """Return Frigate's registered faces: {name: [filenames], 'train': [...]}.
+
+        The `train` key is the rolling pool of unpromoted recognition attempts;
+        every other key is a registered person's library directory.
+        """
+        data = self._get_json("/api/faces")
+        return data if isinstance(data, dict) else {}
+
+    def train_face(self, name: str, training_file: str) -> str:
+        """Promote a `train/` crop into a named library via Frigate's API.
+
+        Calls POST /api/faces/train/{name}/classify, which `shutil.move`s the
+        crop out of train/ into the {name}/ dir and clears the classifier so the
+        new image is picked up. Raises FrigateAPIError on any non-success.
+        """
+        url = f"{self.base_url}/api/faces/train/{name}/classify"
+        try:
+            r = self._client.post(url, json={"training_file": training_file})
+        except httpx.HTTPError as exc:
+            raise FrigateAPIError(f"POST {url}: {exc}") from exc
+        try:
+            payload = r.json()
+        except ValueError:
+            payload = {}
+        if r.status_code == 200 and payload.get("success", True):
+            return str(payload.get("message") or "ok")
+        msg = payload.get("message") or f"HTTP {r.status_code}"
+        raise FrigateAPIError(f"train_face({name}, {training_file}): {msg}")
+
     def plus_enabled(self) -> bool:
         """Best-effort: returns True if Frigate reports a configured Plus API key.
 

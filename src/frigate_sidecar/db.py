@@ -27,6 +27,23 @@ CREATE TABLE IF NOT EXISTS triage_labels (
     session    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_triage_label ON triage_labels(label);
+
+CREATE TABLE IF NOT EXISTS face_attempts (
+    filename        TEXT PRIMARY KEY,
+    event_id        TEXT,
+    frame_ts        REAL,
+    recognized_name TEXT,
+    recog_score     REAL,
+    sharpness       REAL,
+    area_px         INTEGER,
+    quality_score   REAL,
+    decision        TEXT,
+    assigned_name   TEXT,
+    scored_at       TEXT,
+    decided_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_face_decision ON face_attempts(decision);
+CREATE INDEX IF NOT EXISTS idx_face_quality ON face_attempts(quality_score);
 """
 
 

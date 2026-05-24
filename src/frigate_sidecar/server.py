@@ -12,6 +12,7 @@ from frigate_sidecar import __version__
 from frigate_sidecar.config import Settings, load_settings
 from frigate_sidecar.frigate_api import FrigateClient
 from frigate_sidecar.routes import analysis as analysis_routes
+from frigate_sidecar.routes import faces as faces_routes
 from frigate_sidecar.routes import fps_budget as fps_budget_routes
 from frigate_sidecar.routes import health as health_routes
 from frigate_sidecar.routes import motion as motion_routes
@@ -46,6 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(score_histogram_routes.router)
     app.include_router(fps_budget_routes.router)
     app.include_router(analysis_routes.router)
+    app.include_router(faces_routes.router)
     return app
 
 

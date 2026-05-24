@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Frigate Sidecar face-crop quality scan every 5 minutes
+Documentation=https://github.com/helicopterrun/frigate-sidecar
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
