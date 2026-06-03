@@ -127,14 +127,13 @@ _LENSES: list[dict[str, Any]] = [
         "id": "unifi-g4-doorbell",
         "label": "UniFi G4 Doorbell Pro",
         "type": "fixed",
-        "hfov": 100.0,
+        "hfov": 138.0,  # main camera: H 138°, V 114°, D 155°
     },
     {
         "id": "unifi-g4-instant",
         "label": "UniFi G4 Instant",
         "type": "fixed",
-        "hfov": 102.0,
-        "note": "Wide native lens; deployed `package` is aimed/cropped to a tighter cone (~55°).",
+        "hfov": 97.5,  # H 97.5°, V 79.4°, D 118.2°
     },
     {
         "id": "unifi-g5-flex",
@@ -183,10 +182,10 @@ _CAMERAS: list[dict[str, Any]] = [
      "mount_ft": 10, "faces": "SE", "face_rec": False},
     {"id": "garden", "lens": "dahua-5442-vf", "hfov": 80, "res": "sub-720",
      "mount_ft": 7, "faces": "SW", "face_rec": False},
-    {"id": "doorbell", "lens": "unifi-g4-doorbell", "hfov": 100, "res": "doorbell-720",
+    {"id": "doorbell", "lens": "unifi-g4-doorbell", "hfov": 138, "res": "doorbell-720",
      "mount_ft": 3, "faces": "S", "face_rec": True},
-    {"id": "package", "lens": "unifi-g4-instant", "hfov": 55, "res": "main-960",
-     "mount_ft": 3, "faces": "S", "face_rec": False, "note": "tight aimed cone"},
+    {"id": "package", "lens": "unifi-g4-instant", "hfov": 97.5, "res": "main-960",
+     "mount_ft": 3, "faces": "S", "face_rec": False},
     {"id": "alley-wide", "lens": "dahua-5442-vf", "hfov": 115, "res": "sub-720",
      "mount_ft": 45, "faces": "N", "face_rec": False, "note": "high mount, steep angle"},
     {"id": "stairway-tight", "lens": "dahua-5442-vf", "hfov": 90, "res": "sub-720",
