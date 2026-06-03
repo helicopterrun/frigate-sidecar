@@ -167,7 +167,9 @@
   // ---- top-down FOV wedge (adapted from the coverage-map renderer) ----
   function drawWedge(hfov, good, marg) {
     var CX = 180, CY = 330, RMAX = 285;
-    var scaleFt = Math.max(marg * 1.12, state.dist * 1.1, 8);
+    var rawScale = Math.max(marg * 1.12, state.dist * 1.1, 8);
+    var step = niceStep(rawScale);
+    var scaleFt = step * Math.ceil(rawScale / step); // round up to a clean ring step
     var rpx = function (ft) { return Math.min(ft / scaleFt, 1) * RMAX; };
     function edge(deg, r) {
       var a = deg * Math.PI / 180;
@@ -189,17 +191,21 @@
     parts.push('<path d="M ' + CX + ' ' + CY + ' L ' + f(lEdge.x) + ' ' + f(lEdge.y) +
       ' A ' + RMAX + ' ' + RMAX + ' 0 ' + large + ' 1 ' + f(rEdge.x) + ' ' + f(rEdge.y) +
       ' Z" fill="#3b82f6" fill-opacity="0.16" stroke="#3b82f6" stroke-opacity="0.5" stroke-width="1"/>');
-    // range rings (good = green, marginal = amber) within the wedge
-    if (rpx(marg) <= RMAX) {
-      parts.push(arc(-half, half, rpx(marg), "#fbbf24", "4 3", 1.5));
-      parts.push(txt(CX, CY - rpx(marg) - 4, "marginal " + marg.toFixed(0) + "ft", "#fbbf24", "middle"));
+    // neutral distance rings, labelled in feet (read distance straight off the wedge)
+    for (var rft = step; rft <= scaleFt + 0.01; rft += step) {
+      parts.push(arc(-half, half, rpx(rft), "#2a2f3a", null, 1));
+      parts.push(txt(CX - 5, CY - rpx(rft) + 3, rft + " ft", "#6b7280", "end"));
     }
-    parts.push(arc(-half, half, rpx(good), "#4ade80", null, 1.8));
-    parts.push(txt(CX, CY - rpx(good) - 4, "good " + good.toFixed(0) + "ft", "#4ade80", "middle"));
+    // object reach arcs (green = good, amber = marginal), labelled to the right
+    if (rpx(marg) <= RMAX) {
+      parts.push(arc(-half, half, rpx(marg), "#fbbf24", "4 3", 1.6));
+      parts.push(txt(CX + 6, CY - rpx(marg) + 3, "marg " + marg.toFixed(0) + " ft", "#fbbf24", "start"));
+    }
+    parts.push(arc(-half, half, rpx(good), "#4ade80", null, 2));
+    parts.push(txt(CX + 6, CY - rpx(good) + 3, "good " + good.toFixed(0) + " ft", "#4ade80", "start"));
     // current distance dot on the centerline
     if (rpx(state.dist) <= RMAX) {
       parts.push(dot(CX, CY - rpx(state.dist), "#e6e6e6"));
-      parts.push(txt(CX + 8, CY - rpx(state.dist) + 4, state.dist + "ft", "#e6e6e6", "start"));
     }
     // camera apex
     parts.push('<circle cx="' + CX + '" cy="' + CY + '" r="4" fill="#3b82f6" stroke="#fff" stroke-width="1.2"/>');
