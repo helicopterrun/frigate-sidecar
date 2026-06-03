@@ -95,7 +95,14 @@
     state.obj = { width_ft: o.width_ft, aspect: o.aspect, target_px: o.target_px };
     $("in-owidth").value = o.width_ft; $("in-oaspect").value = o.aspect; $("in-otarget").value = o.target_px;
   }
-  function setCls(el, cls) { el.className = "stat-value cell-class " + cls; }
+  function setCls(el, cls) { el.className = "cell-class " + cls; }
+
+  function setView(v) {
+    ["top", "side", "chart"].forEach(function (name) {
+      var el = document.querySelector(".view-" + name);
+      if (el) el.style.display = (v === "all" || v === name) ? "" : "none";
+    });
+  }
 
   // ---- main recompute ----
   function recompute() {
@@ -368,6 +375,14 @@
     });
   });
 
+  document.querySelectorAll(".vbtn").forEach(function (b) {
+    b.addEventListener("click", function () {
+      document.querySelectorAll(".vbtn").forEach(function (x) { x.classList.remove("active"); });
+      b.classList.add("active");
+      setView(b.dataset.view);
+    });
+  });
+
   // ---- init ----
-  syncLensControls(); loadObject(); recompute();
+  syncLensControls(); loadObject(); setView("top"); recompute();
 })();
