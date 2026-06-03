@@ -29,6 +29,7 @@
     dist: 20,
     heightFt: 10,
     tiltDeg: 12,
+    faceHeightFt: 5.4,
     obj: { width_ft: 0.5, aspect: 1.4, target_px: 80 },
   };
 
@@ -41,8 +42,8 @@
   function pxPerFt(dw, h, d) { return dw / (2 * d * Math.tan(rad(h) / 2)); }
   function objWidthPx(wf, dw, h, d) { return wf * pxPerFt(dw, h, d); }
   function maxDistFt(wf, dw, h, t) { return wf * dw / (2 * t * Math.tan(rad(h) / 2)); }
-  function bboxHeightPx(oh, ch, d, vf, dh) {
-    return (Math.atan(ch / d) - Math.atan((ch - oh) / d)) / rad(vf) * dh;
+  function bboxHeightPx(bottom, top, ch, d, vf, dh) {
+    return (Math.atan((ch - bottom) / d) - Math.atan((ch - top) / d)) / rad(vf) * dh;
   }
   function faceDep(ch, d, eye) { return deg(Math.atan((ch - eye) / d)); }
   function doriDistFt(dw, h, ppm) { return dw * FT_PER_M / (2 * ppm * Math.tan(rad(h) / 2)); }
@@ -110,6 +111,12 @@
     var hfov = effectiveHfov(), vfov = effectiveVfov();
     var detW = res().w, detH = res().h, o = state.obj;
     var objH = o.width_ft * o.aspect;
+    var faceH = state.faceHeightFt;
+    // subject vertical extent off the ground: a face sits at eye level,
+    // everything else stands on the ground.
+    var subjBot, subjTop;
+    if (state.objId === "face") { subjBot = Math.max(faceH - objH / 2, 0); subjTop = faceH + objH / 2; }
+    else { subjBot = 0; subjTop = objH; }
     var good = maxDistFt(o.width_ft, detW, hfov, o.target_px);
     var marg = maxDistFt(o.width_ft, detW, hfov, o.target_px / 2);
 
@@ -122,7 +129,7 @@
 
     // distance panel — width from HFOV, height geometric from VFOV + mount geometry
     var wpx = objWidthPx(o.width_ft, detW, hfov, state.dist);
-    var hpx = bboxHeightPx(objH, state.heightFt, state.dist, vfov, detH);
+    var hpx = bboxHeightPx(subjBot, subjTop, state.heightFt, state.dist, vfov, detH);
     var area = wpx * Math.max(hpx, 0);
     $("out-w").textContent = wpx.toFixed(0);
     $("out-h").textContent = hpx.toFixed(0);
@@ -139,17 +146,17 @@
     var cov = groundCoverage(state.heightFt, state.tiltDeg, vfov);
     $("out-ground").textContent = cov.near.toFixed(1) + " – " +
       (cov.far == null ? "horizon" : cov.far.toFixed(0) + " ft");
-    var eye = Math.max(objH - 0.4, 0.1);
+    var eye = faceH;
     var fd = faceDep(state.heightFt, state.dist, eye);
     var fa = $("out-faceang");
     fa.textContent = (fd >= 0 ? "↓" : "↑") + Math.abs(fd).toFixed(0) + "° " +
       (fd <= 12 ? "frontal" : fd <= 32 ? "oblique" : "top of head");
     setCls(fa, fd <= 12 ? "ok" : fd <= 32 ? "warn" : "noise");
-    // in-frame: feet within bottom ray, head within top ray
-    var feetDep = deg(Math.atan(state.heightFt / state.dist));
-    var headDep = deg(Math.atan((state.heightFt - objH) / state.dist));
-    var bot = state.tiltDeg + vfov / 2, top = state.tiltDeg - vfov / 2;
-    var feetIn = feetDep <= bot, headIn = headDep >= top;
+    // in-frame: subject's bottom within the cone's bottom ray, top within the top ray
+    var botDep = deg(Math.atan((state.heightFt - subjBot) / state.dist));
+    var topDep = deg(Math.atan((state.heightFt - subjTop) / state.dist));
+    var coneBot = state.tiltDeg + vfov / 2, coneTop = state.tiltDeg - vfov / 2;
+    var feetIn = botDep <= coneBot, headIn = topDep >= coneTop;
     var inf = $("out-inframe");
     if (feetIn && headIn) { inf.textContent = "fully"; setCls(inf, "ok"); }
     else if (!feetIn && !headIn) { inf.textContent = "out of frame"; setCls(inf, "noise"); }
@@ -157,7 +164,7 @@
 
     drawChart(hfov, detW, o, good, marg);
     drawWedge(hfov, good, marg);
-    drawElevation(vfov, objH, eye, cov, feetIn && headIn);
+    drawElevation(vfov, subjBot, subjTop, eye, cov, feetIn && headIn);
   }
 
   // ---- px-vs-distance chart (with DORI markers) ----
@@ -242,12 +249,12 @@
   }
 
   // ---- side elevation: VFOV cone -> ground, to-scale subject ----
-  function drawElevation(vfov, objH, eye, cov, inFrame) {
+  function drawElevation(vfov, subjBot, subjTop, eye, cov, inFrame) {
     var W = 560, H = 300, padL = 40, padR = 16, padT = 16, padB = 28;
     var plotW = W - padL - padR, plotH = H - padT - padB, gy = H - padB;
     var farFt = cov.far == null ? Math.max(state.dist * 1.4, 30) : cov.far;
     var maxX = Math.max(farFt, state.dist * 1.15, 12);
-    var maxY = Math.max(state.heightFt, objH, 6) * 1.12;
+    var maxY = Math.max(state.heightFt, subjTop, eye, 6) * 1.12;
     var s = Math.min(plotW / maxX, plotH / maxY); // equal scale -> true angles
     var sx = function (ft) { return padL + ft * s; };
     var sy = function (ft) { return gy - ft * s; };
@@ -292,16 +299,23 @@
     parts.push('<circle cx="' + f(camX) + '" cy="' + f(camY) + '" r="4" fill="#3b82f6" stroke="#fff" stroke-width="1.2"/>');
     parts.push(txt(camX + 6, camY - 4, state.heightFt + "ft", "#8a92a6", "start"));
 
-    // face line of sight
+    // face-height reference line across the plot
+    parts.push(line(padL, sy(eye), sx(maxX), sy(eye), "#a78bfa", "1 5"));
+    parts.push(txt(sx(maxX), sy(eye) - 3, "face " + eye.toFixed(1) + " ft", "#a78bfa", "end"));
     if (state.dist <= maxX) {
-      parts.push(line(camX, camY, sx(state.dist), sy(eye), "#a78bfa", "3 2"));
-      // subject: bbox rect (objH tall, width_ft wide) + head
       var col = inFrame ? "#4ade80" : "#f87171";
       var halfW = Math.max(state.obj.width_ft / 2, 0.2);
-      parts.push('<rect x="' + f(sx(state.dist - halfW)) + '" y="' + f(sy(objH)) + '" width="' +
-        f(2 * halfW * s) + '" height="' + f(objH * s) + '" fill="none" stroke="' + col + '" stroke-width="1.5"/>');
-      parts.push('<circle cx="' + f(sx(state.dist)) + '" cy="' + f(sy(objH - 0.3)) + '" r="' +
-        f(Math.max(0.3 * s, 2)) + '" fill="' + col + '"/>');
+      // subject bbox (subjBot..subjTop)
+      parts.push('<rect x="' + f(sx(state.dist - halfW)) + '" y="' + f(sy(subjTop)) + '" width="' +
+        f(2 * halfW * s) + '" height="' + f((subjTop - subjBot) * s) + '" fill="none" stroke="' + col + '" stroke-width="1.5"/>');
+      // camera -> face sightline, down-angle labelled (the point of this view)
+      var fdeg = deg(Math.atan((state.heightFt - eye) / state.dist));
+      parts.push(line(camX, camY, sx(state.dist), sy(eye), "#a78bfa", "3 2"));
+      var mx = (camX + sx(state.dist)) / 2, my = (camY + sy(eye)) / 2;
+      parts.push(txt(mx, my - 3, (fdeg >= 0 ? "↓" : "↑") + Math.abs(fdeg).toFixed(0) + "° to face", "#c4b5fd", "middle"));
+      // the face itself, at eye height
+      parts.push('<circle cx="' + f(sx(state.dist)) + '" cy="' + f(sy(eye)) + '" r="' +
+        f(Math.max(0.35 * s, 2.5)) + '" fill="' + col + '"/>');
       parts.push(txt(sx(state.dist), gy + 16, state.dist + "ft", "#e6e6e6", "middle"));
     }
     parts.push(txt(W - padR, padT + 4, state.tiltDeg + "° down · " + vfov.toFixed(0) + "° VFOV", "#8a92a6", "end"));
@@ -366,6 +380,9 @@
   });
   $("in-tilt").addEventListener("input", function () {
     state.tiltDeg = +this.value; $("tilt-val").textContent = this.value; recompute();
+  });
+  $("in-faceht").addEventListener("input", function () {
+    state.faceHeightFt = +this.value; $("faceht-val").textContent = (+this.value).toFixed(1); recompute();
   });
   ["in-owidth", "in-oaspect", "in-otarget"].forEach(function (id) {
     $(id).addEventListener("input", function () {

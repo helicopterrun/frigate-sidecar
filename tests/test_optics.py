@@ -86,9 +86,16 @@ def test_ground_coverage_top_ray_above_horizon_is_unbounded() -> None:
 
 
 def test_bbox_height_shrinks_with_distance() -> None:
-    near = optics.bbox_height_px(5.5, 10.0, 10.0, 50.0, 720)
-    far = optics.bbox_height_px(5.5, 10.0, 40.0, 50.0, 720)
+    # ground-standing person: bottom 0, top 5.5 ft
+    near = optics.bbox_height_px(0.0, 5.5, 10.0, 10.0, 50.0, 720)
+    far = optics.bbox_height_px(0.0, 5.5, 10.0, 40.0, 50.0, 720)
     assert near > far > 0
+
+
+def test_bbox_height_face_at_eye_level() -> None:
+    # A 0.7 ft face centred at 5.4 ft eye level, 10 ft camera, 12 ft away.
+    px = optics.bbox_height_px(5.4 - 0.35, 5.4 + 0.35, 10.0, 12.0, 50.0, 720)
+    assert px > 0
 
 
 def test_face_depression_sign() -> None:

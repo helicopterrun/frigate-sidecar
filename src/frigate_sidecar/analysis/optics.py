@@ -153,18 +153,22 @@ def ground_coverage(
 
 
 def bbox_height_px(
-    obj_height_ft: float,
+    obj_bottom_ft: float,
+    obj_top_ft: float,
     cam_height_ft: float,
     distance_ft: float,
     vfov_deg: float,
     det_h_px: int,
 ) -> float:
-    """On-screen bounding-box height (px) of an upright object via its angular
-    subtension from feet to head — accounts for foreshortening with viewing angle.
+    """On-screen bounding-box height (px) of an object spanning ``obj_bottom_ft``
+    to ``obj_top_ft`` off the ground, via the angular subtension between those
+    two heights — accounts for foreshortening with viewing angle. A ground-
+    standing person is ``obj_bottom_ft=0, obj_top_ft=height``; a face at eye
+    level is a short span centred on the eye height.
     """
-    dep_feet = math.atan(cam_height_ft / distance_ft)
-    dep_head = math.atan((cam_height_ft - obj_height_ft) / distance_ft)
-    angular = dep_feet - dep_head  # radians, positive (feet sit lower in frame)
+    dep_bottom = math.atan((cam_height_ft - obj_bottom_ft) / distance_ft)
+    dep_top = math.atan((cam_height_ft - obj_top_ft) / distance_ft)
+    angular = dep_bottom - dep_top  # radians, positive (lower point sits lower in frame)
     return angular / math.radians(vfov_deg) * det_h_px
 
 
