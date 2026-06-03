@@ -91,6 +91,95 @@ def target_area_px2(target_px_width: float, aspect_h_to_w: float) -> float:
 
 
 # --------------------------------------------------------------------------
+# Vertical geometry: mount height + down-angle
+# --------------------------------------------------------------------------
+#
+# Side-elevation model. The camera sits at ``height_ft`` and looks down at
+# ``tilt_deg`` (depression of the optical axis below horizontal). Bounding-box
+# *height* in pixels comes from the angular subtension between an object's feet
+# and head — which, unlike the width*aspect shortcut, depends on mount height
+# and viewing angle. This is what makes a high steep camera capture tops of
+# heads rather than faces even when the raw pixel count looks fine.
+
+FT_PER_M = 3.280839895
+
+# DORI (EN 62676-4) scene pixel-density thresholds, in px per metre of real
+# horizontal width. Frigate's face-recognition docs point at the camera's DORI
+# *Identification* range as the realistic upper bound for recognition.
+DORI_PX_PER_M = {
+    "detection": 25.0,
+    "observation": 63.0,
+    "recognition": 125.0,
+    "identification": 250.0,
+}
+
+# Frigate-published references surfaced in the planner UI.
+FACE_MIN_AREA_PX2 = 500  # face_recognition.min_area default
+MODEL_INPUT_PX = 320  # object detector input is letterboxed to 320x320
+
+
+def vfov_from_hfov(hfov_deg: float, det_w_px: int, det_h_px: int) -> float:
+    """Vertical FOV from horizontal FOV and the detect frame's aspect ratio."""
+    half_h = math.tan(math.radians(hfov_deg) / 2)
+    return math.degrees(2 * math.atan(half_h * det_h_px / det_w_px))
+
+
+def ground_coverage(
+    height_ft: float, tilt_deg: float, vfov_deg: float
+) -> tuple[float, float | None]:
+    """Near and far ground distances (ft) the vertical FOV covers.
+
+    ``tilt_deg`` is the optical-axis depression below horizontal. Returns
+    ``(near_ft, far_ft)``; ``far_ft`` is ``None`` when the top ray is at or
+    above the horizon (the camera sees sky -> unbounded far edge).
+    """
+    top_dep = tilt_deg - vfov_deg / 2  # smallest depression -> farthest
+    bot_dep = tilt_deg + vfov_deg / 2  # largest depression -> nearest
+
+    def hit(dep_deg: float) -> float | None:
+        if dep_deg <= 0:
+            return None  # ray at/above horizon
+        if dep_deg >= 90:
+            return 0.0  # ray points straight down / behind the mast
+        return height_ft / math.tan(math.radians(dep_deg))
+
+    near = hit(bot_dep)
+    far = hit(top_dep)
+    return (near if near is not None else 0.0, far)
+
+
+def bbox_height_px(
+    obj_height_ft: float,
+    cam_height_ft: float,
+    distance_ft: float,
+    vfov_deg: float,
+    det_h_px: int,
+) -> float:
+    """On-screen bounding-box height (px) of an upright object via its angular
+    subtension from feet to head — accounts for foreshortening with viewing angle.
+    """
+    dep_feet = math.atan(cam_height_ft / distance_ft)
+    dep_head = math.atan((cam_height_ft - obj_height_ft) / distance_ft)
+    angular = dep_feet - dep_head  # radians, positive (feet sit lower in frame)
+    return angular / math.radians(vfov_deg) * det_h_px
+
+
+def face_depression_deg(cam_height_ft: float, distance_ft: float, eye_height_ft: float) -> float:
+    """Depression angle (deg) of the camera's line of sight to a subject's eyes.
+
+    Negative = camera below eye level (looking up -> good frontal capture);
+    large positive = steep down-angle -> tops of heads.
+    """
+    return math.degrees(math.atan((cam_height_ft - eye_height_ft) / distance_ft))
+
+
+def dori_distance_ft(det_w_px: int, hfov_deg: float, px_per_m: float) -> float:
+    """Distance (ft) at which scene density drops to ``px_per_m`` px per metre."""
+    half = math.tan(math.radians(hfov_deg) / 2)
+    return det_w_px * FT_PER_M / (2 * px_per_m * half)
+
+
+# --------------------------------------------------------------------------
 # Presets
 # --------------------------------------------------------------------------
 
@@ -173,29 +262,36 @@ _OBJECTS: list[dict[str, Any]] = [
 
 # Deployed fleet. ``hfov`` is the *measured* value (from the spatial reference);
 # ``focal_mm`` is back-solved for varifocal cams so the zoom slider lands at the
-# right spot when a camera is picked. ``res_id`` selects the operative detect
-# stream. Mount height / facing carried for context.
+# right spot when a camera is picked. ``res`` selects the operative detect
+# stream. ``vfov`` is carried only where the vendor publishes it (UniFi); the
+# planner computes it from HFOV + frame aspect otherwise. ``tilt_deg`` (optical-
+# axis depression below horizontal) is a ROUGH ESTIMATE — we don't have measured
+# tilts — so treat it as a starting point and adjust the slider per scene.
 _CAMERAS: list[dict[str, Any]] = [
     {"id": "street", "lens": "dahua-t2431-fixed28", "hfov": 115, "res": "fhd-1080",
-     "mount_ft": 35, "faces": "S", "face_rec": False, "note": "high mount, steep angle"},
+     "mount_ft": 35, "tilt_deg": 22, "faces": "S", "face_rec": False,
+     "note": "high mount, steep angle"},
     {"id": "gate", "lens": "dahua-5442-vf", "hfov": 80, "res": "sub-720",
-     "mount_ft": 10, "faces": "SE", "face_rec": False},
+     "mount_ft": 10, "tilt_deg": 12, "faces": "SE", "face_rec": False},
     {"id": "garden", "lens": "dahua-5442-vf", "hfov": 80, "res": "sub-720",
-     "mount_ft": 7, "faces": "SW", "face_rec": False},
-    {"id": "doorbell", "lens": "unifi-g4-doorbell", "hfov": 138, "res": "doorbell-720",
-     "mount_ft": 3, "faces": "S", "face_rec": True},
-    {"id": "package", "lens": "unifi-g4-instant", "hfov": 97.5, "res": "main-960",
-     "mount_ft": 3, "faces": "S", "face_rec": False},
+     "mount_ft": 7, "tilt_deg": 10, "faces": "SW", "face_rec": False},
+    {"id": "doorbell", "lens": "unifi-g4-doorbell", "hfov": 138, "vfov": 114, "res": "doorbell-720",
+     "mount_ft": 3, "tilt_deg": 6, "faces": "S", "face_rec": True},
+    {"id": "package", "lens": "unifi-g4-instant", "hfov": 97.5, "vfov": 79.4, "res": "main-960",
+     "mount_ft": 3, "tilt_deg": 45, "faces": "S", "face_rec": False},
     {"id": "alley-wide", "lens": "dahua-5442-vf", "hfov": 115, "res": "sub-720",
-     "mount_ft": 45, "faces": "N", "face_rec": False, "note": "high mount, steep angle"},
+     "mount_ft": 45, "tilt_deg": 28, "faces": "N", "face_rec": False,
+     "note": "high mount, steep angle"},
     {"id": "stairway-tight", "lens": "dahua-5442-vf", "hfov": 90, "res": "sub-720",
-     "mount_ft": 10, "faces": "N", "face_rec": True},
+     "mount_ft": 10, "tilt_deg": 12, "faces": "N", "face_rec": True},
     {"id": "stairway-wide", "lens": "dahua-5442-vf", "hfov": 90, "res": "sub-720",
-     "mount_ft": 10, "faces": "NW", "face_rec": False},
+     "mount_ft": 10, "tilt_deg": 12, "faces": "NW", "face_rec": False},
     {"id": "walkway", "lens": "dahua-5442-fixed28", "hfov": 108, "res": "sub-720",
-     "mount_ft": 10, "faces": "E", "face_rec": False, "note": "HFOV estimated — confirm"},
+     "mount_ft": 10, "tilt_deg": 8, "faces": "E", "face_rec": False,
+     "note": "HFOV estimated — confirm"},
     {"id": "crows-nest", "lens": "unifi-g5-flex", "hfov": 70, "res": "sub-720",
-     "mount_ft": 55, "faces": "W", "face_rec": False, "note": "animal-only; high mount"},
+     "mount_ft": 55, "tilt_deg": 2, "faces": "W", "face_rec": False,
+     "note": "animal-only; high mount"},
 ]
 
 
@@ -216,4 +312,10 @@ def presets_payload() -> dict[str, Any]:
         "resolutions": _RESOLUTIONS,
         "objects": _OBJECTS,
         "cameras": _CAMERAS,
+        "dori": DORI_PX_PER_M,
+        "refs": {
+            "face_min_area_px2": FACE_MIN_AREA_PX2,
+            "model_input_px": MODEL_INPUT_PX,
+            "ft_per_m": FT_PER_M,
+        },
     }

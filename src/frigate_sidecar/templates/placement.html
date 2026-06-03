@@ -65,15 +65,15 @@
       <div class="stat-value"><span id="out-w">—</span> px</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">object height</div>
+      <div class="stat-label">bbox height (geometric)</div>
       <div class="stat-value"><span id="out-h">—</span> px</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">box area (vs min_area)</div>
-      <div class="stat-value"><span id="out-area">—</span> px²</div>
+      <div class="stat-label">bbox area (≥500 px² = face-rec)</div>
+      <div class="stat-value cell-class muted" id="out-area">—</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">verdict</div>
+      <div class="stat-label">width verdict (vs target px)</div>
       <div class="stat-value cell-class muted" id="out-verdict">—</div>
     </div>
   </div>
@@ -83,6 +83,7 @@
       <h2 class="section-h">Object pixels vs distance</h2>
       <svg id="plan-chart" class="plan-svg" viewBox="0 0 520 300" role="img"
            aria-label="Object on-screen pixel width as a function of distance"></svg>
+      <p class="help" id="dori-legend" style="margin-top:6px"></p>
     </div>
     <div class="plan-viz-col">
       <h2 class="section-h">Top-down coverage (this camera)</h2>
@@ -90,6 +91,34 @@
            aria-label="Top-down field-of-view wedge with object range rings"></svg>
     </div>
   </div>
+
+  <h2 class="section-h">Side elevation — mount height &amp; down-angle</h2>
+  <div class="filters">
+    <label style="flex:1;min-width:240px">Mount height · <span id="height-val">10</span> ft
+      <input id="in-height" type="range" min="1" max="60" step="0.5" value="10"></label>
+    <label style="flex:1;min-width:240px">Down-angle · <span id="tilt-val">12</span>°
+      <input id="in-tilt" type="range" min="0" max="80" step="1" value="12"></label>
+  </div>
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="stat-label">in frame?</div>
+      <div class="stat-value cell-class muted" id="out-inframe" style="font-size:15px">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">face/head down-angle</div>
+      <div class="stat-value cell-class muted" id="out-faceang">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">VFOV</div>
+      <div class="stat-value"><span id="out-vfov">—</span>°</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">ground coverage</div>
+      <div class="stat-value" style="font-size:15px"><span id="out-ground">—</span></div>
+    </div>
+  </div>
+  <svg id="plan-elev" class="plan-svg" viewBox="0 0 560 300" role="img"
+       aria-label="Side elevation: vertical FOV cone, ground coverage, and a to-scale subject"></svg>
 
   <h2 class="section-h">Object target (editable)</h2>
   <div class="filters">
@@ -102,10 +131,13 @@
   </div>
 
   <p class="help" style="margin-top:18px">
-    Distance formula: <code>max_ft = width_ft · det_w / (2 · target_px · tan(HFOV/2))</code>.
+    Width formula: <code>max_ft = width_ft · det_w / (2 · target_px · tan(HFOV/2))</code>.
     Varifocal HFOV from a two-point datasheet fit (114° @ 2.7mm → 47° @ 12mm).
-    "_MAIN_" reach = pick the main-stream resolution. Mount height/down-angle
-    not modelled — high cameras lose faces to geometry regardless of pixels.
+    bbox <em>height</em> is geometric — it falls out of mount height + down-angle,
+    so a high steep camera reads "top of head" even when pixels look fine.
+    References: object detector input is <code>320×320</code>; Frigate's face
+    <code>min_area</code> default is 500 px²; DORI thresholds (px per metre of
+    scene) are 25 / 63 / 125 / 250 for detect / observe / recognise / identify.
   </p>
 </main>
 

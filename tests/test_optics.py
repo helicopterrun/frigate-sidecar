@@ -62,9 +62,57 @@ def test_known_value_hfov_90deg() -> None:
     assert optics.hfov_from_focal(4.0, 8.0) == math.degrees(2 * math.atan(1.0))
 
 
+def test_vfov_matches_aspect_ratio() -> None:
+    # 16:9 frame: VFOV is the HFOV scaled by 9/16 in tan-space.
+    vfov = optics.vfov_from_hfov(90.0, 1280, 720)
+    expected = math.degrees(2 * math.atan(math.tan(math.radians(45)) * 720 / 1280))
+    assert vfov == pytest.approx(expected, abs=1e-9)
+    assert vfov < 90.0  # narrower vertically than horizontally
+
+
+def test_ground_coverage_near_far() -> None:
+    # 10 ft up, axis 30 deg down, 40 deg VFOV -> rays at 10 and 50 deg depression.
+    near, far = optics.ground_coverage(10.0, 30.0, 40.0)
+    assert near == pytest.approx(10.0 / math.tan(math.radians(50)), abs=1e-6)
+    assert far == pytest.approx(10.0 / math.tan(math.radians(10)), abs=1e-6)
+    assert near < far
+
+
+def test_ground_coverage_top_ray_above_horizon_is_unbounded() -> None:
+    # Shallow tilt: top ray points up -> far edge is the horizon (None).
+    near, far = optics.ground_coverage(10.0, 5.0, 40.0)
+    assert far is None
+    assert near > 0
+
+
+def test_bbox_height_shrinks_with_distance() -> None:
+    near = optics.bbox_height_px(5.5, 10.0, 10.0, 50.0, 720)
+    far = optics.bbox_height_px(5.5, 10.0, 40.0, 50.0, 720)
+    assert near > far > 0
+
+
+def test_face_depression_sign() -> None:
+    # Low doorbell (3 ft) vs a 5.5 ft eye line -> looking UP (negative).
+    assert optics.face_depression_deg(3.0, 6.0, 5.5) < 0
+    # High mast looking down -> steep positive depression.
+    assert optics.face_depression_deg(35.0, 20.0, 5.5) > 30
+
+
+def test_dori_identification_closer_than_recognition() -> None:
+    idd = optics.dori_distance_ft(1280, 90.0, optics.DORI_PX_PER_M["identification"])
+    rec = optics.dori_distance_ft(1280, 90.0, optics.DORI_PX_PER_M["recognition"])
+    # Identification needs 2x the density of recognition -> half the distance.
+    assert idd == pytest.approx(rec / 2, abs=1e-6)
+
+
 def test_presets_payload_shape() -> None:
     p = optics.presets_payload()
-    assert {"lenses", "resolutions", "objects", "cameras"} <= p.keys()
+    assert {"lenses", "resolutions", "objects", "cameras", "dori", "refs"} <= p.keys()
+    assert p["refs"]["face_min_area_px2"] == 500
+    assert set(p["dori"]) == {"detection", "observation", "recognition", "identification"}
+    # Every deployed camera carries a (possibly estimated) tilt for the elevation view.
+    for cam in p["cameras"]:
+        assert "tilt_deg" in cam and "mount_ft" in cam
 
     # Every varifocal lens carries a fitted sensor width + offset for the JS.
     vari = [lo for lo in p["lenses"] if lo["type"] == "varifocal"]
