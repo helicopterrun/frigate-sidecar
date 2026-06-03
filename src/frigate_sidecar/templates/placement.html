@@ -72,9 +72,11 @@
       Width: <code>max_ft = width_ft · det_w / (2 · target_px · tan(HFOV/2))</code>.
       Varifocal HFOV from a two-point datasheet fit (114° @ 2.7mm → 47° @ 12mm).
       bbox <em>height</em> is geometric (mount height + down-angle), so a high steep
-      camera reads "top of head" even when pixels look fine. References: detector
-      input <code>320×320</code>; face <code>min_area</code> default 500 px²; DORI
-      px/m thresholds 25 / 63 / 125 / 250 (detect / observe / recognise / identify).
+      camera reads "top of head" even when pixels look fine. Face area tiers:
+      <b>&lt; 1000 px²</b> below this deployment's <code>min_area</code> (won't attempt),
+      <b>≥ 1000</b> attempts, <b>≥ 3000</b> empirically recognises (from 163 captured
+      faces). References: detector input <code>320×320</code>; DORI px/m thresholds
+      25 / 63 / 125 / 250 (detect / observe / recognise / identify).
     </p>
   </details>
 </main>

@@ -12,7 +12,8 @@
   P.resolutions.forEach(function (r) { byId["res:" + r.id] = r; });
   P.objects.forEach(function (o) { byId["obj:" + o.id] = o; });
   var FT_PER_M = P.refs.ft_per_m;
-  var FACE_MIN_AREA = P.refs.face_min_area_px2;
+  var FACE_MIN_AREA = P.refs.face_min_area_px2;       // floor to attempt recognition
+  var FACE_FLOOR = P.refs.face_recog_floor_px2;       // empirical floor to actually recognize
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -125,8 +126,10 @@
     var area = wpx * Math.max(hpx, 0);
     $("out-w").textContent = wpx.toFixed(0);
     $("out-h").textContent = hpx.toFixed(0);
-    $("out-area").textContent = Math.round(area).toLocaleString() + " px²";
-    setCls($("out-area"), area >= FACE_MIN_AREA ? "ok" : "warn");
+    var areaTier = area >= FACE_FLOOR ? "ok" : area >= FACE_MIN_AREA ? "warn" : "noise";
+    var areaTag = area >= FACE_FLOOR ? " recog" : area >= FACE_MIN_AREA ? " attempt" : " < min";
+    $("out-area").textContent = Math.round(area).toLocaleString() + " px²" + areaTag;
+    setCls($("out-area"), areaTier);
     var v = $("out-verdict");
     if (wpx >= o.target_px) { v.textContent = "good"; setCls(v, "ok"); }
     else if (wpx >= o.target_px / 2) { v.textContent = "marginal"; setCls(v, "warn"); }

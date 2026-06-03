@@ -114,7 +114,11 @@ DORI_PX_PER_M = {
 }
 
 # Frigate-published references surfaced in the planner UI.
-FACE_MIN_AREA_PX2 = 500  # face_recognition.min_area default
+FACE_MIN_AREA_PX2 = 1000  # this deployment's face_recognition.min_area (Frigate default is 500)
+# Empirical: confident recognitions (recog_score >= 0.9) cluster at >= ~3000 px2
+# across 163 captured face attempts (2026-06). Below this, a face may be saved
+# but rarely recognized — a better target than the generic 80px rule of thumb.
+FACE_RECOG_FLOOR_PX2 = 3000
 MODEL_INPUT_PX = 320  # object detector input is letterboxed to 320x320
 
 
@@ -315,6 +319,7 @@ def presets_payload() -> dict[str, Any]:
         "dori": DORI_PX_PER_M,
         "refs": {
             "face_min_area_px2": FACE_MIN_AREA_PX2,
+            "face_recog_floor_px2": FACE_RECOG_FLOOR_PX2,
             "model_input_px": MODEL_INPUT_PX,
             "ft_per_m": FT_PER_M,
         },

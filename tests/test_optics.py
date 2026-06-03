@@ -108,7 +108,8 @@ def test_dori_identification_closer_than_recognition() -> None:
 def test_presets_payload_shape() -> None:
     p = optics.presets_payload()
     assert {"lenses", "resolutions", "objects", "cameras", "dori", "refs"} <= p.keys()
-    assert p["refs"]["face_min_area_px2"] == 500
+    assert p["refs"]["face_min_area_px2"] == 1000  # live config, not the 500 default
+    assert p["refs"]["face_recog_floor_px2"] == 3000
     assert set(p["dori"]) == {"detection", "observation", "recognition", "identification"}
     # Every deployed camera carries a (possibly estimated) tilt for the elevation view.
     for cam in p["cameras"]:
