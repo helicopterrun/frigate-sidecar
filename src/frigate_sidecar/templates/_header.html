@@ -10,6 +10,7 @@
     <a href="/fps-budget" class="page-link{% if _active == 'fps_budget' %} active{% endif %}">FPS budget</a>
     <a href="/placement" class="page-link{% if _active == 'placement' %} active{% endif %}">Placement</a>
     <a href="/faces" class="page-link{% if _active == 'faces' %} active{% endif %}">Faces</a>
+    <a href="/toybox" class="page-link{% if _active == 'toybox' %} active{% endif %}">Toybox</a>
   </nav>
   <span class="stats">{{ summary or '' }}
     {% if counts and (counts.get('tp') or counts.get('fp') or counts.get('skip')) %}

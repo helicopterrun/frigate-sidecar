@@ -44,6 +44,24 @@ CREATE TABLE IF NOT EXISTS face_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_face_decision ON face_attempts(decision);
 CREATE INDEX IF NOT EXISTS idx_face_quality ON face_attempts(quality_score);
+
+-- Toybox: arcade-style high scores for the in-house games (50-states quiz, etc).
+-- Not Frigate-related; it's a for-fun page. `game` namespaces the leaderboard so
+-- a future game can share the table.
+CREATE TABLE IF NOT EXISTS toybox_scores (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    game      TEXT NOT NULL,
+    name      TEXT NOT NULL,
+    score     INTEGER NOT NULL,
+    played_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_toybox_board ON toybox_scores(game, score DESC);
+
+-- Seed one example high score so a fresh board isn't empty (classic arcade vibe).
+-- Guarded so it only appears while the board has no real entries yet.
+INSERT INTO toybox_scores (game, name, score, played_at)
+SELECT 'states50', 'BOB1', 30, '2026-06-05T00:00:00'
+WHERE NOT EXISTS (SELECT 1 FROM toybox_scores WHERE game = 'states50');
 """
 
 
