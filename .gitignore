@@ -42,3 +42,6 @@ config/sidecar.yml
 
 # Logs
 *.log
+
+# Generated, machine-specific triage worklists (dated event lists with LAN URLs)
+src/frigate_sidecar/static/triage_batch*.html
