@@ -1,0 +1,74 @@
+/* Wildlife trail-cam gallery. Shares the sidecar dark theme:
+   bg #0f1115 · panel #161922 · border #2a2f3a · text #e6e6e6 · muted #8a92a6 · accent #3b82f6 */
+
+.wl-status { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.wl-status .stat-card { min-width: 150px; }
+.wl-status .stat-value { font-size: 18px; }
+.wl-status .stat-value.stale { color: #fde68a; }
+.wl-status .stat-value.bad { color: #fecaca; }
+
+/* Controls bar */
+.wl-bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+.wl-auto { font-size: 12px; color: #8a92a6; display: inline-flex; align-items: center; gap: 5px; }
+.wl-btn { background: #1f2937; color: #e6e6e6; border: 1px solid #2a2f3a; padding: 6px 14px;
+          border-radius: 6px; font-size: 12px; cursor: pointer; min-height: 34px; }
+.wl-btn:hover { background: #374151; }
+.wl-btn:disabled { opacity: 0.5; cursor: default; }
+.wl-btn-accent { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
+.wl-btn-accent:hover { background: #2563eb; }
+.wl-msg { font-size: 12px; color: #8a92a6; }
+.wl-msg.ok { color: #bbf7d0; }
+.wl-msg.err { color: #fecaca; }
+
+/* Settings panel */
+.wl-settings { background: #161922; border: 1px solid #2a2f3a; border-radius: 8px;
+               padding: 14px 16px; margin-bottom: 16px; }
+.wl-set-grid { display: flex; flex-wrap: wrap; gap: 12px 18px; }
+.wl-settings label { font-size: 11px; color: #8a92a6; display: flex; flex-direction: column; gap: 4px; }
+.wl-settings input[type=number] { background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a;
+               border-radius: 4px; padding: 5px 8px; font-size: 13px; width: 140px; }
+.wl-settings label.wl-check { flex-direction: row; align-items: center; gap: 6px; }
+.wl-set-actions { display: flex; gap: 10px; align-items: center; margin-top: 14px;
+               padding-top: 12px; border-top: 1px solid #1a1d26; }
+.wl-hint { font-size: 11px; color: #6b7280; }
+
+/* Gallery grid */
+.wl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.wl-tile { background: #161922; border: 1px solid #2a2f3a; border-radius: 8px; overflow: hidden;
+           cursor: pointer; display: flex; flex-direction: column; }
+.wl-tile:hover { border-color: #3b82f6; }
+.wl-thumb { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: #0f1115; display: block; }
+.wl-meta { padding: 8px 10px; font-size: 11px; color: #8a92a6; display: flex; flex-direction: column; gap: 3px; }
+.wl-meta-row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.wl-time { color: #e6e6e6; font-variant-numeric: tabular-nums; }
+.wl-chip { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 10px; font-weight: 600; }
+.wl-chip.day { background: #78350f; color: #fde68a; }
+.wl-chip.night { background: #1e3a8a; color: #bfdbfe; }
+.wl-chip.cam { background: #1f2937; color: #cbd5e1; }
+.wl-exp { font-variant-numeric: tabular-nums; }
+.wl-empty { color: #8a92a6; font-size: 13px; }
+
+/* Lightbox */
+.wl-lightbox { position: fixed; inset: 0; background: rgba(7, 8, 11, 0.92); z-index: 50;
+               display: flex; align-items: center; justify-content: center; }
+.wl-lb-fig { margin: 0; max-width: 92vw; max-height: 92vh; display: flex; flex-direction: column; gap: 10px; }
+.wl-lb-fig img { max-width: 92vw; max-height: 80vh; object-fit: contain; border-radius: 6px; background: #000; }
+.wl-lb-fig figcaption { font-size: 12px; color: #cbd5e1; text-align: center;
+               display: flex; gap: 10px 16px; justify-content: center; flex-wrap: wrap; align-items: center; }
+.wl-lb-fig figcaption a { color: #93c5fd; }
+.wl-lb-close { position: fixed; top: 14px; right: 18px; background: #1f2937; color: #e6e6e6;
+               border: 1px solid #2a2f3a; border-radius: 6px; font-size: 18px; width: 40px; height: 40px;
+               cursor: pointer; }
+.wl-lb-nav { background: #1f2937aa; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 8px;
+             font-size: 30px; line-height: 1; width: 48px; height: 64px; cursor: pointer; flex: 0 0 auto; margin: 0 10px; }
+.wl-lb-nav:hover, .wl-lb-close:hover { background: #374151; }
+
+@media (max-width: 720px) {
+  .wl-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .wl-bar .viewseg { width: 100%; }
+  .wl-bar .viewseg .vbtn { flex: 1; }
+  .wl-btn { min-height: 40px; }
+  .wl-lb-nav { width: 40px; height: 56px; margin: 0 4px; }
+  .wl-settings input[type=number] { width: 100%; }
+  .wl-settings label { flex: 1 1 120px; }
+}

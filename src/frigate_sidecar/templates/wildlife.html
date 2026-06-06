@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% set active_page = 'wildlife' %}
+{% block title %}Wildlife · frigate-sidecar{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="/static/css/wildlife.css">
+{% endblock %}
+
+{% block body %}
+{% set summary = 'PoE trail cam · stills' %}
+{% include "_header.html" %}
+<main class="wl">
+  <!-- Status strip: filled from /api/stats + /api/streaming + newest snapshot -->
+  <div class="wl-status" id="wl-status">
+    <div class="stat-card"><div class="stat-label">Latest frame</div>
+      <div class="stat-value" id="wl-latest">—</div></div>
+    <div class="stat-card"><div class="stat-label">Capture timer</div>
+      <div class="stat-value" id="wl-running">—</div></div>
+    <div class="stat-card"><div class="stat-label">Disk free</div>
+      <div class="stat-value" id="wl-disk">—</div></div>
+    <div class="stat-card"><div class="stat-label">Showing</div>
+      <div class="stat-value" id="wl-count">—</div></div>
+  </div>
+
+  <!-- Controls bar -->
+  <div class="wl-bar">
+    <div class="viewseg" id="wl-streamseg" role="tablist" aria-label="Camera filter">
+      <button type="button" class="vbtn active" data-stream="all">Both</button>
+      <button type="button" class="vbtn" data-stream="cam">IMX415 · low-light</button>
+      <button type="button" class="vbtn" data-stream="cam2">IMX708 · autofocus</button>
+    </div>
+    <label class="wl-auto"><input type="checkbox" id="wl-auto" checked> auto-refresh</label>
+    <button type="button" class="wl-btn" id="wl-refresh">Refresh</button>
+    <button type="button" class="wl-btn wl-btn-accent" id="wl-capture">Capture now</button>
+    <button type="button" class="wl-btn" id="wl-settings-toggle">Settings ▾</button>
+    <span class="wl-msg" id="wl-msg" aria-live="polite"></span>
+  </div>
+
+  <!-- Capture settings (token-protected PUT /api/settings, token injected at proxy) -->
+  <form class="wl-settings" id="wl-settings" hidden>
+    <div class="wl-set-grid">
+      <label>Night shutter (µs)
+        <input type="number" id="set-night_shutter_us" min="1000" max="10000000" step="1000"></label>
+      <label>Night gain
+        <input type="number" id="set-night_gain" min="1" max="64" step="1"></label>
+      <label>Day Lux threshold
+        <input type="number" id="set-lux_day" min="0" max="100" step="0.5"></label>
+      <label>JPEG quality
+        <input type="number" id="set-jpeg_quality" min="1" max="100" step="1"></label>
+      <label class="wl-check">Save raw DNG
+        <input type="checkbox" id="set-save_raw"></label>
+    </div>
+    <div class="wl-set-actions">
+      <button type="submit" class="wl-btn wl-btn-accent">Save settings</button>
+      <button type="button" class="wl-btn" id="wl-settings-reload">Reload</button>
+      <span class="wl-hint">Applies on the next capture.</span>
+    </div>
+  </form>
+
+  <div class="wl-grid" id="wl-grid"></div>
+  <p class="wl-empty" id="wl-empty" hidden>No snapshots returned.</p>
+</main>
+
+<!-- Lightbox -->
+<div class="wl-lightbox" id="wl-lightbox" hidden>
+  <button type="button" class="wl-lb-close" id="wl-lb-close" aria-label="Close">✕</button>
+  <button type="button" class="wl-lb-nav wl-lb-prev" id="wl-lb-prev" aria-label="Previous">‹</button>
+  <figure class="wl-lb-fig">
+    <img id="wl-lb-img" alt="">
+    <figcaption id="wl-lb-cap"></figcaption>
+  </figure>
+  <button type="button" class="wl-lb-nav wl-lb-next" id="wl-lb-next" aria-label="Next">›</button>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>window.WILDLIFE_API_BASE = {{ api_base|tojson }};</script>
+<script src="/static/js/wildlife.js"></script>
+{% endblock %}
