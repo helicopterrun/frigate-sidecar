@@ -18,4 +18,21 @@ sidecar:
   bind_host: 0.0.0.0
   bind_port: 5001
 
+# External health watchdog. Polls Frigate's API and restarts the container when
+# the backend hangs (connection-refused or repeated 5xx) — the failure mode
+# Docker's restart policy can't catch (s6 PID 1 stays alive while the app wedges
+# on a frozen camera stream). Runs as its own process via the
+# frigate-watchdog.service unit in contrib/, NOT inside the web app. Off by
+# default; needs User=root in the unit so it can run `docker restart`.
+watchdog:
+  enabled: false
+  probe_path: /api/version       # 200 even in safe mode, so bad config won't loop
+  interval_s: 30.0
+  timeout_s: 10.0
+  failures_before_restart: 4     # 4 × 30s ≈ 2 min of sustained failure
+  restart_command: ["docker", "restart", "frigate"]
+  restart_timeout_s: 120.0
+  cooldown_s: 180.0              # ignore failures this long after a restart (boot)
+  max_restarts_per_hour: 3       # safety cap; logs loudly instead of looping
+
 log_level: INFO

@@ -33,6 +33,14 @@ def serve() -> None:
 
 
 @app.command()
+def watchdog() -> None:
+    """Run the Frigate health watchdog (restarts the container on a hung backend)."""
+    from frigate_sidecar.watchdog import run_watchdog
+
+    raise typer.Exit(code=run_watchdog(load_settings()))
+
+
+@app.command()
 def version() -> None:
     """Print the installed version."""
     typer.echo(__version__)

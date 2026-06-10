@@ -58,6 +58,40 @@ class FaceSection(BaseModel):
     per_person_cap: int = 40  # don't let auto-promote overgrow one person's library
 
 
+class WatchdogSection(BaseModel):
+    """External health watchdog for the Frigate container.
+
+    Polls Frigate's HTTP API and restarts the container when its backend hangs
+    — connection-refused or repeated 5xx. That's the failure mode Docker's own
+    restart policy can't catch: Frigate's main process can wedge on a frozen
+    camera stream while its s6 PID 1 stays alive, so the container reads "Up"
+    but every /api/* request 500s through nginx. Off by default; runs as its
+    own process via contrib/frigate-watchdog.service (not inside the web app,
+    so it survives even if uvicorn's event loop is blocked).
+    """
+
+    enabled: bool = False
+    # Probed as frigate.base_url + probe_path. /api/version is the cheapest
+    # endpoint that still 500s when the backend is hung; it returns 200 even in
+    # safe mode, so a bad-config safe-mode boot will NOT trigger a restart loop.
+    probe_path: str = "/api/version"
+    interval_s: float = 30.0
+    timeout_s: float = 10.0
+    # Consecutive failed probes before a restart. 4 × 30s = ~2 min of sustained
+    # failure, so a brief blip or a single slow probe won't trip it.
+    failures_before_restart: int = 4
+    restart_command: list[str] = Field(
+        default_factory=lambda: ["docker", "restart", "frigate"]
+    )
+    restart_timeout_s: float = 120.0
+    # After a restart, ignore failures for this long so Frigate's boot (during
+    # which probes naturally fail) can't trigger a second restart mid-startup.
+    cooldown_s: float = 180.0
+    # Safety cap: if Frigate is fundamentally broken, stop hammering it and log
+    # loudly for manual intervention instead of restart-looping forever.
+    max_restarts_per_hour: int = 3
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="FRIGATE_SIDECAR_",
@@ -68,6 +102,7 @@ class Settings(BaseSettings):
     frigate: FrigateSection = Field(default_factory=FrigateSection)
     sidecar: SidecarSection = Field(default_factory=SidecarSection)
     face: FaceSection = Field(default_factory=FaceSection)
+    watchdog: WatchdogSection = Field(default_factory=WatchdogSection)
     log_level: str = "INFO"
 
 

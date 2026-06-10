@@ -1,0 +1,18 @@
+[Unit]
+Description=Frigate Watchdog (restarts the Frigate container on a hung backend)
+Documentation=https://github.com/helicopterrun/frigate-sidecar
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+# root so it can run `docker restart frigate`.
+User=root
+WorkingDirectory=/opt/frigate-sidecar
+Environment="FRIGATE_SIDECAR_CONFIG=/opt/frigate-sidecar/config/sidecar.yml"
+ExecStart=/usr/bin/python3 -m frigate_sidecar watchdog
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
