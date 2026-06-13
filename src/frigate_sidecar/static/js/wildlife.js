@@ -20,12 +20,6 @@
   const EVENTS_LIMIT = 50; // PIR events to pull per refresh
   const REC_LIMIT = 60; // recording segments to pull (≈10 min at 10s each)
   const REC_STREAM = "cam"; // only `cam` records continuous segments; cam2 has none
-  const POSTER_PREFER_CAM_S = 90; // prefer a same-camera still within this window
-  // Beyond this, don't pretend a still represents the segment — show a "no
-  // nearby still" placeholder instead. Snapshots run ~1/min when active, but
-  // periodic snapshotting can be off (recording continues regardless), so a
-  // loose window would paste a many-minutes-stale, wrong-camera poster.
-  const POSTER_MAX_S = 180;
   // Stills mode expects newest_snapshot_age_s ≈ 60–90s; flag past 5 min.
   // Freshness is judged with the SERVER's age field, never the browser clock —
   // the Pi and this web server can have different clocks/timezones (per API.md).
@@ -76,6 +70,10 @@
   // clip_path is like "/media/_events/cam/evt_x.mp4".
   const clipUrl = (clipPath) =>
     clipPath ? "/wildlife/media/" + clipPath.replace(/^\/+media\/+/, "") : "";
+  // Recording poster: the sidecar extracts + caches the segment's OWN first
+  // frame (ffmpeg) — always the correct camera/frame. seg.url is "/media/…".
+  const posterUrl = (segPath) =>
+    segPath ? "/wildlife/poster/" + segPath.replace(/^\/+media\/+/, "") : "";
 
   function setMsg(text, kind) {
     msg.textContent = text || "";
@@ -630,66 +628,43 @@
 
   // ---- recordings (continuous segments) --------------------------------------
 
-  // Recordings are 10s rolling segments from `cam` only (cam2 has none). They
-  // carry no poster of their own, so — per the chosen approach — we associate
-  // the nearest snapshot by time as a browse hint. CAVEAT: most snapshots are
-  // cam2 (day camera) while segments are cam, so the poster is often a DIFFERENT
-  // camera; we label it with its source + time offset (and prefer a same-camera
-  // still when one is close), and clicking always plays the real segment video.
+  // Recordings are 10s rolling segments from `cam` only (cam2 has none). Each
+  // tile's poster is the segment's OWN first frame, extracted + cached server-
+  // side (GET /wildlife/poster/...) — always the correct camera/frame. Clicking
+  // a row plays the real segment via the /wildlife/media proxy.
   async function loadRecordings() {
     const countEl = $("wl-rec-count");
-    let segs, snaps;
+    let segs;
     try {
-      const [segRes, snapRes] = await Promise.all([
-        fetch(apiUrl(`/api/segments?stream=${REC_STREAM}&limit=${REC_LIMIT}`), { cache: "no-store" }),
-        fetch(apiUrl("/api/snapshots?limit=300"), { cache: "no-store" }),
-      ]);
-      if (!segRes.ok) throw new Error("HTTP " + segRes.status);
-      segs = await segRes.json();
-      snaps = snapRes.ok ? await snapRes.json() : [];
+      const res = await fetch(
+        apiUrl(`/api/segments?stream=${REC_STREAM}&limit=${REC_LIMIT}`),
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      segs = await res.json();
     } catch (err) {
       countEl.textContent = "fetch failed";
       return;
     }
     segs = Array.isArray(segs) ? segs : [];
-    snaps = Array.isArray(snaps) ? snaps : [];
     countEl.textContent = segs.length ? `${segs.length} shown` : "";
     $("wl-rec-empty").hidden = segs.length > 0;
 
     const sig = segs.map((s) => s.url).join(",");
     if (sig === lastRecsSig) return;
     lastRecsSig = sig;
-
-    const pool = snaps
-      .filter((s) => s.ts != null && s.url)
-      .map((s) => ({ ts: s.ts, url: s.url, stream: s.stream }));
-    renderRecordings(segs, pool);
+    renderRecordings(segs);
   }
 
-  // Nearest snapshot to `ts`: prefer a same-stream (cam) still within
-  // POSTER_PREFER_CAM_S, else the nearest of any stream within POSTER_MAX_S.
-  function pickPoster(ts, pool) {
-    let nearAny = null;
-    let nearCam = null;
-    for (const p of pool) {
-      const d = Math.abs(p.ts - ts);
-      if (nearAny == null || d < nearAny.d) nearAny = { d, p };
-      if (p.stream === REC_STREAM && (nearCam == null || d < nearCam.d)) nearCam = { d, p };
-    }
-    if (nearCam && nearCam.d <= POSTER_PREFER_CAM_S) return { ...nearCam.p, delta: nearCam.p.ts - ts };
-    if (nearAny && nearAny.d <= POSTER_MAX_S) return { ...nearAny.p, delta: nearAny.p.ts - ts };
-    return null;
-  }
-
-  function renderRecordings(segs, pool) {
+  function renderRecordings(segs) {
     const list = $("wl-rec-list");
     list.replaceChildren();
     const frag = document.createDocumentFragment();
-    segs.forEach((seg) => frag.append(buildRecordingRow(seg, pickPoster(seg.start_time, pool))));
+    segs.forEach((seg) => frag.append(buildRecordingRow(seg)));
     list.append(frag);
   }
 
-  function buildRecordingRow(seg, poster) {
+  function buildRecordingRow(seg) {
     const li = document.createElement("li");
     li.className = "wl-evt";
 
@@ -699,19 +674,20 @@
     row.setAttribute("role", "button");
     row.setAttribute("aria-expanded", "false");
 
-    if (poster) {
-      const img = document.createElement("img");
-      img.className = "wl-evt-thumb";
-      img.loading = "lazy";
-      img.src = mediaUrl(poster.url);
-      img.alt = "nearest still";
-      row.append(img);
-    } else {
+    // Poster = the segment's own extracted first frame; if it isn't available
+    // (extraction failed), swap in a placeholder tile.
+    const img = document.createElement("img");
+    img.className = "wl-evt-thumb";
+    img.loading = "lazy";
+    img.alt = "recording poster";
+    img.src = posterUrl(seg.url);
+    img.addEventListener("error", () => {
       const ph = document.createElement("div");
       ph.className = "wl-evt-thumb placeholder";
       ph.textContent = "◇";
-      row.append(ph);
-    }
+      img.replaceWith(ph);
+    });
+    row.append(img);
 
     const main = document.createElement("div");
     main.className = "wl-evt-main";
@@ -729,13 +705,6 @@
     meta.className = "wl-evt-meta";
     const bits = [];
     if (seg.duration != null) bits.push(`${Number(seg.duration).toFixed(0)}s`);
-    if (poster) {
-      const off = Math.round(poster.delta);
-      const sign = off > 0 ? "+" : "";
-      bits.push(`poster: ${STREAM_LABELS[poster.stream] || poster.stream} ${sign}${off}s`);
-    } else {
-      bits.push("no nearby still");
-    }
     if (seg.size != null) bits.push(fmtBytes(seg.size));
     meta.textContent = bits.join("  ·  ");
     main.append(top, meta);
