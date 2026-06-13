@@ -126,6 +126,19 @@
     <ul class="wl-events-list" id="wl-events-list"></ul>
     <p class="wl-events-empty" id="wl-events-empty" hidden>No PIR events recorded yet.</p>
   </section>
+
+  <!-- Recordings: GET /api/segments?stream=cam (10s rolling segments, cam only).
+       Segments have no poster of their own; we associate the nearest snapshot by
+       time as a browse hint (labelled with its camera + offset). Click a row to
+       play the actual segment via the sidecar /wildlife/media proxy. -->
+  <section class="wl-events wl-recordings" id="wl-recordings-section">
+    <div class="wl-events-head">
+      <h2 class="wl-events-title">Recordings</h2>
+      <span class="wl-events-count" id="wl-rec-count"></span>
+    </div>
+    <ul class="wl-events-list" id="wl-rec-list"></ul>
+    <p class="wl-events-empty" id="wl-rec-empty" hidden>No recordings.</p>
+  </section>
 </main>
 
 <!-- Lightbox -->

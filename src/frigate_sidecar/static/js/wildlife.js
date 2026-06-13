@@ -18,6 +18,14 @@
   const POLL_MS = 45000; // ~1 frame/cam/min upstream; 45s keeps it fresh-ish
   const PIR_POLL_MS = 3000; // PIR is live state — poll fast, but pause when hidden
   const EVENTS_LIMIT = 50; // PIR events to pull per refresh
+  const REC_LIMIT = 60; // recording segments to pull (≈10 min at 10s each)
+  const REC_STREAM = "cam"; // only `cam` records continuous segments; cam2 has none
+  const POSTER_PREFER_CAM_S = 90; // prefer a same-camera still within this window
+  // Beyond this, don't pretend a still represents the segment — show a "no
+  // nearby still" placeholder instead. Snapshots run ~1/min when active, but
+  // periodic snapshotting can be off (recording continues regardless), so a
+  // loose window would paste a many-minutes-stale, wrong-camera poster.
+  const POSTER_MAX_S = 180;
   // Stills mode expects newest_snapshot_age_s ≈ 60–90s; flag past 5 min.
   // Freshness is judged with the SERVER's age field, never the browser clock —
   // the Pi and this web server can have different clocks/timezones (per API.md).
@@ -47,6 +55,8 @@
   let lbIndex = -1;
   const expandedEvents = new Set(); // event ids whose detail panel is open (survives re-render)
   let lastEventsSig = ""; // id-signature of the last rendered event set; skip re-render if unchanged
+  const expandedRecs = new Set(); // recording ids (seg url) whose player is open
+  let lastRecsSig = ""; // signature of the last rendered recording set
   let pollTimer = null;
   let pirTimer = null;
   let pirDetected = false; // last-seen any_detected, for clear→detected edge
@@ -526,7 +536,7 @@
     if (mode === "night") {
       detail.append(buildMetering(d));
     } else if (e.has_clip && e.clip_path) {
-      detail.append(buildClip(e));
+      detail.append(buildVideoPlayer(e.clip_path));
     } else {
       const note = document.createElement("p");
       note.className = "wl-evt-note";
@@ -535,12 +545,13 @@
     }
   }
 
-  // Event clips are recorded sideways (known backend limitation — the H.264
-  // can't be losslessly rotated). The capture app reports EXIF orientation 8
-  // (= 90° CCW correction), so we rotate the <video> in CSS; stills are already
-  // upright via EXIF. If a clip still looks sideways, flip the rotate() sign in
-  // `.wl-evt-video` (wildlife.css) — that's the single knob.
-  function buildClip(e) {
+  // Both event clips and recording segments come from `cam` and are recorded
+  // sideways (known backend limitation — the H.264 can't be losslessly rotated).
+  // The capture app reports EXIF orientation 8 (= 90° CCW correction), so we
+  // rotate the <video> in CSS; stills are already upright via EXIF. If video
+  // looks sideways, flip the rotate() sign in `.wl-evt-video` (wildlife.css) —
+  // that's the single knob. `path` is a "/media/…" path (clip_path or seg.url).
+  function buildVideoPlayer(path) {
     const wrap = document.createElement("div");
     wrap.className = "wl-evt-clipbox";
 
@@ -551,16 +562,16 @@
     v.controls = true;
     v.preload = "metadata";
     v.playsInline = true;
-    v.src = clipUrl(e.clip_path);
+    v.src = clipUrl(path);
     vwrap.append(v);
     wrap.append(vwrap);
 
     const a = document.createElement("a");
     a.className = "wl-evt-clip";
-    a.href = clipUrl(e.clip_path);
+    a.href = clipUrl(path);
     a.target = "_blank";
     a.rel = "noopener";
-    a.textContent = "open raw clip ↗";
+    a.textContent = "open raw video ↗";
     wrap.append(a);
     return wrap;
   }
@@ -615,6 +626,162 @@
     const d = e.end_time - e.start_time;
     if (!(d > 0)) return "";
     return d < 60 ? `${d.toFixed(1)}s` : `${Math.round(d / 60)}m`;
+  }
+
+  // ---- recordings (continuous segments) --------------------------------------
+
+  // Recordings are 10s rolling segments from `cam` only (cam2 has none). They
+  // carry no poster of their own, so — per the chosen approach — we associate
+  // the nearest snapshot by time as a browse hint. CAVEAT: most snapshots are
+  // cam2 (day camera) while segments are cam, so the poster is often a DIFFERENT
+  // camera; we label it with its source + time offset (and prefer a same-camera
+  // still when one is close), and clicking always plays the real segment video.
+  async function loadRecordings() {
+    const countEl = $("wl-rec-count");
+    let segs, snaps;
+    try {
+      const [segRes, snapRes] = await Promise.all([
+        fetch(apiUrl(`/api/segments?stream=${REC_STREAM}&limit=${REC_LIMIT}`), { cache: "no-store" }),
+        fetch(apiUrl("/api/snapshots?limit=300"), { cache: "no-store" }),
+      ]);
+      if (!segRes.ok) throw new Error("HTTP " + segRes.status);
+      segs = await segRes.json();
+      snaps = snapRes.ok ? await snapRes.json() : [];
+    } catch (err) {
+      countEl.textContent = "fetch failed";
+      return;
+    }
+    segs = Array.isArray(segs) ? segs : [];
+    snaps = Array.isArray(snaps) ? snaps : [];
+    countEl.textContent = segs.length ? `${segs.length} shown` : "";
+    $("wl-rec-empty").hidden = segs.length > 0;
+
+    const sig = segs.map((s) => s.url).join(",");
+    if (sig === lastRecsSig) return;
+    lastRecsSig = sig;
+
+    const pool = snaps
+      .filter((s) => s.ts != null && s.url)
+      .map((s) => ({ ts: s.ts, url: s.url, stream: s.stream }));
+    renderRecordings(segs, pool);
+  }
+
+  // Nearest snapshot to `ts`: prefer a same-stream (cam) still within
+  // POSTER_PREFER_CAM_S, else the nearest of any stream within POSTER_MAX_S.
+  function pickPoster(ts, pool) {
+    let nearAny = null;
+    let nearCam = null;
+    for (const p of pool) {
+      const d = Math.abs(p.ts - ts);
+      if (nearAny == null || d < nearAny.d) nearAny = { d, p };
+      if (p.stream === REC_STREAM && (nearCam == null || d < nearCam.d)) nearCam = { d, p };
+    }
+    if (nearCam && nearCam.d <= POSTER_PREFER_CAM_S) return { ...nearCam.p, delta: nearCam.p.ts - ts };
+    if (nearAny && nearAny.d <= POSTER_MAX_S) return { ...nearAny.p, delta: nearAny.p.ts - ts };
+    return null;
+  }
+
+  function renderRecordings(segs, pool) {
+    const list = $("wl-rec-list");
+    list.replaceChildren();
+    const frag = document.createDocumentFragment();
+    segs.forEach((seg) => frag.append(buildRecordingRow(seg, pickPoster(seg.start_time, pool))));
+    list.append(frag);
+  }
+
+  function buildRecordingRow(seg, poster) {
+    const li = document.createElement("li");
+    li.className = "wl-evt";
+
+    const row = document.createElement("div");
+    row.className = "wl-evt-row";
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.setAttribute("aria-expanded", "false");
+
+    if (poster) {
+      const img = document.createElement("img");
+      img.className = "wl-evt-thumb";
+      img.loading = "lazy";
+      img.src = mediaUrl(poster.url);
+      img.alt = "nearest still";
+      row.append(img);
+    } else {
+      const ph = document.createElement("div");
+      ph.className = "wl-evt-thumb placeholder";
+      ph.textContent = "◇";
+      row.append(ph);
+    }
+
+    const main = document.createElement("div");
+    main.className = "wl-evt-main";
+    const top = document.createElement("div");
+    top.className = "wl-evt-top";
+    const label = document.createElement("span");
+    label.className = "wl-evt-label";
+    label.textContent = "Recording";
+    const time = document.createElement("span");
+    time.className = "wl-evt-time";
+    time.textContent = fmtEventTime(seg.start_time);
+    top.append(label, time);
+
+    const meta = document.createElement("div");
+    meta.className = "wl-evt-meta";
+    const bits = [];
+    if (seg.duration != null) bits.push(`${Number(seg.duration).toFixed(0)}s`);
+    if (poster) {
+      const off = Math.round(poster.delta);
+      const sign = off > 0 ? "+" : "";
+      bits.push(`poster: ${STREAM_LABELS[poster.stream] || poster.stream} ${sign}${off}s`);
+    } else {
+      bits.push("no nearby still");
+    }
+    if (seg.size != null) bits.push(fmtBytes(seg.size));
+    meta.textContent = bits.join("  ·  ");
+    main.append(top, meta);
+    row.append(main);
+
+    const tail = document.createElement("div");
+    tail.className = "wl-evt-tail";
+    const tag = document.createElement("span");
+    tag.className = "wl-evt-cliptag";
+    tag.textContent = "▶ play";
+    const caret = document.createElement("span");
+    caret.className = "wl-evt-caret";
+    caret.textContent = "▾";
+    tail.append(tag, caret);
+    row.append(tail);
+
+    const detail = document.createElement("div");
+    detail.className = "wl-evt-detail";
+    detail.hidden = true;
+
+    let built = false;
+    const toggle = () => {
+      const open = li.classList.toggle("open");
+      row.setAttribute("aria-expanded", open ? "true" : "false");
+      detail.hidden = !open;
+      if (open) {
+        expandedRecs.add(seg.url);
+        if (!built) {
+          detail.append(buildVideoPlayer(seg.url));
+          built = true;
+        }
+      } else {
+        expandedRecs.delete(seg.url);
+      }
+    };
+    row.addEventListener("click", toggle);
+    row.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        toggle();
+      }
+    });
+
+    li.append(row, detail);
+    if (expandedRecs.has(seg.url)) toggle();
+    return li;
   }
 
   // ---- controls --------------------------------------------------------------
@@ -732,6 +899,7 @@
     loadStatus();
     loadPir();
     loadEvents();
+    loadRecordings();
   }
 
   function startPolling() {
