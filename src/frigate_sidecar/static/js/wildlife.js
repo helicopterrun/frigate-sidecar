@@ -543,11 +543,14 @@
     }
   }
 
-  // Both event clips and recording segments come from `cam` and are recorded
-  // sideways with no rotation metadata (known backend limitation — the H.264
-  // can't be losslessly rotated). We rotate the <video> 90° clockwise in CSS
-  // (`.wl-evt-video`); the poster route applies the matching ffmpeg transpose=1.
-  // `path` is a "/media/…" path (clip_path or seg.url).
+  // Both event clips and recording segments come from `cam`, which records
+  // sideways. They differ in one crucial way: event clips (evt_*.mp4) carry
+  // rotation metadata, so the browser ALREADY presents them upright; recording
+  // segments (seg_*.mp4) have none, so the browser shows them on their side.
+  // So we rotate 90° CW (CSS `.rot`) ONLY when the loaded video is landscape —
+  // segments get rotated, already-upright event clips are left alone. This is
+  // source-agnostic: it keys off what the browser actually renders, not the
+  // path. `path` is a "/media/…" path (clip_path or seg.url).
   function buildVideoPlayer(path) {
     const wrap = document.createElement("div");
     wrap.className = "wl-evt-clipbox";
@@ -560,6 +563,11 @@
     v.preload = "metadata";
     v.playsInline = true;
     v.src = clipUrl(path);
+    // Landscape (W>H) → browser is showing it sideways → rotate it upright.
+    // Portrait → browser already rotated it via metadata → leave natural.
+    v.addEventListener("loadedmetadata", () => {
+      vwrap.classList.toggle("rot", v.videoWidth > v.videoHeight);
+    });
     vwrap.append(v);
     wrap.append(vwrap);
 

@@ -3,7 +3,7 @@
 {% block title %}Wildlife · frigate-sidecar{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="/static/css/wildlife.css">
+<link rel="stylesheet" href="/static/css/wildlife.css?v={{ asset_v }}">
 {% endblock %}
 
 {% block body %}
@@ -155,5 +155,5 @@
 
 {% block scripts %}
 <script>window.WILDLIFE_API_BASE = {{ api_base|tojson }};</script>
-<script src="/static/js/wildlife.js"></script>
+<script src="/static/js/wildlife.js?v={{ asset_v }}"></script>
 {% endblock %}

@@ -69,13 +69,26 @@ _POSTER_CACHE_MAX = 2000
 _ffmpeg_sem = asyncio.Semaphore(3)
 
 
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+
+def _asset_version() -> str:
+    """Cache-bust token from the page's own JS/CSS mtimes, so edits take effect
+    without a manual hard-refresh (the asset URLs are otherwise unversioned)."""
+    try:
+        files = [_STATIC_DIR / "js" / "wildlife.js", _STATIC_DIR / "css" / "wildlife.css"]
+        return str(int(max(f.stat().st_mtime for f in files)))
+    except OSError:
+        return "0"
+
+
 @router.get("/wildlife", response_class=HTMLResponse)
 def wildlife_view(request: Request) -> Any:
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request,
         "wildlife.html",
-        {"api_base": _API_BASE, "counts": {}},
+        {"api_base": _API_BASE, "counts": {}, "asset_v": _asset_version()},
     )
 
 

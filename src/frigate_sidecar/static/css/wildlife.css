@@ -66,14 +66,19 @@
                 cursor: pointer; border: 1px solid #2a2f3a; }
 .wl-evt-still:hover { border-color: #3b82f6; }
 .wl-evt-clipbox { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
-/* The cam clip/segment is recorded sideways (no rotation metadata); rotate it
-   back to upright. The wrapper is a portrait box (9:16) and the <video> is its
-   landscape (16:9) source rotated 90° clockwise — verified upright against
-   extracted frames. Keep this in sync with the poster's ffmpeg transpose=1. */
-.wl-evt-video-wrap { width: 240px; height: 426px; max-width: 72vw; position: relative;
-                     overflow: hidden; background: #000; border-radius: 6px; }
-.wl-evt-video { position: absolute; top: 50%; left: 50%; width: 426px; height: 240px; max-width: none;
-                object-fit: contain; background: #000;
+/* Default: show the video at the orientation the browser resolves. Event clips
+   carry rotation metadata so the browser presents them upright already — no CSS
+   rotation, normal bottom controls. */
+.wl-evt-video-wrap { display: inline-block; background: #000; border-radius: 6px; max-width: 100%; }
+.wl-evt-video { display: block; max-width: 240px; max-height: 60vh; background: #000; }
+/* Rotated mode (JS adds .rot when the loaded video is landscape): a source with
+   no rotation metadata — recording segments — is shown sideways by the browser,
+   so rotate it 90° CW into a portrait box. Verified upright against extracted
+   frames; keep in sync with the poster's ffmpeg transpose=1. */
+.wl-evt-video-wrap.rot { position: relative; width: 240px; height: 426px; max-width: 72vw;
+                         overflow: hidden; display: block; }
+.wl-evt-video-wrap.rot .wl-evt-video { position: absolute; top: 50%; left: 50%;
+                width: 426px; height: 240px; max-width: none; max-height: none; object-fit: contain;
                 transform: translate(-50%, -50%) rotate(90deg); transform-origin: center center; }
 .wl-evt-clip { color: #93c5fd; font-size: 11px; text-decoration: none; }
 .wl-evt-clip:hover { text-decoration: underline; }
