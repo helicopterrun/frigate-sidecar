@@ -43,12 +43,13 @@
   const empty = $("wl-empty");
   const msg = $("wl-msg");
 
-  let stream = "all"; // 'all' | 'cam' | 'cam2'
-  let items = []; // last rendered snapshot list (for the grid)
+  let stream = "all"; // stills camera filter: 'all' | 'cam' | 'cam2'
+  let view = "clips"; // main grid mode: 'clips' (events) | 'stills' (continuous)
+  let items = []; // last rendered snapshot list (for the stills grid)
+  let clipEvents = []; // last fetched events (for the clips grid + detail overlay)
+  let lastClipsSig = ""; // id-signature of the last rendered clips set; skip rebuild if unchanged
   let lbList = []; // generic lightbox source: [{ src, alt, cap }] — snapshots OR event stills
   let lbIndex = -1;
-  const expandedEvents = new Set(); // event ids whose detail panel is open (survives re-render)
-  let lastEventsSig = ""; // id-signature of the last rendered event set; skip re-render if unchanged
   const expandedRecs = new Set(); // recording ids (seg url) whose player is open
   let lastRecsSig = ""; // signature of the last rendered recording set
   let pollTimer = null;
@@ -129,6 +130,7 @@
 
   function renderGrid() {
     grid.replaceChildren();
+    empty.textContent = "No snapshots returned.";
     empty.hidden = items.length > 0;
     const frag = document.createDocumentFragment();
     items.forEach((s, i) => {
@@ -314,19 +316,21 @@
     // Clear→detected edge: a trigger just landed → pull events soon (give the
     // upstream a moment to write the row before we re-fetch).
     if (detected && !pirDetected) {
-      setTimeout(loadEvents, 1200);
+      setTimeout(loadClips, 1200);
     }
     pirDetected = detected;
   }
 
-  // ---- motion events ---------------------------------------------------------
+  // ---- main grid: clips (events) or stills (continuous snapshots) ------------
 
-  // GET /api/events?type=pir → newest-first list. Item shape (wildlife-cam
-  // docs/API.md): { id, type, stream, start_time, end_time, score, label,
-  // thumbnail, clip_path, has_clip, data }. Most fields are optional/forward-
-  // looking, so render defensively.
-  async function loadEvents() {
-    const countEl = $("wl-events-count");
+  function loadGrid() {
+    return view === "clips" ? loadClips() : loadSnapshots();
+  }
+
+  // GET /api/events?type=pir → newest-first. In clips view the grid shows each
+  // event as a first-frame poster tile (tap → event overlay). `data` is a JSON
+  // string per row; rendered defensively (fields roll out independently).
+  async function loadClips() {
     let evts;
     try {
       const q = new URLSearchParams({ type: "pir", limit: String(EVENTS_LIMIT) });
@@ -334,28 +338,26 @@
       if (!res.ok) throw new Error("HTTP " + res.status);
       evts = await res.json();
     } catch (err) {
-      countEl.textContent = "fetch failed";
+      if (view === "clips") setMsg("Events fetch failed: " + err.message, "err");
       return;
     }
-    evts = Array.isArray(evts) ? evts : [];
-    countEl.textContent = evts.length ? `${evts.length} shown` : "";
-    $("wl-events-empty").hidden = evts.length > 0;
-
-    // Skip the DOM rebuild when the event set is unchanged — otherwise the 45s
-    // poll would collapse an open row and restart a playing clip. The ordered id
-    // list is a sufficient signature (rows are append-only upstream).
-    const sig = evts.map((e) => e.id).join(",");
-    if (sig === lastEventsSig) return;
-    lastEventsSig = sig;
-    renderEvents(evts);
+    clipEvents = Array.isArray(evts) ? evts : [];
+    const sig = clipEvents.map((e) => e.id).join(",");
+    const changed = sig !== lastClipsSig;
+    lastClipsSig = sig;
+    if (view !== "clips") return; // fetched in the background; stills are showing
+    $("wl-count").textContent = clipEvents.length ? `${clipEvents.length} clips` : "";
+    if (msg.classList.contains("err")) setMsg("");
+    if (changed) renderClips();
   }
 
-  function renderEvents(evts) {
-    const list = $("wl-events-list");
-    list.replaceChildren();
+  function renderClips() {
+    grid.replaceChildren();
+    empty.textContent = "No motion events yet.";
+    empty.hidden = clipEvents.length > 0;
     const frag = document.createDocumentFragment();
-    evts.forEach((e) => frag.append(buildEventRow(e)));
-    list.append(frag);
+    clipEvents.forEach((e) => frag.append(buildClipTile(e)));
+    grid.append(frag);
   }
 
   // `data` is a JSON STRING carrying the real payload (mode, stills, lux, and —
@@ -378,161 +380,110 @@
     return mode === "night" ? "cam" : mode === "day" ? "cam2" : null;
   }
 
-  function buildEventRow(e) {
+  // A grid tile for one event: first-frame poster + day/night badge + time, tap
+  // to open the event overlay. The poster is a still (cheap); the actual clip
+  // plays once the overlay is open.
+  function buildClipTile(e) {
     const d = parseEventData(e);
     const mode = d.mode || (e.thumbnail && e.thumbnail.includes("/snap/cam2/") ? "day" : "");
     const stills =
-      Array.isArray(d.stills) && d.stills.length
-        ? d.stills
-        : e.thumbnail
-        ? [e.thumbnail]
-        : [];
+      Array.isArray(d.stills) && d.stills.length ? d.stills : e.thumbnail ? [e.thumbnail] : [];
     const cam = streamFromStill(stills[0] || e.thumbnail, mode);
 
-    const li = document.createElement("li");
-    li.className = "wl-evt";
-
-    // ---- collapsed header row (click / Enter to expand) ----
-    const row = document.createElement("div");
-    row.className = "wl-evt-row";
-    row.tabIndex = 0;
-    row.setAttribute("role", "button");
-    row.setAttribute("aria-expanded", "false");
-
-    const thumbSrc = e.thumbnail || stills[0];
-    if (thumbSrc) {
-      const img = document.createElement("img");
-      img.className = "wl-evt-thumb";
-      img.loading = "lazy";
-      img.src = mediaUrl(thumbSrc);
-      img.alt = mode || e.type || "event";
-      row.append(img);
-    } else {
-      const ph = document.createElement("div");
-      ph.className = "wl-evt-thumb placeholder";
-      ph.textContent = "◇";
-      row.append(ph);
-    }
-
-    const main = document.createElement("div");
-    main.className = "wl-evt-main";
-
-    const top = document.createElement("div");
-    top.className = "wl-evt-top";
-    if (mode) {
-      const badge = document.createElement("span");
-      badge.className = "wl-evt-mode " + (mode === "night" ? "night" : "day");
-      badge.textContent = mode === "night" ? "🌙 night" : "☀ day";
-      top.append(badge);
-    }
-    if (cam) {
-      const camEl = document.createElement("span");
-      camEl.className = "wl-evt-label";
-      camEl.textContent = CAM_LABELS[cam] || cam;
-      top.append(camEl);
-    }
-    const time = document.createElement("span");
-    time.className = "wl-evt-time";
-    time.textContent = fmtEventTime(e.start_time);
-    top.append(time);
-
-    const meta = document.createElement("div");
-    meta.className = "wl-evt-meta";
-    const bits = [];
-    if (mode === "night" && d.metering) {
-      const ms = meteringSummary(d.metering);
-      if (ms) bits.push(ms);
-    } else if (d.lux != null) {
-      bits.push(`${Number(d.lux).toFixed(0)} lux`);
-    }
-    if (stills.length) bits.push(`${stills.length} still${stills.length === 1 ? "" : "s"}`);
-    const dur = eventDuration(e);
-    if (dur) bits.push(dur);
-    meta.textContent = bits.join("  ·  ");
-
-    main.append(top, meta);
-    row.append(main);
-
-    const tail = document.createElement("div");
-    tail.className = "wl-evt-tail";
-    if (e.has_clip && e.clip_path) {
-      const tag = document.createElement("span");
-      tag.className = "wl-evt-cliptag";
-      tag.textContent = "▶ clip";
-      tail.append(tag);
-    }
-    const caret = document.createElement("span");
-    caret.className = "wl-evt-caret";
-    caret.textContent = "▾";
-    tail.append(caret);
-    row.append(tail);
-
-    // ---- detail panel (built lazily on first expand) ----
-    const detail = document.createElement("div");
-    detail.className = "wl-evt-detail";
-    detail.hidden = true;
-
-    let built = false;
-    const toggle = () => {
-      const open = li.classList.toggle("open");
-      row.setAttribute("aria-expanded", open ? "true" : "false");
-      detail.hidden = !open;
-      if (open) {
-        expandedEvents.add(e.id);
-        if (!built) {
-          buildEventDetail(detail, e, d, stills, cam, mode);
-          built = true;
-        }
-      } else {
-        expandedEvents.delete(e.id);
-      }
-    };
-    row.addEventListener("click", toggle);
-    row.addEventListener("keydown", (ev) => {
+    const tile = document.createElement("div");
+    tile.className = "wl-tile wl-cliptile";
+    tile.tabIndex = 0;
+    const open = () => openEventModal(e, d, stills, cam, mode);
+    tile.addEventListener("click", open);
+    tile.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" || ev.key === " ") {
         ev.preventDefault();
-        toggle();
+        open();
       }
     });
 
-    li.append(row, detail);
+    const fig = document.createElement("div");
+    fig.className = "wl-clipfig";
+    const posterSrc = e.thumbnail || stills[0];
+    if (posterSrc) {
+      const img = document.createElement("img");
+      img.className = "wl-thumb";
+      img.loading = "lazy";
+      img.src = mediaUrl(posterSrc);
+      img.alt = mode || "event";
+      fig.append(img);
+    } else {
+      const ph = document.createElement("div");
+      ph.className = "wl-thumb placeholder";
+      ph.textContent = "◇";
+      fig.append(ph);
+    }
+    const hasVideo = !!(d.burst_video || (e.has_clip && e.clip_path));
+    const play = document.createElement("span");
+    play.className = "wl-clipplay";
+    play.textContent = hasVideo ? "▶" : "🖼";
+    fig.append(play);
+    tile.append(fig);
 
-    // Restore the open state across a poll-driven re-render.
-    if (expandedEvents.has(e.id)) toggle();
+    const meta = document.createElement("div");
+    meta.className = "wl-meta";
+    const stillsTxt = stills.length ? `${stills.length} still${stills.length === 1 ? "" : "s"}` : "";
+    meta.innerHTML =
+      `<div class="wl-meta-row"><span class="wl-time">${fmtEventTime(e.start_time)}</span>` +
+      `<span class="wl-chip ${mode === "night" ? "night" : "day"}">${mode === "night" ? "🌙 night" : "☀ day"}</span></div>` +
+      `<div class="wl-meta-row"><span class="wl-chip cam">${STREAM_LABELS[cam] || cam || ""}</span>` +
+      `<span class="wl-exp">${stillsTxt}</span></div>`;
+    tile.append(meta);
+    return tile;
+  }
 
-    return li;
+  // ---- event detail overlay --------------------------------------------------
+
+  function openEventModal(e, d, stills, cam, mode) {
+    const badge = mode === "night" ? "🌙 night" : "☀ day";
+    $("wl-eb-title").textContent =
+      `${badge} · ${CAM_LABELS[cam] || cam || "event"} · ${fmtEventTime(e.start_time)}`;
+    buildEventDetail($("wl-eb-body"), e, d, stills, cam, mode);
+    $("wl-eventbox").hidden = false;
+  }
+
+  function closeEventModal() {
+    $("wl-eventbox").hidden = true;
+    $("wl-eb-body").replaceChildren(); // tears down any playing burst/clip/audio
   }
 
   // Render whatever media a given event actually has — the fields roll out
   // independently, so never assume (a day event can have a burst but no
-  // clip_path; an older event can have neither). Players first, stills below.
+  // clip_path; an older event can have neither). Burst is the hero; the motion
+  // clip / audio are a click away; stills below.
   function buildEventDetail(detail, e, d, stills, cam, mode) {
     detail.replaceChildren();
 
     const hasClip = !!(e.has_clip && e.clip_path);
 
-    // Primary motion clip (day): 1080p with audio, browser-upright via its
-    // display-matrix rotation tag — no CSS rotation.
-    if (hasClip) detail.append(buildVideoPlayer(e.clip_path));
-
-    // Full-res portrait burst (day + night): the sharpest view, silent, natively
-    // portrait — sizes to its own aspect, no rotation. Primary when no clip.
+    // Primary: the full-res portrait burst (sharpest view, day + night). Silent,
+    // natively portrait, no rotation — autoplay it muted+looped on open. If
+    // there's no burst (older/edge events), the motion clip stands in.
     if (d.burst_video) {
-      detail.append(mediaLabel(hasClip ? "HD · full-res (silent)" : "Full-res video (silent)"));
-      detail.append(buildVideoPlayer(d.burst_video));
+      detail.append(buildVideoPlayer(d.burst_video, false, true));
+    } else if (hasClip) {
+      detail.append(buildVideoPlayer(e.clip_path));
     }
 
-    // Night audio (.m4a) — audio-only, so an <audio> element, not <video>.
+    // Secondary, a click away: the day motion clip (has sound) or the night
+    // audio. Loaded on demand so the overlay doesn't fetch two videos up front.
+    if (d.burst_video && hasClip) {
+      detail.append(secondaryPlayback("▶ Play clip with sound", () => buildVideoPlayer(e.clip_path)));
+    }
     if (d.audio) {
-      detail.append(mediaLabel("Audio"));
-      detail.append(buildAudioPlayer(d.audio));
+      detail.append(secondaryPlayback("🔊 Play audio", () => buildAudioPlayer(d.audio)));
     }
 
     // Night metering readout.
     if (mode === "night" && d.metering) detail.append(buildMetering(d));
 
     // Older events may have neither clip nor burst (stills still shown below).
-    if (!hasClip && !d.burst_video) {
+    if (!d.burst_video && !hasClip) {
       const note = document.createElement("p");
       note.className = "wl-evt-note";
       note.textContent = "No video for this event.";
@@ -540,6 +491,20 @@
     }
 
     detail.append(buildStillsGallery(e, d, stills, cam, mode));
+  }
+
+  // A labelled button that swaps itself for the player it builds, on click —
+  // keeps secondary media "a click away" without loading it up front.
+  function secondaryPlayback(label, makePlayer) {
+    const wrap = document.createElement("div");
+    wrap.className = "wl-evt-secondary";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "wl-btn wl-evt-secbtn";
+    btn.textContent = label;
+    btn.addEventListener("click", () => btn.replaceWith(makePlayer()), { once: true });
+    wrap.append(btn);
+    return wrap;
   }
 
   // Still burst → click any frame to page through it in the lightbox. Night
@@ -598,7 +563,7 @@
   // and passes `rotate` — we can't infer it client-side, because browsers report
   // videoWidth/Height WITHOUT accounting for rotation metadata (so an already-
   // upright event clip still reads as landscape). `path` is a "/media/…" path.
-  function buildVideoPlayer(path, rotate) {
+  function buildVideoPlayer(path, rotate, autoplay) {
     const wrap = document.createElement("div");
     wrap.className = "wl-evt-clipbox";
 
@@ -609,6 +574,13 @@
     v.controls = true;
     v.preload = "metadata";
     v.playsInline = true;
+    // The burst is silent + short — autoplay it muted on a loop so the event
+    // "plays" the moment the overlay opens (muted autoplay is allowed).
+    if (autoplay) {
+      v.muted = true;
+      v.autoplay = true;
+      v.loop = true;
+    }
     v.src = clipUrl(path);
     vwrap.append(v);
     wrap.append(vwrap);
@@ -913,10 +885,9 @@
   // ---- polling ---------------------------------------------------------------
 
   function refreshAll() {
-    loadSnapshots();
+    loadGrid();
     loadStatus();
     loadPir();
-    loadEvents();
     loadRecordings();
   }
 
@@ -937,7 +908,23 @@
   // ---- wiring ----------------------------------------------------------------
 
   function init() {
-    // Camera filter segmented control
+    // Clips | Stills view toggle (the main grid's mode)
+    $("wl-viewseg").addEventListener("click", (e) => {
+      const btn = e.target.closest(".vbtn");
+      if (!btn || btn.dataset.view === view) return;
+      view = btn.dataset.view;
+      $("wl-viewseg")
+        .querySelectorAll(".vbtn")
+        .forEach((b) => b.classList.toggle("active", b === btn));
+      $("wl-streamseg").hidden = view !== "stills"; // camera filter is stills-only
+      grid.replaceChildren();
+      lastClipsSig = ""; // force a clips re-render after switching back
+      $("wl-count").textContent = "—";
+      setMsg("");
+      loadGrid();
+    });
+
+    // Camera filter segmented control (stills only)
     $("wl-streamseg").addEventListener("click", (e) => {
       const btn = e.target.closest(".vbtn");
       if (!btn) return;
@@ -961,6 +948,12 @@
     $("wl-settings-reload").addEventListener("click", loadSettings);
     sform.addEventListener("submit", saveSettings);
 
+    // Event detail overlay
+    $("wl-eb-close").addEventListener("click", closeEventModal);
+    $("wl-eventbox").addEventListener("click", (e) => {
+      if (e.target.id === "wl-eventbox") closeEventModal();
+    });
+
     // Lightbox
     $("wl-lb-close").addEventListener("click", closeLightbox);
     $("wl-lb-prev").addEventListener("click", () => stepLightbox(-1));
@@ -969,10 +962,14 @@
       if (e.target.id === "wl-lightbox") closeLightbox();
     });
     document.addEventListener("keydown", (e) => {
-      if ($("wl-lightbox").hidden) return;
-      if (e.key === "Escape") closeLightbox();
-      else if (e.key === "ArrowLeft") stepLightbox(-1);
-      else if (e.key === "ArrowRight") stepLightbox(1);
+      // Lightbox sits on top of the event overlay — it takes keys first.
+      if (!$("wl-lightbox").hidden) {
+        if (e.key === "Escape") closeLightbox();
+        else if (e.key === "ArrowLeft") stepLightbox(-1);
+        else if (e.key === "ArrowRight") stepLightbox(1);
+        return;
+      }
+      if (!$("wl-eventbox").hidden && e.key === "Escape") closeEventModal();
     });
 
     // Pause polling when the tab is hidden (be a good LAN citizen).

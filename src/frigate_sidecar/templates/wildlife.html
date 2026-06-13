@@ -28,7 +28,11 @@
 
   <!-- Controls bar -->
   <div class="wl-bar">
-    <div class="viewseg" id="wl-streamseg" role="tablist" aria-label="Camera filter">
+    <div class="viewseg" id="wl-viewseg" role="tablist" aria-label="View">
+      <button type="button" class="vbtn active" data-view="clips">Clips</button>
+      <button type="button" class="vbtn" data-view="stills">Stills</button>
+    </div>
+    <div class="viewseg" id="wl-streamseg" role="tablist" aria-label="Camera filter" hidden>
       <button type="button" class="vbtn active" data-stream="all">Both</button>
       <button type="button" class="vbtn" data-stream="cam">IMX415 · low-light</button>
       <button type="button" class="vbtn" data-stream="cam2">IMX708 · autofocus</button>
@@ -112,20 +116,11 @@
     </div>
   </form>
 
+  <!-- Main grid: Clips (events, default) or Stills (continuous snapshots), per
+       the #wl-viewseg toggle. Clip tiles show the event's first-frame poster and
+       open the event overlay on tap; still tiles open the image lightbox. -->
   <div class="wl-grid" id="wl-grid"></div>
-  <p class="wl-empty" id="wl-empty" hidden>No snapshots returned.</p>
-
-  <!-- Motion events: GET /api/events?type=pir (newest-first). Empty until PIR
-       triggers are recorded upstream; refreshed on the main poll + on a
-       clear→detected edge from /api/pir so new events surface quickly. -->
-  <section class="wl-events" id="wl-events-section">
-    <div class="wl-events-head">
-      <h2 class="wl-events-title">Motion events</h2>
-      <span class="wl-events-count" id="wl-events-count"></span>
-    </div>
-    <ul class="wl-events-list" id="wl-events-list"></ul>
-    <p class="wl-events-empty" id="wl-events-empty" hidden>No PIR events recorded yet.</p>
-  </section>
+  <p class="wl-empty" id="wl-empty" hidden>Nothing to show.</p>
 
   <!-- Recordings: GET /api/segments?stream=cam (10s rolling segments, cam only).
        Each tile's poster is the segment's own first frame, extracted + cached by
@@ -140,6 +135,19 @@
     <p class="wl-events-empty" id="wl-rec-empty" hidden>No recordings.</p>
   </section>
 </main>
+
+<!-- Event detail overlay: opened by tapping a clip tile. The burst video is the
+     primary playback; the motion clip (day) / audio (night) are secondary, and
+     the stills gallery opens the image lightbox on top. -->
+<div class="wl-eventbox" id="wl-eventbox" hidden>
+  <div class="wl-eb-panel" role="dialog" aria-modal="true" aria-label="Event detail">
+    <div class="wl-eb-head">
+      <span class="wl-eb-title" id="wl-eb-title"></span>
+      <button type="button" class="wl-eb-close" id="wl-eb-close" aria-label="Close">✕</button>
+    </div>
+    <div class="wl-eb-body" id="wl-eb-body"></div>
+  </div>
+</div>
 
 <!-- Lightbox -->
 <div class="wl-lightbox" id="wl-lightbox" hidden>

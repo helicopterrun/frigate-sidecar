@@ -138,6 +138,33 @@
 .wl-exp { font-variant-numeric: tabular-nums; }
 .wl-empty { color: #8a92a6; font-size: 13px; }
 
+/* Clip tiles (events in the grid): a poster still with a play badge. */
+.wl-clipfig { position: relative; display: block; }
+.wl-clipplay { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+               width: 34px; height: 34px; border-radius: 50%; background: rgba(7, 8, 11, 0.55);
+               color: #fff; font-size: 15px; display: flex; align-items: center; justify-content: center;
+               pointer-events: none; }
+
+/* Event detail overlay (opened from a clip tile). z-index below the lightbox so
+   the stills lightbox opens on top of it. */
+.wl-eventbox { position: fixed; inset: 0; background: rgba(7, 8, 11, 0.92); z-index: 40;
+               display: flex; align-items: center; justify-content: center; padding: 16px; }
+.wl-eventbox[hidden] { display: none; }
+.wl-eb-panel { background: #11141c; border: 1px solid #2a2f3a; border-radius: 10px;
+               width: 520px; max-width: 96vw; max-height: 92vh; display: flex; flex-direction: column;
+               overflow: hidden; }
+.wl-eb-head { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+              padding: 12px 14px; border-bottom: 1px solid #1a1d26; }
+.wl-eb-title { font-size: 13px; color: #e6e6e6; font-weight: 600; }
+.wl-eb-close { background: none; border: 0; color: #8a92a6; font-size: 18px; line-height: 1; cursor: pointer; }
+.wl-eb-close:hover { color: #e6e6e6; }
+.wl-eb-body { padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+              align-items: flex-start; }
+/* Give the primary burst a bigger hero size inside the overlay. */
+.wl-eb-body .wl-evt-video { max-width: 320px; max-height: 70vh; }
+.wl-evt-secondary { margin-top: 2px; }
+.wl-evt-secbtn { font-size: 12px; }
+
 /* Lightbox */
 .wl-lightbox { position: fixed; inset: 0; background: rgba(7, 8, 11, 0.92); z-index: 50;
                display: flex; align-items: center; justify-content: center; }
