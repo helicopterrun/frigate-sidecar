@@ -545,29 +545,24 @@
 
   // Both event clips and recording segments come from `cam`, which records
   // sideways. They differ in one crucial way: event clips (evt_*.mp4) carry
-  // rotation metadata, so the browser ALREADY presents them upright; recording
-  // segments (seg_*.mp4) have none, so the browser shows them on their side.
-  // So we rotate 90° CW (CSS `.rot`) ONLY when the loaded video is landscape —
-  // segments get rotated, already-upright event clips are left alone. This is
-  // source-agnostic: it keys off what the browser actually renders, not the
-  // path. `path` is a "/media/…" path (clip_path or seg.url).
-  function buildVideoPlayer(path) {
+  // rotation metadata, so the browser presents them upright on its own; recording
+  // segments (seg_*.mp4) have none, so the browser shows them on their side and
+  // we must rotate them 90° CW (CSS `.rot`). The caller knows which it's playing
+  // and passes `rotate` — we can't infer it client-side, because browsers report
+  // videoWidth/Height WITHOUT accounting for rotation metadata (so an already-
+  // upright event clip still reads as landscape). `path` is a "/media/…" path.
+  function buildVideoPlayer(path, rotate) {
     const wrap = document.createElement("div");
     wrap.className = "wl-evt-clipbox";
 
     const vwrap = document.createElement("div");
-    vwrap.className = "wl-evt-video-wrap";
+    vwrap.className = "wl-evt-video-wrap" + (rotate ? " rot" : "");
     const v = document.createElement("video");
     v.className = "wl-evt-video";
     v.controls = true;
     v.preload = "metadata";
     v.playsInline = true;
     v.src = clipUrl(path);
-    // Landscape (W>H) → browser is showing it sideways → rotate it upright.
-    // Portrait → browser already rotated it via metadata → leave natural.
-    v.addEventListener("loadedmetadata", () => {
-      vwrap.classList.toggle("rot", v.videoWidth > v.videoHeight);
-    });
     vwrap.append(v);
     wrap.append(vwrap);
 
@@ -740,7 +735,7 @@
       if (open) {
         expandedRecs.add(seg.url);
         if (!built) {
-          detail.append(buildVideoPlayer(seg.url));
+          detail.append(buildVideoPlayer(seg.url, true)); // segments lack rotation metadata
           built = true;
         }
       } else {
