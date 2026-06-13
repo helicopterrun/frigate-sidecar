@@ -66,14 +66,15 @@
                 cursor: pointer; border: 1px solid #2a2f3a; }
 .wl-evt-still:hover { border-color: #3b82f6; }
 .wl-evt-clipbox { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
-/* The event clip is recorded sideways; rotate it back to upright. The wrapper
-   is a portrait box (9:16) and the <video> is its landscape (16:9) source
-   rotated -90° (EXIF orientation 8). Flip the sign here if it ends up mirrored. */
+/* The cam clip/segment is recorded sideways (no rotation metadata); rotate it
+   back to upright. The wrapper is a portrait box (9:16) and the <video> is its
+   landscape (16:9) source rotated 90° clockwise — verified upright against
+   extracted frames. Keep this in sync with the poster's ffmpeg transpose=1. */
 .wl-evt-video-wrap { width: 240px; height: 426px; max-width: 72vw; position: relative;
                      overflow: hidden; background: #000; border-radius: 6px; }
 .wl-evt-video { position: absolute; top: 50%; left: 50%; width: 426px; height: 240px; max-width: none;
                 object-fit: contain; background: #000;
-                transform: translate(-50%, -50%) rotate(-90deg); transform-origin: center center; }
+                transform: translate(-50%, -50%) rotate(90deg); transform-origin: center center; }
 .wl-evt-clip { color: #93c5fd; font-size: 11px; text-decoration: none; }
 .wl-evt-clip:hover { text-decoration: underline; }
 .wl-evt-note { color: #8a92a6; font-size: 12px; margin: 0; }

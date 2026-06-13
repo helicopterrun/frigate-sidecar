@@ -544,11 +544,10 @@
   }
 
   // Both event clips and recording segments come from `cam` and are recorded
-  // sideways (known backend limitation — the H.264 can't be losslessly rotated).
-  // The capture app reports EXIF orientation 8 (= 90° CCW correction), so we
-  // rotate the <video> in CSS; stills are already upright via EXIF. If video
-  // looks sideways, flip the rotate() sign in `.wl-evt-video` (wildlife.css) —
-  // that's the single knob. `path` is a "/media/…" path (clip_path or seg.url).
+  // sideways with no rotation metadata (known backend limitation — the H.264
+  // can't be losslessly rotated). We rotate the <video> 90° clockwise in CSS
+  // (`.wl-evt-video`); the poster route applies the matching ffmpeg transpose=1.
+  // `path` is a "/media/…" path (clip_path or seg.url).
   function buildVideoPlayer(path) {
     const wrap = document.createElement("div");
     wrap.className = "wl-evt-clipbox";

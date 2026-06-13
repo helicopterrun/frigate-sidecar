@@ -151,14 +151,15 @@ def _prune_poster_cache(cache_dir: Path) -> None:
 async def _extract_poster(src_url: str, dst: Path) -> bool:
     """Pull the first frame of a segment, rotate it upright, scale, write to dst.
 
-    transpose=2 = 90° CCW, matching the player's CSS ``rotate(-90deg)`` so the
-    poster and the played video share orientation. Returns False on any failure.
+    transpose=1 = 90° clockwise, matching the player's CSS ``rotate(90deg)`` so
+    the poster and the played video share orientation (verified upright against
+    extracted frames). Returns False on any failure.
     """
     cmd = [
         _FFMPEG, "-nostdin", "-loglevel", "error",
         "-i", src_url,
         "-frames:v", "1",
-        "-vf", f"transpose=2,scale={_POSTER_W}:-1",
+        "-vf", f"transpose=1,scale={_POSTER_W}:-1",
         "-q:v", "4",
         "-y", str(dst),
     ]
