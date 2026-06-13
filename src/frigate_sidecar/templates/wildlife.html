@@ -42,17 +42,68 @@
 
   <!-- Capture settings (token-protected PUT /api/settings, token injected at proxy) -->
   <form class="wl-settings" id="wl-settings" hidden>
-    <div class="wl-set-grid">
-      <label>Night shutter (µs)
-        <input type="number" id="set-night_shutter_us" min="1000" max="10000000" step="1000"></label>
-      <label>Night gain
-        <input type="number" id="set-night_gain" min="1" max="64" step="1"></label>
-      <label>Day Lux threshold
-        <input type="number" id="set-lux_day" min="0" max="100" step="0.5"></label>
-      <label>JPEG quality
-        <input type="number" id="set-jpeg_quality" min="1" max="100" step="1"></label>
-      <label class="wl-check">Save raw DNG
-        <input type="checkbox" id="set-save_raw"></label>
+    <div class="wl-set-section">
+      <h3 class="wl-set-h">Mode switching</h3>
+      <div class="wl-set-grid">
+        <label>Night enter (lux)
+          <input type="number" id="set-night_enter_lux" min="0" max="100" step="0.5"></label>
+        <label>Day return (lux)
+          <input type="number" id="set-day_return_lux" min="0" max="100" step="0.5"></label>
+        <label>Day lux threshold
+          <input type="number" id="set-lux_day" min="0" max="100" step="0.5"></label>
+        <label>Min mode dwell (s)
+          <input type="number" id="set-mode_min_dwell_s" min="0" max="3600" step="5"></label>
+      </div>
+    </div>
+    <div class="wl-set-section">
+      <h3 class="wl-set-h">Metering</h3>
+      <div class="wl-set-grid">
+        <label>Meter interval (s)
+          <input type="number" id="set-meter_interval_s" min="1" max="3600" step="1"></label>
+        <label>Meter interval — fast (s)
+          <input type="number" id="set-meter_interval_fast_s" min="1" max="600" step="1"></label>
+        <label>Night cal k
+          <input type="number" id="set-night_cal_k" min="0" max="5" step="0.01"></label>
+      </div>
+    </div>
+    <div class="wl-set-section">
+      <h3 class="wl-set-h">Night exposure</h3>
+      <div class="wl-set-grid">
+        <label>Night shutter (µs)
+          <input type="number" id="set-night_shutter_us" min="1000" max="10000000" step="1000"></label>
+        <label>Night gain
+          <input type="number" id="set-night_gain" min="1" max="64" step="1"></label>
+        <label>Night max exposure (µs)
+          <input type="number" id="set-night_max_exposure_us" min="1000" max="10000000" step="1000"></label>
+        <label>Night gain ceiling
+          <input type="number" id="set-night_gain_ceiling" min="1" max="64" step="1"></label>
+      </div>
+    </div>
+    <div class="wl-set-section">
+      <h3 class="wl-set-h">Bursts &amp; clip</h3>
+      <div class="wl-set-grid">
+        <label>Night burst frames
+          <input type="number" id="set-night_burst_frames" min="1" max="30" step="1"></label>
+        <label>Night burst max (s)
+          <input type="number" id="set-night_burst_max_s" min="1" max="60" step="1"></label>
+        <label>Day burst count
+          <input type="number" id="set-day_burst_count" min="1" max="30" step="1"></label>
+        <label>Day freeze (µs)
+          <input type="number" id="set-day_freeze_us" min="100" max="100000" step="100"></label>
+        <label>Pre-roll (s)
+          <input type="number" id="set-preroll_s" min="0" max="30" step="1"></label>
+        <label>Post-roll (s)
+          <input type="number" id="set-postroll_s" min="0" max="30" step="1"></label>
+      </div>
+    </div>
+    <div class="wl-set-section">
+      <h3 class="wl-set-h">Image</h3>
+      <div class="wl-set-grid">
+        <label>JPEG quality
+          <input type="number" id="set-jpeg_quality" min="1" max="100" step="1"></label>
+        <label class="wl-check">Save raw DNG
+          <input type="checkbox" id="set-save_raw"></label>
+      </div>
     </div>
     <div class="wl-set-actions">
       <button type="submit" class="wl-btn wl-btn-accent">Save settings</button>

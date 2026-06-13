@@ -57,8 +57,15 @@
   // ---- helpers ---------------------------------------------------------------
 
   const apiUrl = (path) => API.replace(/\/$/, "") + path;
-  // Snapshot `url`/`raw_url` are relative to the API origin → prefix the base.
+  // Snapshot `url`/`raw_url` and event still URLs are relative to the API
+  // origin → prefix the base.
   const mediaUrl = (rel) => API.replace(/\/$/, "") + rel;
+  // Event clips are streamed through the SIDECAR (route /wildlife/media/...),
+  // NOT the wildlife API base: that path is independent of the ?api override and
+  // of whether NPM forwards /wildlifecam/media to the Pi (it doesn't reliably).
+  // clip_path is like "/media/_events/cam/evt_x.mp4".
+  const clipUrl = (clipPath) =>
+    clipPath ? "/wildlife/media/" + clipPath.replace(/^\/+media\/+/, "") : "";
 
   function setMsg(text, kind) {
     msg.textContent = text || "";
@@ -544,13 +551,13 @@
     v.controls = true;
     v.preload = "metadata";
     v.playsInline = true;
-    v.src = mediaUrl(e.clip_path);
+    v.src = clipUrl(e.clip_path);
     vwrap.append(v);
     wrap.append(vwrap);
 
     const a = document.createElement("a");
     a.className = "wl-evt-clip";
-    a.href = mediaUrl(e.clip_path);
+    a.href = clipUrl(e.clip_path);
     a.target = "_blank";
     a.rel = "noopener";
     a.textContent = "open raw clip ↗";
@@ -638,10 +645,34 @@
     }
   }
 
+  // Mirrors the Pi's GET/PUT /api/settings keys. PUT merges, so the form only
+  // sends fields present here. `orientation` is intentionally omitted — it's
+  // tied to the still/clip rotation handling and shouldn't be a casual knob.
   const SETTING_FIELDS = [
+    // Mode switching (day/night hysteresis)
+    ["night_enter_lux", "number"],
+    ["day_return_lux", "number"],
+    ["lux_day", "number"],
+    ["mode_min_dwell_s", "number"],
+    // Metering
+    ["meter_interval_s", "number"],
+    ["meter_interval_fast_s", "number"],
+    ["night_cal_k", "number"],
+    // Night exposure
     ["night_shutter_us", "number"],
     ["night_gain", "number"],
-    ["lux_day", "number"],
+    ["night_max_exposure_us", "number"],
+    ["night_gain_ceiling", "number"],
+    // Night burst
+    ["night_burst_frames", "number"],
+    ["night_burst_max_s", "number"],
+    // Day capture
+    ["day_burst_count", "number"],
+    ["day_freeze_us", "number"],
+    // Clip pre/post-roll
+    ["preroll_s", "number"],
+    ["postroll_s", "number"],
+    // Image
     ["jpeg_quality", "number"],
     ["save_raw", "bool"],
   ];
