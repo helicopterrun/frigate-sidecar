@@ -503,44 +503,91 @@
     return li;
   }
 
+  // Render whatever media a given event actually has — the fields roll out
+  // independently, so never assume (a day event can have a burst but no
+  // clip_path; an older event can have neither). Players first, stills below.
   function buildEventDetail(detail, e, d, stills, cam, mode) {
     detail.replaceChildren();
 
-    // Still burst → click any frame to page through it in the lightbox.
-    if (stills.length) {
-      const gal = document.createElement("div");
-      gal.className = "wl-evt-stills";
-      const lb = stills.map((u, k) => ({
-        src: mediaUrl(u),
-        alt: `${mode || "event"} still ${k + 1}/${stills.length}`,
-        cap:
-          `<span>${CAM_LABELS[cam] || cam || "event"}</span>` +
-          `<span>frame ${k + 1} / ${stills.length}</span>` +
-          `<span>${fmtEventTime(e.start_time)}</span>`,
-      }));
-      stills.forEach((u, k) => {
-        const img = document.createElement("img");
-        img.className = "wl-evt-still";
-        img.loading = "lazy";
-        img.src = mediaUrl(u);
-        img.alt = `still ${k + 1}`;
-        img.addEventListener("click", () => openLightbox(lb, k));
-        gal.append(img);
-      });
-      detail.append(gal);
+    const hasClip = !!(e.has_clip && e.clip_path);
+
+    // Primary motion clip (day): 1080p with audio, browser-upright via its
+    // display-matrix rotation tag — no CSS rotation.
+    if (hasClip) detail.append(buildVideoPlayer(e.clip_path));
+
+    // Full-res portrait burst (day + night): the sharpest view, silent, natively
+    // portrait — sizes to its own aspect, no rotation. Primary when no clip.
+    if (d.burst_video) {
+      detail.append(mediaLabel(hasClip ? "HD · full-res (silent)" : "Full-res video (silent)"));
+      detail.append(buildVideoPlayer(d.burst_video));
     }
 
-    // Day events carry a prerolled clip; night events have none — show metering.
-    if (mode === "night") {
-      detail.append(buildMetering(d));
-    } else if (e.has_clip && e.clip_path) {
-      detail.append(buildVideoPlayer(e.clip_path));
-    } else {
+    // Night audio (.m4a) — audio-only, so an <audio> element, not <video>.
+    if (d.audio) {
+      detail.append(mediaLabel("Audio"));
+      detail.append(buildAudioPlayer(d.audio));
+    }
+
+    // Night metering readout.
+    if (mode === "night" && d.metering) detail.append(buildMetering(d));
+
+    // Older events may have neither clip nor burst (stills still shown below).
+    if (!hasClip && !d.burst_video) {
       const note = document.createElement("p");
       note.className = "wl-evt-note";
-      note.textContent = "No clip for this event.";
+      note.textContent = "No video for this event.";
       detail.append(note);
     }
+
+    detail.append(buildStillsGallery(e, d, stills, cam, mode));
+  }
+
+  // Still burst → click any frame to page through it in the lightbox. Night
+  // bursts prepend pre-trigger frames (data.pre_frames); mark them.
+  function buildStillsGallery(e, d, stills, cam, mode) {
+    const frag = document.createDocumentFragment();
+    if (!stills.length) return frag;
+
+    const pre = mode === "night" && d.pre_frames > 0 ? d.pre_frames : 0;
+    if (pre) frag.append(mediaLabel(`Stills · first ${pre} are pre-trigger`));
+
+    const gal = document.createElement("div");
+    gal.className = "wl-evt-stills";
+    const lb = stills.map((u, k) => ({
+      src: mediaUrl(u),
+      alt: `${mode || "event"} still ${k + 1}/${stills.length}`,
+      cap:
+        `<span>${CAM_LABELS[cam] || cam || "event"}</span>` +
+        `<span>frame ${k + 1} / ${stills.length}${k < pre ? " · pre-trigger" : ""}</span>` +
+        `<span>${fmtEventTime(e.start_time)}</span>`,
+    }));
+    stills.forEach((u, k) => {
+      const img = document.createElement("img");
+      img.className = "wl-evt-still" + (k < pre ? " pre" : "");
+      img.loading = "lazy";
+      img.src = mediaUrl(u);
+      img.alt = `still ${k + 1}`;
+      img.addEventListener("click", () => openLightbox(lb, k));
+      gal.append(img);
+    });
+    frag.append(gal);
+    return frag;
+  }
+
+  function mediaLabel(text) {
+    const el = document.createElement("div");
+    el.className = "wl-evt-medialabel";
+    el.textContent = text;
+    return el;
+  }
+
+  function buildAudioPlayer(path) {
+    const a = document.createElement("audio");
+    a.className = "wl-evt-audio";
+    a.controls = true;
+    a.preload = "metadata";
+    a.src = clipUrl(path);
+    return a;
   }
 
   // Both event clips and recording segments come from `cam`, which records
