@@ -16,6 +16,8 @@
 
   const LIMIT = 120; // snapshots to pull per refresh
   const POLL_MS = 45000; // ~1 frame/cam/min upstream; 45s keeps it fresh-ish
+  const PIR_POLL_MS = 3000; // PIR is live state — poll fast, but pause when hidden
+  const EVENTS_LIMIT = 50; // PIR events to pull per refresh
   // Stills mode expects newest_snapshot_age_s ≈ 60–90s; flag past 5 min.
   // Freshness is judged with the SERVER's age field, never the browser clock —
   // the Pi and this web server can have different clocks/timezones (per API.md).
@@ -25,6 +27,14 @@
     cam: "IMX415",
     cam2: "IMX708",
   };
+  // Events don't carry a camera id (their `stream` is the PIR pin, e.g.
+  // "GPIO17"). The real camera is implied by mode: day bursts come from cam2
+  // (IMX708 autofocus), night from cam (IMX415 low-light). We still derive it
+  // from the still path when possible — see streamFromStill().
+  const CAM_LABELS = {
+    cam: "IMX415 · low-light",
+    cam2: "IMX708 · autofocus",
+  };
 
   const $ = (id) => document.getElementById(id);
   const grid = $("wl-grid");
@@ -32,9 +42,17 @@
   const msg = $("wl-msg");
 
   let stream = "all"; // 'all' | 'cam' | 'cam2'
-  let items = []; // last rendered snapshot list (for lightbox nav)
+  let items = []; // last rendered snapshot list (for the grid)
+  let lbList = []; // generic lightbox source: [{ src, alt, cap }] — snapshots OR event stills
   let lbIndex = -1;
+  const expandedEvents = new Set(); // event ids whose detail panel is open (survives re-render)
+  let lastEventsSig = ""; // id-signature of the last rendered event set; skip re-render if unchanged
   let pollTimer = null;
+  let pirTimer = null;
+  let pirDetected = false; // last-seen any_detected, for clear→detected edge
+  // Most recent SERVER wall-clock (epoch s) from /api/pir or /api/stats. Event
+  // ages are computed against this, never the browser clock (per API.md).
+  let lastServerTs = null;
 
   // ---- helpers ---------------------------------------------------------------
 
@@ -102,11 +120,11 @@
       const tile = document.createElement("div");
       tile.className = "wl-tile";
       tile.tabIndex = 0;
-      tile.addEventListener("click", () => openLightbox(i));
+      tile.addEventListener("click", () => openLightbox(snapshotLbList(), i));
       tile.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          openLightbox(i);
+          openLightbox(snapshotLbList(), i);
         }
       });
 
@@ -132,26 +150,21 @@
 
   // ---- lightbox --------------------------------------------------------------
 
-  function openLightbox(i) {
+  // The lightbox pages through a generic list of { src, alt, cap(HTML) } so it
+  // serves both the snapshot grid and an event's still burst.
+  function openLightbox(list, i) {
+    lbList = Array.isArray(list) ? list : [];
     lbIndex = i;
     renderLightbox();
     $("wl-lightbox").hidden = false;
   }
 
   function renderLightbox() {
-    const s = items[lbIndex];
-    if (!s) return;
-    $("wl-lb-img").src = mediaUrl(s.url);
-    $("wl-lb-img").alt = `${s.stream} ${s.time_iso}`;
-    const cap = $("wl-lb-cap");
-    const raw = s.raw_url
-      ? `<a href="${mediaUrl(s.raw_url)}" download>⬇ DNG (${fmtBytes(s.size)} jpg)</a>`
-      : `<span>no raw</span>`;
-    cap.innerHTML =
-      `<span>${STREAM_LABELS[s.stream] || s.stream}</span>` +
-      `<span>${s.time_iso}</span>` +
-      `<span>${s.night ? "🌙 night" : "☀ day"} · ${s.exposure || "?"} · gain ${s.gain || "?"}</span>` +
-      raw;
+    const it = lbList[lbIndex];
+    if (!it) return;
+    $("wl-lb-img").src = it.src;
+    $("wl-lb-img").alt = it.alt || "";
+    $("wl-lb-cap").innerHTML = it.cap || "";
   }
 
   function closeLightbox() {
@@ -160,9 +173,24 @@
   }
 
   function stepLightbox(d) {
-    if (lbIndex < 0) return;
-    lbIndex = (lbIndex + d + items.length) % items.length;
+    if (lbIndex < 0 || !lbList.length) return;
+    lbIndex = (lbIndex + d + lbList.length) % lbList.length;
     renderLightbox();
+  }
+
+  // Lightbox source for the snapshot grid (preserves the original caption).
+  function snapshotLbList() {
+    return items.map((s) => ({
+      src: mediaUrl(s.url),
+      alt: `${s.stream} ${s.time_iso}`,
+      cap:
+        `<span>${STREAM_LABELS[s.stream] || s.stream}</span>` +
+        `<span>${s.time_iso}</span>` +
+        `<span>${s.night ? "🌙 night" : "☀ day"} · ${s.exposure || "?"} · gain ${s.gain || "?"}</span>` +
+        (s.raw_url
+          ? `<a href="${mediaUrl(s.raw_url)}" download>⬇ DNG (${fmtBytes(s.size)} jpg)</a>`
+          : `<span>no raw</span>`),
+    }));
   }
 
   // ---- status strip ----------------------------------------------------------
@@ -178,6 +206,7 @@
       ]);
       if (statsRes.ok) {
         const st = await statsRes.json();
+        if (st.server_ts != null) lastServerTs = st.server_ts;
         $("wl-disk").textContent =
           st.disk_free_gb != null
             ? `${st.disk_free_gb.toFixed(0)} / ${st.disk_total_gb.toFixed(0)} GB`
@@ -209,6 +238,376 @@
     } catch (_err) {
       /* status is best-effort; the gallery itself surfaces fetch errors */
     }
+  }
+
+  // ---- live motion (PIR) -----------------------------------------------------
+
+  // Poll /api/pir for the live sensor state. Shape (per wildlife-cam app.py):
+  //   { service_active, available, pins:[{gpio,level,state,detected}],
+  //     any_detected, last_event_ts, last_event_pin, server_ts }
+  async function loadPir() {
+    const dot = $("wl-pir-dot");
+    const text = $("wl-pir-text");
+    const sub = $("wl-pir-sub");
+    const card = $("wl-motion-card");
+    let p;
+    try {
+      const res = await fetch(apiUrl("/api/pir"), { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      p = await res.json();
+    } catch (_err) {
+      // Best-effort, like the status strip — show offline, don't spam wl-msg.
+      dot.className = "wl-pir-dot offline";
+      text.textContent = "unavailable";
+      text.className = "wl-pir-text-offline";
+      sub.textContent = "";
+      card.classList.remove("detected");
+      pirDetected = false;
+      return;
+    }
+
+    if (p.server_ts != null) lastServerTs = p.server_ts;
+
+    const offline = !p.available || !p.service_active;
+    const detected = !!p.any_detected && !offline;
+
+    dot.className = "wl-pir-dot " + (offline ? "offline" : detected ? "detected" : "clear");
+    card.classList.toggle("detected", detected);
+    if (offline) {
+      text.textContent = p.available ? "service down" : "no sensor";
+      text.className = "wl-pir-text-offline";
+    } else {
+      text.textContent = detected ? "Motion" : "Clear";
+      text.className = detected ? "wl-pir-text-detected" : "";
+    }
+
+    // Sub-line: per-pin state + last-trigger age (server-relative).
+    const pins = Array.isArray(p.pins) ? p.pins : [];
+    const pinStr = pins
+      .map((pin) => `gpio${pin.gpio} ${pin.detected ? "●" : "○"}`)
+      .join("  ");
+    let lastStr = "";
+    if (p.last_event_ts != null) {
+      const ref = lastServerTs != null ? lastServerTs : p.server_ts;
+      if (ref != null) {
+        const ago = fmtAgeSec(ref - p.last_event_ts);
+        lastStr = `last ${ago}` + (p.last_event_pin != null ? ` (gpio${p.last_event_pin})` : "");
+      }
+    }
+    sub.textContent = [pinStr, lastStr].filter(Boolean).join("  ·  ");
+
+    // Clear→detected edge: a trigger just landed → pull events soon (give the
+    // upstream a moment to write the row before we re-fetch).
+    if (detected && !pirDetected) {
+      setTimeout(loadEvents, 1200);
+    }
+    pirDetected = detected;
+  }
+
+  // ---- motion events ---------------------------------------------------------
+
+  // GET /api/events?type=pir → newest-first list. Item shape (wildlife-cam
+  // docs/API.md): { id, type, stream, start_time, end_time, score, label,
+  // thumbnail, clip_path, has_clip, data }. Most fields are optional/forward-
+  // looking, so render defensively.
+  async function loadEvents() {
+    const countEl = $("wl-events-count");
+    let evts;
+    try {
+      const q = new URLSearchParams({ type: "pir", limit: String(EVENTS_LIMIT) });
+      const res = await fetch(apiUrl("/api/events?" + q.toString()), { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      evts = await res.json();
+    } catch (err) {
+      countEl.textContent = "fetch failed";
+      return;
+    }
+    evts = Array.isArray(evts) ? evts : [];
+    countEl.textContent = evts.length ? `${evts.length} shown` : "";
+    $("wl-events-empty").hidden = evts.length > 0;
+
+    // Skip the DOM rebuild when the event set is unchanged — otherwise the 45s
+    // poll would collapse an open row and restart a playing clip. The ordered id
+    // list is a sufficient signature (rows are append-only upstream).
+    const sig = evts.map((e) => e.id).join(",");
+    if (sig === lastEventsSig) return;
+    lastEventsSig = sig;
+    renderEvents(evts);
+  }
+
+  function renderEvents(evts) {
+    const list = $("wl-events-list");
+    list.replaceChildren();
+    const frag = document.createDocumentFragment();
+    evts.forEach((e) => frag.append(buildEventRow(e)));
+    list.append(frag);
+  }
+
+  // `data` is a JSON STRING carrying the real payload (mode, stills, lux, and —
+  // at night — a metering block). The top-level `stream` is the PIR pin
+  // ("GPIO17") and `score` is always null, so neither is rendered; everything
+  // meaningful comes from parsed `data`.
+  function parseEventData(e) {
+    try {
+      return e && e.data ? JSON.parse(e.data) : {};
+    } catch (_err) {
+      return {};
+    }
+  }
+
+  // Stills live at /snap/<cam>/… — pull the cam segment. Falls back to the mode
+  // convention (day→cam2 / night→cam) when the path is unexpected.
+  function streamFromStill(url, mode) {
+    const m = /\/snap\/([^/]+)\//.exec(url || "");
+    if (m) return m[1];
+    return mode === "night" ? "cam" : mode === "day" ? "cam2" : null;
+  }
+
+  function buildEventRow(e) {
+    const d = parseEventData(e);
+    const mode = d.mode || (e.thumbnail && e.thumbnail.includes("/snap/cam2/") ? "day" : "");
+    const stills =
+      Array.isArray(d.stills) && d.stills.length
+        ? d.stills
+        : e.thumbnail
+        ? [e.thumbnail]
+        : [];
+    const cam = streamFromStill(stills[0] || e.thumbnail, mode);
+
+    const li = document.createElement("li");
+    li.className = "wl-evt";
+
+    // ---- collapsed header row (click / Enter to expand) ----
+    const row = document.createElement("div");
+    row.className = "wl-evt-row";
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.setAttribute("aria-expanded", "false");
+
+    const thumbSrc = e.thumbnail || stills[0];
+    if (thumbSrc) {
+      const img = document.createElement("img");
+      img.className = "wl-evt-thumb";
+      img.loading = "lazy";
+      img.src = mediaUrl(thumbSrc);
+      img.alt = mode || e.type || "event";
+      row.append(img);
+    } else {
+      const ph = document.createElement("div");
+      ph.className = "wl-evt-thumb placeholder";
+      ph.textContent = "◇";
+      row.append(ph);
+    }
+
+    const main = document.createElement("div");
+    main.className = "wl-evt-main";
+
+    const top = document.createElement("div");
+    top.className = "wl-evt-top";
+    if (mode) {
+      const badge = document.createElement("span");
+      badge.className = "wl-evt-mode " + (mode === "night" ? "night" : "day");
+      badge.textContent = mode === "night" ? "🌙 night" : "☀ day";
+      top.append(badge);
+    }
+    if (cam) {
+      const camEl = document.createElement("span");
+      camEl.className = "wl-evt-label";
+      camEl.textContent = CAM_LABELS[cam] || cam;
+      top.append(camEl);
+    }
+    const time = document.createElement("span");
+    time.className = "wl-evt-time";
+    time.textContent = fmtEventTime(e.start_time);
+    top.append(time);
+
+    const meta = document.createElement("div");
+    meta.className = "wl-evt-meta";
+    const bits = [];
+    if (mode === "night" && d.metering) {
+      const ms = meteringSummary(d.metering);
+      if (ms) bits.push(ms);
+    } else if (d.lux != null) {
+      bits.push(`${Number(d.lux).toFixed(0)} lux`);
+    }
+    if (stills.length) bits.push(`${stills.length} still${stills.length === 1 ? "" : "s"}`);
+    const dur = eventDuration(e);
+    if (dur) bits.push(dur);
+    meta.textContent = bits.join("  ·  ");
+
+    main.append(top, meta);
+    row.append(main);
+
+    const tail = document.createElement("div");
+    tail.className = "wl-evt-tail";
+    if (e.has_clip && e.clip_path) {
+      const tag = document.createElement("span");
+      tag.className = "wl-evt-cliptag";
+      tag.textContent = "▶ clip";
+      tail.append(tag);
+    }
+    const caret = document.createElement("span");
+    caret.className = "wl-evt-caret";
+    caret.textContent = "▾";
+    tail.append(caret);
+    row.append(tail);
+
+    // ---- detail panel (built lazily on first expand) ----
+    const detail = document.createElement("div");
+    detail.className = "wl-evt-detail";
+    detail.hidden = true;
+
+    let built = false;
+    const toggle = () => {
+      const open = li.classList.toggle("open");
+      row.setAttribute("aria-expanded", open ? "true" : "false");
+      detail.hidden = !open;
+      if (open) {
+        expandedEvents.add(e.id);
+        if (!built) {
+          buildEventDetail(detail, e, d, stills, cam, mode);
+          built = true;
+        }
+      } else {
+        expandedEvents.delete(e.id);
+      }
+    };
+    row.addEventListener("click", toggle);
+    row.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        toggle();
+      }
+    });
+
+    li.append(row, detail);
+
+    // Restore the open state across a poll-driven re-render.
+    if (expandedEvents.has(e.id)) toggle();
+
+    return li;
+  }
+
+  function buildEventDetail(detail, e, d, stills, cam, mode) {
+    detail.replaceChildren();
+
+    // Still burst → click any frame to page through it in the lightbox.
+    if (stills.length) {
+      const gal = document.createElement("div");
+      gal.className = "wl-evt-stills";
+      const lb = stills.map((u, k) => ({
+        src: mediaUrl(u),
+        alt: `${mode || "event"} still ${k + 1}/${stills.length}`,
+        cap:
+          `<span>${CAM_LABELS[cam] || cam || "event"}</span>` +
+          `<span>frame ${k + 1} / ${stills.length}</span>` +
+          `<span>${fmtEventTime(e.start_time)}</span>`,
+      }));
+      stills.forEach((u, k) => {
+        const img = document.createElement("img");
+        img.className = "wl-evt-still";
+        img.loading = "lazy";
+        img.src = mediaUrl(u);
+        img.alt = `still ${k + 1}`;
+        img.addEventListener("click", () => openLightbox(lb, k));
+        gal.append(img);
+      });
+      detail.append(gal);
+    }
+
+    // Day events carry a prerolled clip; night events have none — show metering.
+    if (mode === "night") {
+      detail.append(buildMetering(d));
+    } else if (e.has_clip && e.clip_path) {
+      detail.append(buildClip(e));
+    } else {
+      const note = document.createElement("p");
+      note.className = "wl-evt-note";
+      note.textContent = "No clip for this event.";
+      detail.append(note);
+    }
+  }
+
+  // Event clips are recorded sideways (known backend limitation — the H.264
+  // can't be losslessly rotated). The capture app reports EXIF orientation 8
+  // (= 90° CCW correction), so we rotate the <video> in CSS; stills are already
+  // upright via EXIF. If a clip still looks sideways, flip the rotate() sign in
+  // `.wl-evt-video` (wildlife.css) — that's the single knob.
+  function buildClip(e) {
+    const wrap = document.createElement("div");
+    wrap.className = "wl-evt-clipbox";
+
+    const vwrap = document.createElement("div");
+    vwrap.className = "wl-evt-video-wrap";
+    const v = document.createElement("video");
+    v.className = "wl-evt-video";
+    v.controls = true;
+    v.preload = "metadata";
+    v.playsInline = true;
+    v.src = mediaUrl(e.clip_path);
+    vwrap.append(v);
+    wrap.append(vwrap);
+
+    const a = document.createElement("a");
+    a.className = "wl-evt-clip";
+    a.href = mediaUrl(e.clip_path);
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = "open raw clip ↗";
+    wrap.append(a);
+    return wrap;
+  }
+
+  // Night metering block: { lux, exposure_us, gain, source } + top-level cal_k.
+  function buildMetering(d) {
+    const box = document.createElement("div");
+    box.className = "wl-evt-metering";
+    const m = d.metering || {};
+    const rows = [
+      ["lux", m.lux != null ? Number(m.lux).toFixed(2) : null],
+      ["exposure", m.exposure_us != null ? `${(m.exposure_us / 1000).toFixed(0)} ms` : null],
+      ["gain", m.gain != null ? `${m.gain}×` : null],
+      ["source", m.source || null],
+      ["cal k", d.cal_k != null ? Number(d.cal_k).toFixed(2) : null],
+    ].filter(([, v]) => v != null);
+    if (!rows.length) {
+      box.textContent = "No metering data.";
+      return box;
+    }
+    rows.forEach(([k, v]) => {
+      const cell = document.createElement("div");
+      cell.className = "wl-evt-meter-cell";
+      cell.innerHTML =
+        `<span class="wl-evt-meter-k">${k}</span><span class="wl-evt-meter-v">${v}</span>`;
+      box.append(cell);
+    });
+    return box;
+  }
+
+  function meteringSummary(m) {
+    const bits = [];
+    if (m.lux != null) bits.push(`${Number(m.lux).toFixed(1)} lux`);
+    if (m.exposure_us != null) bits.push(`${(m.exposure_us / 1000).toFixed(0)} ms`);
+    if (m.gain != null) bits.push(`gain ${m.gain}`);
+    return bits.join(" · ");
+  }
+
+  // Event start_time is epoch seconds. Show local time + a server-relative age
+  // (uses lastServerTs from /api/pir|/api/stats, never the browser clock).
+  function fmtEventTime(ts) {
+    if (ts == null) return "";
+    const local = new Date(ts * 1000).toLocaleString([], {
+      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+    if (lastServerTs != null) return `${local} · ${fmtAgeSec(lastServerTs - ts)}`;
+    return local;
+  }
+
+  function eventDuration(e) {
+    if (e.end_time == null || e.start_time == null) return "";
+    const d = e.end_time - e.start_time;
+    if (!(d > 0)) return "";
+    return d < 60 ? `${d.toFixed(1)}s` : `${Math.round(d / 60)}m`;
   }
 
   // ---- controls --------------------------------------------------------------
@@ -300,17 +699,22 @@
   function refreshAll() {
     loadSnapshots();
     loadStatus();
+    loadPir();
+    loadEvents();
   }
 
   function startPolling() {
     stopPolling();
     if ($("wl-auto").checked && !document.hidden) {
       pollTimer = setInterval(refreshAll, POLL_MS);
+      // PIR is live state — poll it on its own faster cadence.
+      pirTimer = setInterval(loadPir, PIR_POLL_MS);
     }
   }
   function stopPolling() {
     if (pollTimer) clearInterval(pollTimer);
-    pollTimer = null;
+    if (pirTimer) clearInterval(pirTimer);
+    pollTimer = pirTimer = null;
   }
 
   // ---- wiring ----------------------------------------------------------------
