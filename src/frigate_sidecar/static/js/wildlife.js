@@ -853,7 +853,7 @@
       detail.hidden = !open;
       if (open) {
         expandedRecs.add(seg.url);
-        if (!built) { detail.append(buildVideoPlayer(seg.url, true)); built = true; }
+        if (!built) { detail.append(buildVideoPlayer(seg.url, false)); built = true; }
       } else {
         expandedRecs.delete(seg.url);
       }
