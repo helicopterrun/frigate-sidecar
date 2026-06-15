@@ -198,6 +198,12 @@
    tab-based refactor). Reuses the dark theme + .wl-grid/.wl-tile/.viewseg.
    =========================================================================== */
 
+/* Live lux readout (status strip) */
+.wl-lux { display: inline-flex; align-items: baseline; gap: 7px; flex-wrap: wrap;
+          font-variant-numeric: tabular-nums; }
+.wl-lux-unit { font-size: 12px; color: #8a92a6; font-weight: 400; }
+.wl-lux-mode { align-self: center; }
+
 /* Tab nav + panels */
 .wl-tabs { margin-bottom: 14px; }
 .wl-tabpanel[hidden] { display: none; }

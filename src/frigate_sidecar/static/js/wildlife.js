@@ -107,6 +107,13 @@
     return local;
   }
 
+  function fmtLux(v) {
+    if (v == null || isNaN(v)) return "—";
+    if (v < 1) return v.toFixed(2);
+    if (v < 100) return v.toFixed(1);
+    return Math.round(v).toLocaleString();
+  }
+
   const streamLabel = (s) => STREAM_LABELS[s] || s || "";
   const camLabel = (s) => CAM_LABELS[s] || s || "event";
 
@@ -257,6 +264,42 @@
     pirDetected = detected;
   }
 
+  // Live ambient lux + day/night mode (orchestrator metering loop, ~20–60s).
+  async function loadLight() {
+    const el = $("wl-lux");
+    const sub = $("wl-lux-sub");
+    let p;
+    try {
+      const res = await fetch(apiUrl("/api/light"), { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      p = await res.json();
+    } catch (_err) {
+      el.textContent = "—";
+      el.className = "stat-value wl-lux";
+      sub.textContent = "";
+      return;
+    }
+    if (p.server_ts != null) lastServerTs = p.server_ts;
+    if (!p.available || p.lux == null) {
+      el.textContent = "warming up";
+      el.className = "stat-value wl-lux";
+      sub.textContent = "";
+      return;
+    }
+    const night = p.mode === "night";
+    const stale = p.age_s != null && p.age_s > 180; // expect 0–60s; flag if stuck
+    el.innerHTML =
+      `${fmtLux(p.lux)} <span class="wl-lux-unit">lux</span>` +
+      `<span class="wl-chip ${night ? "night" : "day"} wl-lux-mode">${night ? "🌙 night" : "☀ day"}</span>`;
+    el.className = "stat-value wl-lux" + (stale ? " stale" : "");
+    // Where the current lux sits on the day↔night band + server-relative freshness.
+    const bits = [];
+    if (p.night_enter_lux != null && p.day_return_lux != null)
+      bits.push(`night<${p.night_enter_lux} / day>${p.day_return_lux}`);
+    if (p.age_s != null) bits.push(fmtAgeSec(p.age_s));
+    sub.textContent = bits.join("   ·   ");
+  }
+
   // ---- tabs controller -------------------------------------------------------
 
   const TABS = {
@@ -305,7 +348,7 @@
     stopAmbientPolling();
     if ($("wl-auto").checked && !document.hidden) {
       pirTimer = setInterval(loadPir, PIR_POLL_MS);
-      statusTimer = setInterval(loadStatus, STATUS_POLL_MS);
+      statusTimer = setInterval(() => { loadStatus(); loadLight(); }, STATUS_POLL_MS);
     }
   }
   function stopAmbientPolling() {
@@ -1289,6 +1332,7 @@
     TABS[activeTab].load();
     loadStatus();
     loadPir();
+    loadLight();
   }
 
   // ---- bootstrap & wiring ----------------------------------------------------
@@ -1360,6 +1404,7 @@
       activateTab(activeTab, true);
       loadPir();
       loadStatus();
+      loadLight();
       startAmbientPolling();
     });
   }
