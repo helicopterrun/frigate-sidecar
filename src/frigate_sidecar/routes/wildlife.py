@@ -39,6 +39,13 @@ router = APIRouter(tags=["wildlife"])
 # are open; controls need the proxy's token injection).
 _API_BASE = "/wildlifecam"
 
+# Browser-facing prefix for the Pi's go2rtc instance (port 1984), reverse-proxied
+# same-origin so the Live tab works over HTTPS (a raw http://<pi>:1984 iframe is
+# blocked as mixed content). The page embeds `<base>/stream.html?src=<cam>`.
+# Override per-request with ?go2rtc=<base> for LAN-direct testing.
+# NOTE: confirm this matches the actual reverse-proxy location configured in NPM.
+_GO2RTC_BASE = "/wildlifecam-go2rtc/"
+
 # Direct LAN address of the wildlife-cam backend, used ONLY for the server-side
 # clip proxy below. Hardcoded like the rest of this integration (the Pi has a
 # static lease and no Tailscale/DNS name that resolves from the LXC).
@@ -88,7 +95,12 @@ def wildlife_view(request: Request) -> Any:
     return templates.TemplateResponse(
         request,
         "wildlife.html",
-        {"api_base": _API_BASE, "counts": {}, "asset_v": _asset_version()},
+        {
+            "api_base": _API_BASE,
+            "go2rtc_base": _GO2RTC_BASE,
+            "counts": {},
+            "asset_v": _asset_version(),
+        },
     )
 
 
@@ -138,6 +150,54 @@ async def wildlife_media(path: str, request: Request) -> Any:
         status_code=resp.status_code,
         headers=headers,
         media_type=resp.headers.get("content-type"),
+    )
+
+
+@router.get("/wildlife/stacked/{path:path}")
+async def wildlife_stacked(path: str, request: Request) -> Any:
+    """Stream a stacked low-light-recovery PNG from the Pi's ``/stacked/{path}``.
+
+    Same rationale as ``wildlife_media``: the NPM ``/wildlifecam`` location isn't
+    relied on to forward non-``/api`` media paths, and ``/stacked`` is a separate
+    media root, so we proxy it here. The PNGs are content-addressed
+    (``stack_<event>_<method>.png``), hence the immutable cache header. The POST
+    that *builds* a stack still goes through the NPM proxy (it needs the token);
+    only the resulting PNG GET comes through here.
+    """
+    if ".." in path.split("/"):
+        raise HTTPException(status_code=400, detail="bad path")
+
+    upstream = f"{_PI_BASE}/stacked/{path}"
+    client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0))
+    try:
+        req = client.build_request("GET", upstream)
+        resp = await client.send(req, stream=True)
+    except httpx.HTTPError as exc:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=f"upstream error: {exc}") from exc
+
+    if resp.status_code >= 400:
+        code = resp.status_code
+        await resp.aclose()
+        await client.aclose()
+        raise HTTPException(status_code=code, detail="stacked image unavailable")
+
+    headers = {k: resp.headers[k] for k in _RESP_PASS if k in resp.headers}
+    headers["Cache-Control"] = "public, max-age=31536000, immutable"
+
+    async def body() -> Any:
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        finally:
+            await resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        body(),
+        status_code=resp.status_code,
+        headers=headers,
+        media_type=resp.headers.get("content-type", "image/png"),
     )
 
 
