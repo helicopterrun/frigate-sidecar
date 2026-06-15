@@ -135,6 +135,7 @@
 .wl-chip.day { background: #78350f; color: #fde68a; }
 .wl-chip.night { background: #1e3a8a; color: #bfdbfe; }
 .wl-chip.cam { background: #1f2937; color: #cbd5e1; }
+.wl-chip.manual { background: #3a2a16; color: #fbbf24; margin-right: 6px; }
 .wl-exp { font-variant-numeric: tabular-nums; }
 .wl-empty { color: #8a92a6; font-size: 13px; }
 

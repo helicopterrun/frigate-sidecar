@@ -27,6 +27,11 @@
   const PIR_POLL_MS = 3000; // live sensor state — fast
   const STATUS_POLL_MS = 30000; // disk/freshness/streaming — slow, always on
   const STALE_AGE_S = 5 * 60; // flag the feed stale past 5 min (server-relative)
+  // POST /api/capture now fires a real async event (night burst ~15–20s, 16
+  // frames at ~1 fps) — re-poll a window so the whole burst is picked up, not
+  // just the first 2–3 frames.
+  const CAPTURE_WATCH_MS = 22000;
+  const CAPTURE_POLL_MS = 2500;
 
   const STREAM_LABELS = { cam: "IMX415", cam2: "IMX708" };
   const CAM_LABELS = { cam: "IMX415 · low-light", cam2: "IMX708 · autofocus" };
@@ -53,6 +58,7 @@
   let contentTimer = null;
   let pirTimer = null;
   let statusTimer = null;
+  let captureTimer = null;
 
   const $ = (id) => document.getElementById(id);
   const msg = () => $("wl-msg");
@@ -584,11 +590,12 @@
     const meta = document.createElement("div");
     meta.className = "wl-meta";
     const stillsTxt = stills.length ? `${stills.length} still${stills.length === 1 ? "" : "s"}` : "";
+    const manualChip = e.label === "manual" ? `<span class="wl-chip manual">✋ manual</span>` : "";
     meta.innerHTML =
       `<div class="wl-meta-row"><span class="wl-time">${fmtEventTime(e.start_time)}</span>` +
       `<span class="wl-chip ${mode === "night" ? "night" : "day"}">${mode === "night" ? "🌙 night" : "☀ day"}</span></div>` +
       `<div class="wl-meta-row"><span class="wl-chip cam">${streamLabel(cam)}</span>` +
-      `<span class="wl-exp">${stillsTxt}</span></div>`;
+      `<span class="wl-exp">${manualChip}${stillsTxt}</span></div>`;
     tile.append(meta);
     return tile;
   }
@@ -1334,23 +1341,43 @@
   async function captureNow() {
     const btn = $("wl-capture");
     btn.disabled = true;
-    setMsg("Capturing…");
+    setMsg("Firing capture event…");
     try {
       const res = await fetch(apiUrl("/api/capture"), { method: "POST" });
       const body = await res.json().catch(() => ({}));
       if (!res.ok || body.ok === false) throw new Error(body.error || "HTTP " + res.status);
-      setMsg("Capture fired — refreshing…", "ok");
-      setTimeout(() => {
-        if (activeTab === "snapshots") loadSnapshots();
-        loadStatus();
-        setMsg("");
-      }, 3500);
     } catch (err) {
       const hint = /40[13]/.test(err.message) ? " (token not injected at proxy?)" : "";
       setMsg("Capture failed: " + err.message + hint, "err");
-    } finally {
       btn.disabled = false;
+      return;
     }
+
+    // The POST returns immediately; the event (night burst / day stills) runs
+    // async ~15–20s with frames landing progressively. Re-poll the window so the
+    // whole burst shows up (snapshots) and the manual event appears (events).
+    clearInterval(captureTimer);
+    const start = Date.now();
+    const tick = () => {
+      const remain = Math.max(0, Math.ceil((CAPTURE_WATCH_MS - (Date.now() - start)) / 1000));
+      if (activeTab === "snapshots") loadSnapshots();
+      else if (activeTab === "events") loadEvents(true);
+      loadEventsStat();
+      if (remain > 0) {
+        setMsg(`Capture event running — collecting frames (~${remain}s)…`, "ok");
+      } else {
+        clearInterval(captureTimer);
+        captureTimer = null;
+        loadStatus();
+        if (activeTab === "snapshots") loadSnapshots();
+        else if (activeTab === "events") loadEvents(true);
+        setMsg("Capture event complete.", "ok");
+        btn.disabled = false;
+        setTimeout(() => { if (msg().textContent === "Capture event complete.") setMsg(""); }, 4000);
+      }
+    };
+    captureTimer = setInterval(tick, CAPTURE_POLL_MS);
+    tick(); // immediate first refresh
   }
 
   function refreshActive() {
