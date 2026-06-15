@@ -193,14 +193,6 @@
       }
       if (streamRes.ok) {
         const sm = await streamRes.json();
-        const el = $("wl-running");
-        if (sm.streaming) {
-          el.textContent = "live mode (stills paused)";
-          el.className = "stat-value stale";
-        } else {
-          el.textContent = sm.snapshots_running ? "running" : "stopped";
-          el.className = "stat-value" + (sm.snapshots_running ? "" : " bad");
-        }
         // keep the Live toggle in sync if it's around
         const tgl = $("wl-live-toggle");
         if (tgl && document.activeElement !== tgl) tgl.checked = !!sm.streaming;
@@ -300,6 +292,38 @@
     sub.textContent = bits.join("   ·   ");
   }
 
+  // Status-strip "Events · 24h": count in the last 24h + most-recent age. Ages
+  // use the server clock (lastServerTs), never the browser clock.
+  function updateEventsStat(events) {
+    if (!Array.isArray(events)) return;
+    const el = $("wl-events-stat");
+    const sub = $("wl-events-stat-sub");
+    const ref = lastServerTs;
+    let count = events.length;
+    let latest = null;
+    if (ref != null) {
+      count = 0;
+      events.forEach((e) => {
+        if (e.start_time == null) return;
+        if (ref - e.start_time <= 86400) count++;
+        if (latest == null || e.start_time > latest) latest = e.start_time;
+      });
+    }
+    el.textContent = String(count);
+    sub.textContent =
+      latest != null && ref != null ? "last " + fmtAgeSec(ref - latest) : events.length ? "" : "none yet";
+  }
+
+  async function loadEventsStat() {
+    try {
+      const res = await fetch(apiUrl("/api/events?type=pir&limit=200"), { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      updateEventsStat(await res.json());
+    } catch (_err) {
+      /* best-effort, like the rest of the status strip */
+    }
+  }
+
   // ---- tabs controller -------------------------------------------------------
 
   const TABS = {
@@ -348,7 +372,7 @@
     stopAmbientPolling();
     if ($("wl-auto").checked && !document.hidden) {
       pirTimer = setInterval(loadPir, PIR_POLL_MS);
-      statusTimer = setInterval(() => { loadStatus(); loadLight(); }, STATUS_POLL_MS);
+      statusTimer = setInterval(() => { loadStatus(); loadLight(); loadEventsStat(); }, STATUS_POLL_MS);
     }
   }
   function stopAmbientPolling() {
@@ -496,6 +520,7 @@
       return;
     }
     clipEvents = Array.isArray(evts) ? evts : [];
+    updateEventsStat(clipEvents); // keep the status-strip card fresh while browsing
     const sig = clipEvents.map((e) => e.id).join(",");
     const changed = sig !== lastClipsSig;
     lastClipsSig = sig;
@@ -1333,6 +1358,7 @@
     loadStatus();
     loadPir();
     loadLight();
+    loadEventsStat();
   }
 
   // ---- bootstrap & wiring ----------------------------------------------------
@@ -1405,6 +1431,7 @@
       loadPir();
       loadStatus();
       loadLight();
+      loadEventsStat();
       startAmbientPolling();
     });
   }
