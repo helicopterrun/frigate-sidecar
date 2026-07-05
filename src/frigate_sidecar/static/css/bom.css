@@ -1,0 +1,67 @@
+/* BOM builder page styles. Layers on top of the shared triage.css dark theme. */
+
+.bom-crumb { font-size: 12px; margin: 4px 0 8px; }
+.bom-crumb a { color: #8a92a6; text-decoration: none; }
+.bom-crumb a:hover { color: #e6e6e6; }
+
+.bom-title { font-size: 18px; margin: 4px 0 16px; font-weight: 600; }
+.bom-title .bom-sub { font-size: 13px; color: #8a92a6; font-weight: 400; margin-left: 8px; }
+
+.bom-projects .muted { color: #6b7280; font-size: 12px; }
+.bom-projects tr.row-link { cursor: pointer; }
+.bom-projects tr.row-link:hover td { background: #161922; }
+.bom-projects a { color: #93c5fd; text-decoration: none; }
+.bom-projects a:hover { text-decoration: underline; }
+
+/* Toolbar of export / panel-toggle buttons */
+.bom-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0 20px; }
+.bom-toolbar-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #6b7280; }
+.btn {
+  display: inline-block; background: #1f2937; color: #e6e6e6; border: 1px solid #2a2f3a;
+  padding: 6px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; text-decoration: none;
+}
+.btn:hover { background: #374151; }
+.btn-primary { background: #3b82f6; color: #fff; border: 0; padding: 7px 16px; border-radius: 4px; font-size: 13px; cursor: pointer; }
+.btn-primary:hover { background: #2563eb; }
+.btn-danger { background: #7f1d1d; color: #fecaca; border: 0; padding: 7px 16px; border-radius: 4px; font-size: 13px; cursor: pointer; }
+.btn-danger:hover { background: #991b1b; }
+
+.bom-panel { background: #161922; border: 1px solid #2a2f3a; border-radius: 6px; padding: 10px 14px; margin-bottom: 16px; }
+.bom-panel[open] { padding-bottom: 16px; }
+.bom-panel textarea {
+  width: 100%; background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a;
+  border-radius: 4px; padding: 8px; font-family: ui-monospace, monospace; font-size: 12px; resize: vertical;
+}
+
+/* Config + item entry grids */
+.bom-config-grid, .bom-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px 14px; margin: 8px 0;
+}
+.bom-config-grid label, .bom-grid label {
+  display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #8a92a6;
+}
+.bom-config-grid label.wide { grid-column: 1 / -1; }
+.bom-config-grid input, .bom-config-grid select,
+.bom-grid input, .bom-grid select {
+  background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a;
+  border-radius: 4px; padding: 5px 8px; font-size: 13px; width: 100%;
+}
+.bom-item-form { background: #161922; border: 1px solid #2a2f3a; border-radius: 6px; padding: 14px 16px; }
+.form-actions { grid-column: 1 / -1; display: flex; gap: 10px; align-items: center; margin-top: 6px; }
+
+/* Line-item table */
+.bom-table-wrap { overflow-x: auto; }
+.bom-items { min-width: 1000px; }
+.bom-items td { white-space: nowrap; }
+.bom-items tr.dnp td { opacity: 0.5; }
+.bom-items .row-actions { white-space: nowrap; }
+.link-btn { background: none; border: 0; color: #93c5fd; cursor: pointer; font-size: 12px; padding: 2px 4px; }
+.link-btn:hover { text-decoration: underline; }
+.link-btn.danger { color: #f87171; }
+
+.help { color: #6b7280; font-size: 12px; line-height: 1.5; margin-top: 12px; }
+
+@media (max-width: 720px) {
+  .bom-config-grid, .bom-grid { grid-template-columns: 1fr 1fr; }
+}
