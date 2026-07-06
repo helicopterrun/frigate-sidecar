@@ -22,7 +22,6 @@ for the consumed contract.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import os
 import tempfile
@@ -216,8 +215,10 @@ def _prune_poster_cache(cache_dir: Path) -> None:
     except OSError:
         return
     for p in jpgs[: max(0, len(jpgs) - _POSTER_CACHE_MAX)]:
-        with contextlib.suppress(OSError):
+        try:
             p.unlink()
+        except OSError:
+            pass
 
 
 async def _extract_poster(src_url: str, dst: Path) -> bool:
