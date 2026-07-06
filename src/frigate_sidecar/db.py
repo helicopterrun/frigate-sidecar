@@ -62,6 +62,67 @@ CREATE INDEX IF NOT EXISTS idx_toybox_board ON toybox_scores(game, score DESC);
 INSERT INTO toybox_scores (game, name, score, played_at)
 SELECT 'states50', 'BOB1', 30, '2026-06-05T00:00:00'
 WHERE NOT EXISTS (SELECT 1 FROM toybox_scores WHERE game = 'states50');
+
+-- BOM builder: build a KiCad-style Master BOM one part at a time. Not
+-- Frigate-related; it's a hardware-engineering tool that lives in this sidecar.
+-- One `bom_projects` row per board/assembly (the workbook's Build_Config), each
+-- owning many `bom_items` line rows. The ~26 fields worth querying are real
+-- columns; the rest of the 94-column Master BOM superset rides along in the
+-- `extra_fields` JSON blob (see bom_schema.py). Computed columns (quantities,
+-- costs, buy qty) are derived on read, never stored.
+CREATE TABLE IF NOT EXISTS bom_projects (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug                    TEXT NOT NULL UNIQUE,
+    project_name            TEXT NOT NULL,
+    board_name              TEXT,
+    pcb_revision            TEXT,
+    bom_revision            TEXT,
+    build_quantity          INTEGER NOT NULL DEFAULT 1,
+    attrition_pct           REAL NOT NULL DEFAULT 0.05,
+    currency                TEXT NOT NULL DEFAULT 'USD',
+    assembly_vendor         TEXT,
+    assembly_method_default TEXT DEFAULT 'SMT',
+    owner                   TEXT,
+    source_cad_tool         TEXT DEFAULT 'KiCad',
+    notes                   TEXT,
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bom_items (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id            INTEGER NOT NULL REFERENCES bom_projects(id) ON DELETE CASCADE,
+    item_no               INTEGER,
+    designator            TEXT,
+    populate              TEXT DEFAULT 'YES',
+    variant               TEXT DEFAULT 'Base',
+    qty_per_assembly      REAL DEFAULT 1,
+    symbol                TEXT,
+    footprint             TEXT,
+    part_category         TEXT,
+    value                 TEXT,
+    description           TEXT,
+    package_size          TEXT,
+    manufacturer          TEXT,
+    mpn                   TEXT DEFAULT 'TBD',
+    datasheet_url         TEXT,
+    preferred_distributor TEXT,
+    preferred_dpn         TEXT DEFAULT 'TBD',
+    distributor_url       TEXT,
+    do_not_substitute     TEXT DEFAULT 'N',
+    lifecycle_status      TEXT DEFAULT 'TBD',
+    moq                   INTEGER,
+    order_multiple        INTEGER,
+    unit_cost             REAL,
+    risk_level            TEXT DEFAULT 'Unknown',
+    review_status         TEXT DEFAULT 'Needs Review',
+    comment               TEXT,
+    source                TEXT DEFAULT 'Manual',
+    extra_fields          TEXT,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bom_items_project ON bom_items(project_id, item_no);
 """
 
 
@@ -87,6 +148,8 @@ def open_sidecar(path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 3000")
     conn.execute("PRAGMA journal_mode = WAL")
+    # Enforce FKs so deleting a bom_projects row cascades to its bom_items.
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SIDECAR_SCHEMA)
     conn.commit()
     return conn

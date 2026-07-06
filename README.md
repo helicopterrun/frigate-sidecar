@@ -10,6 +10,11 @@ It adds:
   FPS budget vs detector capacity, zone hit counts, annotation offset
   diagnostics, etc.) — things Frigate's own UI doesn't expose. Available both
   as a CLI and as JSON HTTP endpoints.
+- **BOM builder** (`/bom`) — a hardware-engineering side tool (not Frigate-related)
+  for assembling a KiCad-style Master BOM one part at a time. Seed lines manually
+  or by pasting a KiCad grouped-BOM CSV, enrich each with sourcing/pricing/assembly
+  detail, and hand off as a 94-column Master-BOM CSV, a kicad-parts
+  `approved_parts.csv`, or JSON. State lives in the sidecar DB.
 
 Runs as a single Docker container next to Frigate, bind-mounting Frigate's
 `config.yml` and `frigate.db` read-only and writing its own SQLite DB.
