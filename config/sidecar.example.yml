@@ -21,13 +21,15 @@ frigate:
   # /media/frigate). Used only to strip this prefix before reattaching
   # recordings_path below.
   media_path: /media/frigate
-  # The HOST-side path to the same recordings tree, as the sidecar itself
-  # sees it. Deployment-specific -- get it with
-  # `docker inspect <frigate-container> --format '{{json .Mounts}}'` on the
-  # Frigate host, then confirm by ls-ing a recordings.path row rewritten
-  # through this prefix. On the reference deployment this has an unexpected
-  # nested `recordings/` segment -- don't assume a 1:1 mapping with media_path.
-  recordings_path: /mnt/frigate-storage/recordings/recordings
+  # The HOST-side path that REPLACES media_path above. `recordings.path` rows
+  # read `<media_path>/recordings/<date>/...`, so the `recordings/` segment
+  # comes from the DB value and must NOT be repeated here -- pointing this at
+  # .../recordings/recordings maps every segment one level too deep, every
+  # lookup misses, and generation produces nothing.
+  # Get the host side with
+  # `docker inspect <frigate-container> --format '{{json .Mounts}}'`, then
+  # confirm by ls-ing a real recordings.path row rewritten through this prefix.
+  recordings_path: /mnt/frigate-storage/recordings
 
 sidecar:
   # Path to the sidecar's own SQLite database (triage labels, etc.).
@@ -35,6 +37,16 @@ sidecar:
   # Bind address. 0.0.0.0 + host networking exposes the service on the LAN.
   bind_host: 0.0.0.0
   bind_port: 5001
+  # Require the client's Frigate session cookie on every endpoint the sidecar
+  # owns -- the triage UI, /faces, /analysis, /toybox and /v1. The sidecar sits
+  # on the same LAN origin as Frigate and serves event history, face crops of
+  # identified people, and writes that reach back into Frigate, so leaving it
+  # open is a way around Frigate's own auth. The proxy catch-all is never gated
+  # here (Frigate authenticates that traffic itself). Set false only if your
+  # Frigate has auth disabled, in which case there is no session to check.
+  require_frigate_auth: true
+  auth_cache_ttl_s: 60.0        # how long a validated cookie is trusted
+  auth_cache_max_entries: 1024  # bound: Frigate rotates its JWT
 
 # External health watchdog. Polls Frigate's API and restarts the container when
 # the backend hangs (connection-refused or repeated 5xx) — the failure mode
@@ -81,9 +93,23 @@ scrub:
   # (604 KB vs 827 KB for a 96-cell sheet, §5.3 M4) -- WebP is opt-in only,
   # and requires -lossless 0 explicitly or ffmpeg silently ships near-lossless
   # (~1 MB) sheets.
-  format: jpeg
+  format: jpeg               # validated at load; a typo is a startup error
   generate_interval_s: 60.0  # continuous edge -- NEVER hourly (§5.4)
+  # Retention sweep, run by the same in-process loop. Pruning used to be
+  # CLI-only, so an unattended deployment kept every sheet it ever generated.
+  prune_interval_s: 3600.0
+  # Bounds concurrent ffmpeg/ffprobe children. Segments within a camera are
+  # sampled serially (cell assignment is order-dependent), so this only bites
+  # when a CLI backfill runs alongside the in-process generator.
   ffmpeg_concurrency: 3
+  # Work budget per camera per tier per cycle. A cold start has no resume point,
+  # so the tier window is the whole retention horizon -- uncapped, the first
+  # cycle tries to sample every segment in it (days of ffmpeg across a
+  # multi-camera deployment) in one go. 120 x 10s segments = 20 min of footage
+  # per camera per cycle, far above the ~6 segments/cycle the live edge
+  # produces, so it only bites while catching up. Raise it to backfill faster,
+  # or narrow `cameras` above.
+  max_segments_per_cycle: 120
 
 # Transparent reverse proxy to Frigate's authenticated origin, giving the app
 # one base URL. See docs/scrub-cache-and-proxy-spec.md §6.
