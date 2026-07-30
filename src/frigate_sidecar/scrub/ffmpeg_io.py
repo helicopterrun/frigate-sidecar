@@ -1,0 +1,130 @@
+"""ffmpeg/ffprobe subprocess helpers for the scrub generator (§5.2, §5.3).
+
+Kept separate from the orchestration in generator.py so the pure
+cell-assignment logic (grid.py) can be tested without a working ffmpeg on the
+test runner. All functions here shell out and are exercised by
+integration-style tests guarded with `pytest.mark.skipif(shutil.which(...))`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from pathlib import Path
+
+_FFMPEG = "ffmpeg"
+_FFPROBE = "ffprobe"
+_PROBE_TIMEOUT_S = 15.0
+_EXTRACT_TIMEOUT_S = 30.0
+
+
+class FfmpegError(RuntimeError):
+    pass
+
+
+async def probe_gop_seconds(segment_path: Path, *, timeout_s: float = _PROBE_TIMEOUT_S) -> float:
+    """Best-effort GOP length in seconds: keyframe spacing (§5.2 M1).
+
+    Returns the median spacing between consecutive keyframe pts. Falls back
+    to the segment's own duration (i.e. "one keyframe per segment", the
+    coarse case) if fewer than two keyframes are found.
+    """
+    pts = await probe_keyframe_pts(segment_path, timeout_s=timeout_s)
+    if len(pts) < 2:
+        return await _probe_duration(segment_path, timeout_s=timeout_s)
+    deltas = sorted(b - a for a, b in zip(pts, pts[1:], strict=False))
+    return deltas[len(deltas) // 2]
+
+
+async def _probe_duration(segment_path: Path, *, timeout_s: float) -> float:
+    proc = await asyncio.create_subprocess_exec(
+        _FFPROBE, "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(segment_path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except asyncio.TimeoutError as exc:
+        proc.kill()
+        await proc.wait()
+        raise FfmpegError(f"ffprobe duration timed out on {segment_path}") from exc
+    try:
+        return float(out.decode().strip())
+    except ValueError:
+        return 10.0  # Frigate segments are ~10s; safe fallback.
+
+
+async def probe_keyframe_pts(
+    segment_path: Path, *, timeout_s: float = _PROBE_TIMEOUT_S
+) -> list[float]:
+    """Presentation timestamps (seconds, relative to segment start) of every
+    keyframe in the segment, via one `ffprobe` call (§5.2)."""
+    proc = await asyncio.create_subprocess_exec(
+        _FFPROBE, "-v", "error", "-select_streams", "v",
+        "-skip_frame", "nokey",
+        "-show_entries", "frame=pkt_pts_time",
+        "-of", "csv=p=0",
+        str(segment_path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except asyncio.TimeoutError as exc:
+        proc.kill()
+        await proc.wait()
+        raise FfmpegError(f"ffprobe keyframe scan timed out on {segment_path}") from exc
+    pts: list[float] = []
+    for line in out.decode().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        with contextlib.suppress(ValueError):
+            pts.append(float(line))
+    return pts
+
+
+async def extract_keyframes(
+    segment_path: Path, out_dir: Path, *, timeout_s: float = _EXTRACT_TIMEOUT_S,
+    cell_w: int = 320, cell_h: int = 180,
+) -> list[Path]:
+    """Keyframe-only decode -- cheap, uniform when GOP ~= target interval
+    (§5.2). Frame N on disk corresponds to keyframe pts N from
+    `probe_keyframe_pts` (same underlying decode order)."""
+    proc = await asyncio.create_subprocess_exec(
+        _FFMPEG, "-nostdin", "-loglevel", "error",
+        "-skip_frame", "nokey", "-vsync", "0", "-i", str(segment_path),
+        "-vf", f"scale={cell_w}:{cell_h}", "-q:v", "8", "-f", "image2",
+        str(out_dir / "%06d.jpg"),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+    except asyncio.TimeoutError as exc:
+        proc.kill()
+        await proc.wait()
+        raise FfmpegError(f"ffmpeg keyframe extract timed out on {segment_path}") from exc
+    if proc.returncode != 0:
+        raise FfmpegError(f"ffmpeg keyframe extract failed on {segment_path}")
+    return sorted(out_dir.glob("*.jpg"))
+
+
+async def extract_fps(
+    segment_path: Path, out_dir: Path, interval_s: float, *,
+    timeout_s: float = _EXTRACT_TIMEOUT_S, cell_w: int = 320, cell_h: int = 180,
+) -> list[Path]:
+    """Full-decode `fps=1/N` fallback for a coarser GOP (§5.2)."""
+    proc = await asyncio.create_subprocess_exec(
+        _FFMPEG, "-nostdin", "-loglevel", "error", "-i", str(segment_path),
+        "-vf", f"fps=1/{interval_s},scale={cell_w}:{cell_h}", "-q:v", "8", "-f", "image2",
+        str(out_dir / "%06d.jpg"),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+    except asyncio.TimeoutError as exc:
+        proc.kill()
+        await proc.wait()
+        raise FfmpegError(f"ffmpeg fps extract timed out on {segment_path}") from exc
+    if proc.returncode != 0:
+        raise FfmpegError(f"ffmpeg fps extract failed on {segment_path}")
+    return sorted(out_dir.glob("*.jpg"))

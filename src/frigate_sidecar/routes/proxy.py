@@ -48,6 +48,16 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
     if not settings.proxy.enabled:
         raise HTTPException(status_code=404, detail="proxy disabled")
 
+    # `/v1` is a namespace reserved entirely for the sidecar's own endpoints
+    # (docs/scrub-cache-and-proxy-spec.md §4.0) -- an unmatched /v1/* path
+    # must JSON-404 here, never fall through to Frigate (which could 200 it
+    # with its SPA shell, or the upstream could simply be unreachable and
+    # return a confusing 502 for what is really a 404).
+    if path == "v1" or path.startswith("v1/"):
+        raise HTTPException(
+            status_code=404, detail={"error": "not_generated", "message": "unknown /v1 path"}
+        )
+
     # Defense-in-depth: FastAPI's router already resolves ".." segments before
     # matching, but reject explicitly too (matches wildlife.py's guard).
     if ".." in path.split("/"):

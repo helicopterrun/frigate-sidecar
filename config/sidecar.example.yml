@@ -54,9 +54,10 @@ watchdog:
   max_restarts_per_hour: 3       # safety cap; logs loudly instead of looping
 
 # Uniform-cadence sprite-sheet scrub cache (docs/scrub-cache-and-proxy-spec.md).
-# Off by default; opt-in per deployment. NOTE: generation is not implemented
-# yet (only /v1/capabilities and /v1/coverage exist so far) -- flipping
-# enabled=true currently only changes what /v1/capabilities advertises.
+# Off by default; opt-in per deployment. enabled=true starts the continuous
+# ~60s in-process generator (server.py lifespan, §5.4a) in addition to
+# advertising the capability -- requires ffmpeg/ffprobe on PATH and a
+# frigate.recordings_path mount/host-path that resolves.
 scrub:
   enabled: false
   cameras: []              # [] = all cameras; else an opt-in list

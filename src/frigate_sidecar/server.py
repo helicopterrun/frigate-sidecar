@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import logging
+import os
+import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -28,6 +34,62 @@ _PACKAGE_ROOT = Path(__file__).parent
 _TEMPLATES_DIR = _PACKAGE_ROOT / "templates"
 _STATIC_DIR = _PACKAGE_ROOT / "static"
 
+logger = logging.getLogger(__name__)
+
+
+async def _scrub_generation_loop(app: FastAPI) -> None:
+    """Continuous ~60s edge (docs spec §5.4 option (a)) -- NEVER hourly, per
+    the spec's own blocking correction: an hourly cron reproduces the
+    top-of-hour hole this cache exists to remove."""
+    from frigate_sidecar.scrub.generator import generate_cycle
+
+    settings: Settings = app.state.settings
+    interval = settings.scrub.generate_interval_s
+    while True:
+        try:
+            await generate_cycle(settings, now=time.time())
+        except Exception:
+            logger.exception("scrub: generation cycle failed")
+        await asyncio.sleep(interval)
+
+
+def _cache_on_separate_filesystem(cache_dir: Path, recordings_path: Path) -> bool:
+    """§8.3 hard requirement: refuse to enable scrub if its cache would land
+    on the same filesystem as Frigate's recordings (which may be nearly
+    full)."""
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return os.stat(cache_dir).st_dev != os.stat(recordings_path).st_dev
+    except OSError:
+        # Can't tell (e.g. recordings_path doesn't exist in this environment,
+        # such as under test) -- don't block startup on an inconclusive check.
+        return True
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings: Settings = app.state.settings
+    task: asyncio.Task[None] | None = None
+    if settings.scrub.enabled:
+        if not _cache_on_separate_filesystem(
+            settings.scrub.cache_dir, settings.frigate.recordings_path
+        ):
+            logger.error(
+                "scrub.cache_dir (%s) is on the same filesystem as "
+                "frigate.recordings_path (%s) -- refusing to start the generator "
+                "(docs spec §8.3)",
+                settings.scrub.cache_dir, settings.frigate.recordings_path,
+            )
+        else:
+            task = asyncio.create_task(_scrub_generation_loop(app))
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
@@ -36,6 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version=__version__,
         docs_url="/docs",
         redoc_url=None,
+        lifespan=_lifespan,
     )
     app.state.settings = settings
     app.state.templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))

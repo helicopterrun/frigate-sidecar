@@ -250,6 +250,150 @@ def fmt_ts(epoch: float | None) -> str:
     )
 
 
+def upsert_scrub_bucket(
+    conn: sqlite3.Connection,
+    *,
+    camera: str,
+    start_ts: float,
+    end_ts: float,
+    interval_s: float,
+    width: int,
+    height: int,
+    generated_through: float,
+    complete: bool,
+) -> None:
+    conn.execute(
+        "INSERT INTO scrub_buckets "
+        "(camera, start_ts, end_ts, interval_s, width, height, generated_through, complete) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(camera, start_ts, interval_s) DO UPDATE SET "
+        "end_ts=excluded.end_ts, generated_through=excluded.generated_through, "
+        "complete=excluded.complete",
+        (camera, start_ts, end_ts, interval_s, width, height, generated_through, int(complete)),
+    )
+
+
+def list_scrub_buckets(
+    conn: sqlite3.Connection, camera: str, start: float, end: float
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT * FROM scrub_buckets WHERE camera = ? AND start_ts < ? AND end_ts > ? "
+        "ORDER BY start_ts",
+        (camera, end, start),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def latest_generated_through(conn: sqlite3.Connection, camera: str) -> float | None:
+    row = conn.execute(
+        "SELECT MAX(generated_through) AS g FROM scrub_buckets WHERE camera = ?", (camera,)
+    ).fetchone()
+    return row["g"] if row and row["g"] is not None else None
+
+
+def delete_scrub_buckets_before(conn: sqlite3.Connection, camera: str | None, cutoff: float) -> int:
+    if camera is None:
+        cur = conn.execute("DELETE FROM scrub_buckets WHERE end_ts < ?", (cutoff,))
+    else:
+        cur = conn.execute(
+            "DELETE FROM scrub_buckets WHERE camera = ? AND end_ts < ?", (camera, cutoff)
+        )
+    return cur.rowcount
+
+
+def upsert_scrub_sheet(
+    conn: sqlite3.Connection,
+    *,
+    camera: str,
+    start_ts: float,
+    interval_s: float,
+    cols: int,
+    rows: int,
+    cell_w: int,
+    cell_h: int,
+    count: int,
+    path: str,
+    complete: bool,
+) -> None:
+    conn.execute(
+        "INSERT INTO scrub_sheets "
+        "(camera, start_ts, interval_s, cols, rows, cell_w, cell_h, count, path, complete) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(camera, start_ts, interval_s, count) DO UPDATE SET "
+        "path=excluded.path, complete=excluded.complete",
+        (camera, start_ts, interval_s, cols, rows, cell_w, cell_h, count, path, int(complete)),
+    )
+
+
+def list_scrub_sheets(
+    conn: sqlite3.Connection, camera: str, start: float, end: float
+) -> list[dict[str, Any]]:
+    """Latest published version of each sheet intersecting [start, end).
+
+    Older (superseded) counts stay in the table as immutable objects (their
+    URLs remain servable forever, §4.3) but /sheets only advertises the
+    current one per (camera, interval_s, start_ts) -- otherwise a client
+    listing sheets would see multiple candidate URLs for the same instant
+    with no way to tell which is current.
+    """
+    rows_ = conn.execute(
+        """
+        SELECT s.* FROM scrub_sheets s
+        JOIN (
+            SELECT camera, interval_s, start_ts, MAX(count) AS max_count
+            FROM scrub_sheets
+            WHERE camera = ? AND start_ts < ? AND (start_ts + cols * rows * interval_s) > ?
+            GROUP BY camera, interval_s, start_ts
+        ) latest
+        ON s.camera = latest.camera AND s.interval_s = latest.interval_s
+           AND s.start_ts = latest.start_ts AND s.count = latest.max_count
+        WHERE s.camera = ?
+        ORDER BY s.start_ts
+        """,
+        (camera, end, start, camera),
+    ).fetchall()
+    return [dict(r) for r in rows_]
+
+
+def get_scrub_sheet(
+    conn: sqlite3.Connection, camera: str, start_ts: float, interval_s: float, count: int
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM scrub_sheets WHERE camera = ? AND start_ts = ? AND interval_s = ? "
+        "AND count = ?",
+        (camera, start_ts, interval_s, count),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def delete_scrub_sheets_before(
+    camera: str | None, cutoff: float, conn: sqlite3.Connection
+) -> list[str]:
+    """Delete sheet rows ending before `cutoff`, returning their on-disk paths
+    so the caller can unlink the files too (mirrors wildlife.py's
+    mtime-bounded eviction, but keyed on content time here)."""
+    if camera is None:
+        rows = conn.execute(
+            "SELECT path FROM scrub_sheets WHERE (start_ts + cols * rows * interval_s) < ?",
+            (cutoff,),
+        ).fetchall()
+        conn.execute(
+            "DELETE FROM scrub_sheets WHERE (start_ts + cols * rows * interval_s) < ?", (cutoff,)
+        )
+    else:
+        rows = conn.execute(
+            "SELECT path FROM scrub_sheets WHERE camera = ? AND "
+            "(start_ts + cols * rows * interval_s) < ?",
+            (camera, cutoff),
+        ).fetchall()
+        conn.execute(
+            "DELETE FROM scrub_sheets WHERE camera = ? AND "
+            "(start_ts + cols * rows * interval_s) < ?",
+            (camera, cutoff),
+        )
+    return [r["path"] for r in rows]
+
+
 def percentile(values: list[float], p: float) -> float:
     """Nearest-rank percentile. `p` in [0, 100]. NaN on empty input."""
     if not values:

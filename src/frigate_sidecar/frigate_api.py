@@ -90,6 +90,26 @@ class FrigateClient:
         msg = payload.get("message") or f"HTTP {r.status_code}"
         raise FrigateAPIError(f"train_face({name}, {training_file}): {msg}")
 
+    def activity_motion(
+        self, camera: str, start: float, end: float, scale: float
+    ) -> list[dict[str, Any]]:
+        """Re-fetch of `/api/review/activity/motion` (docs spec §4.6) --
+        Frigate's own motion-activity series, normalised 0-100, ~1s
+        resolution. Caller aggregates/zero-fills; this is a thin passthrough
+        with our own timeout discipline.
+        """
+        url = f"{self.base_url}/api/review/activity/motion"
+        params: dict[str, str | float] = {
+            "cameras": camera, "after": start, "before": end, "scale": scale,
+        }
+        try:
+            r = self._client.get(url, params=params)
+            r.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise FrigateAPIError(f"GET {url}: {exc}") from exc
+        data = r.json()
+        return data if isinstance(data, list) else []
+
     def plus_enabled(self) -> bool:
         """Best-effort: returns True if Frigate reports a configured Plus API key.
 
