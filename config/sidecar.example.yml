@@ -4,12 +4,30 @@
 # gitignored so your real values stay out of the repo.
 
 frigate:
-  # Frigate's HTTP API base URL. Used to build snapshot/clip URLs in the UI.
+  # Frigate's HTTP API base URL. Used to build snapshot/clip URLs in the UI,
+  # and for the sidecar's own unauthenticated server-to-server calls.
   base_url: http://frigate.lan:5000
+  # Frigate's AUTHENTICATED origin, used ONLY to proxy app traffic
+  # (routes/proxy.py). Auth stays entirely Frigate's -- the sidecar forwards
+  # the client's own cookie and never holds a password. Do not merge with
+  # base_url above (docs/scrub-cache-and-proxy-spec.md §3.2).
+  proxy_base_url: http://frigate.lan:8971
   # Path to Frigate's config.yml (inside the sidecar container).
   config_path: /opt/frigate/config.yml
   # Path to Frigate's main SQLite database (inside the sidecar container).
   db_path: /opt/frigate/database/frigate.db
+  # The container-side recordings root as Frigate's own DB stores it in
+  # recordings.path (e.g. what Frigate's docker-compose bind-mounts to
+  # /media/frigate). Used only to strip this prefix before reattaching
+  # recordings_path below.
+  media_path: /media/frigate
+  # The HOST-side path to the same recordings tree, as the sidecar itself
+  # sees it. Deployment-specific -- get it with
+  # `docker inspect <frigate-container> --format '{{json .Mounts}}'` on the
+  # Frigate host, then confirm by ls-ing a recordings.path row rewritten
+  # through this prefix. On the reference deployment this has an unexpected
+  # nested `recordings/` segment -- don't assume a 1:1 mapping with media_path.
+  recordings_path: /mnt/frigate-storage/recordings/recordings
 
 sidecar:
   # Path to the sidecar's own SQLite database (triage labels, etc.).
@@ -34,5 +52,42 @@ watchdog:
   restart_timeout_s: 120.0
   cooldown_s: 180.0              # ignore failures this long after a restart (boot)
   max_restarts_per_hour: 3       # safety cap; logs loudly instead of looping
+
+# Uniform-cadence sprite-sheet scrub cache (docs/scrub-cache-and-proxy-spec.md).
+# Off by default; opt-in per deployment. NOTE: generation is not implemented
+# yet (only /v1/capabilities and /v1/coverage exist so far) -- flipping
+# enabled=true currently only changes what /v1/capabilities advertises.
+scrub:
+  enabled: false
+  cameras: []              # [] = all cameras; else an opt-in list
+  # MUST be a separate filesystem from frigate.recordings_path -- the
+  # recordings volume was measured at 99% full / 27 GB free on the reference
+  # deployment and cannot absorb the cache too (§8.3, hard requirement).
+  cache_dir: /data/scrub
+  recent_interval_s: 1.0
+  aged_interval_s: 5.0
+  aged_after_h: 24.0
+  # Capped by how long CONTINUOUS (non-motion-only) recording actually lasts,
+  # not by disk budget or record.retain.days. Measured at ~4 days on the
+  # reference deployment (docs spec §5.5, M3) -- past that, footage is
+  # motion-only and too fragmentary to sample at a uniform interval.
+  retention_days: 4
+  cell_w: 320
+  cell_h: 180
+  sheet_cols: 12
+  sheet_rows: 8
+  # "jpeg" | "webp". JPEG measured smaller than WebP on real camera content
+  # (604 KB vs 827 KB for a 96-cell sheet, §5.3 M4) -- WebP is opt-in only,
+  # and requires -lossless 0 explicitly or ffmpeg silently ships near-lossless
+  # (~1 MB) sheets.
+  format: jpeg
+  generate_interval_s: 60.0  # continuous edge -- NEVER hourly (§5.4)
+  ffmpeg_concurrency: 3
+
+# Transparent reverse proxy to Frigate's authenticated origin, giving the app
+# one base URL. See docs/scrub-cache-and-proxy-spec.md §6.
+proxy:
+  enabled: true
+  pass_request_headers: [range, authorization, cookie]
 
 log_level: INFO

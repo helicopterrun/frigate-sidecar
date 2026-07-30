@@ -17,7 +17,9 @@ from frigate_sidecar.routes import fps_budget as fps_budget_routes
 from frigate_sidecar.routes import health as health_routes
 from frigate_sidecar.routes import motion as motion_routes
 from frigate_sidecar.routes import placement as placement_routes
+from frigate_sidecar.routes import proxy as proxy_routes
 from frigate_sidecar.routes import score_histogram as score_histogram_routes
+from frigate_sidecar.routes import scrub as scrub_routes
 from frigate_sidecar.routes import toybox as toybox_routes
 from frigate_sidecar.routes import triage as triage_routes
 from frigate_sidecar.routes import wildlife as wildlife_routes
@@ -54,6 +56,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(faces_routes.router)
     app.include_router(toybox_routes.router)
     app.include_router(wildlife_routes.router)
+    app.include_router(scrub_routes.router)
+    # Proxy is a catch-all (/{path:path}) and MUST be registered last so every
+    # other route -- /v1/*, /static, /healthz, the sidecar's own pages -- wins
+    # first (docs/scrub-cache-and-proxy-spec.md §6).
+    app.include_router(proxy_routes.router)
     return app
 
 

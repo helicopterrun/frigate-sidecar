@@ -62,6 +62,41 @@ CREATE INDEX IF NOT EXISTS idx_toybox_board ON toybox_scores(game, score DESC);
 INSERT INTO toybox_scores (game, name, score, played_at)
 SELECT 'states50', 'BOB1', 30, '2026-06-05T00:00:00'
 WHERE NOT EXISTS (SELECT 1 FROM toybox_scores WHERE game = 'states50');
+
+-- Scrub-cache: uniform-cadence sprite sheets (docs/scrub-cache-and-proxy-spec.md).
+-- `interval_s` is a hard contract -- every frame in [start_ts, end_ts) exists
+-- within interval_s/2 of start_ts + n*interval_s, or the bucket is split.
+CREATE TABLE IF NOT EXISTS scrub_buckets (
+    camera            TEXT NOT NULL,
+    start_ts          REAL NOT NULL,        -- inclusive
+    end_ts            REAL NOT NULL,        -- exclusive; grows as the live bucket fills
+    interval_s        REAL NOT NULL,        -- the hard-contract cadence
+    width             INTEGER NOT NULL,
+    height            INTEGER NOT NULL,
+    generated_through REAL NOT NULL,        -- newest moment with a frame behind it
+    complete          INTEGER NOT NULL DEFAULT 0,  -- 1 once end_ts is final & immutable
+    PRIMARY KEY (camera, start_ts, interval_s)
+);
+CREATE INDEX IF NOT EXISTS idx_scrub_bucket_cam ON scrub_buckets(camera, start_ts);
+
+-- One row per sprite-sheet image. `count` is filled cells (< cols*rows while
+-- still filling); it's part of the sheet's URL/filename so the object is
+-- immutable at every version (docs spec §4.3 -- a growing count must never
+-- reuse a URL).
+CREATE TABLE IF NOT EXISTS scrub_sheets (
+    camera     TEXT NOT NULL,
+    start_ts   REAL NOT NULL,               -- sheet's first cell wall-clock time
+    interval_s REAL NOT NULL,
+    cols       INTEGER NOT NULL,
+    rows       INTEGER NOT NULL,
+    cell_w     INTEGER NOT NULL,
+    cell_h     INTEGER NOT NULL,
+    count      INTEGER NOT NULL,            -- filled cells
+    path       TEXT NOT NULL,               -- on-disk relative path under scrub.cache_dir
+    complete   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (camera, start_ts, interval_s, count)
+);
+CREATE INDEX IF NOT EXISTS idx_scrub_sheet_cam ON scrub_sheets(camera, start_ts);
 """
 
 
@@ -113,6 +148,66 @@ def open_joined(
     # `main` doesn't propagate to the attached DB.
     conn.execute(f"ATTACH DATABASE ? AS {sidecar_alias}", (str(sp),))
     return conn
+
+
+# Publish lag: how far behind wall-clock a segment's end_time typically is once
+# it's committed. Measured live on the current deployment (2026-07-30): 6.2s on
+# both alley-wide and doorbell, within the 4-10s range client-side review
+# estimated. Used to compute `authoritative_through` (docs spec §4.4 finding 4)
+# -- a field that must keep advancing at wall-clock rate even if a camera goes
+# silent, unlike `latest_segment_end` (= MAX(end_time)), which freezes on outage.
+DEFAULT_PUBLISH_LAG_S = 6.2
+
+
+def recording_coverage(
+    conn: sqlite3.Connection,
+    camera: str,
+    start: float,
+    end: float,
+    *,
+    now: float,
+    publish_lag_s: float = DEFAULT_PUBLISH_LAG_S,
+) -> dict[str, Any]:
+    """Merged recorded intervals for `camera` in [start, end), plus the two
+    distinct "how far can I trust this" fields (docs spec §4.4).
+
+    `latest_segment_end` is diagnostic only (freezes if the camera goes
+    offline). `authoritative_through` is what gates client coverage claims --
+    it keeps advancing at wall-clock rate regardless of camera health, so its
+    divergence from `latest_segment_end` IS the outage signal.
+    """
+    rows = conn.execute(
+        "SELECT start_time, end_time FROM recordings "
+        "WHERE camera = ? AND start_time < ? AND end_time > ? "
+        "ORDER BY start_time",
+        (camera, end, start),
+    ).fetchall()
+
+    merged: list[list[float]] = []
+    for row in rows:
+        seg_start = max(row["start_time"], start)
+        seg_end = min(row["end_time"], end)
+        if seg_end <= seg_start:
+            continue
+        if merged and seg_start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], seg_end)
+        else:
+            merged.append([seg_start, seg_end])
+
+    latest_row = conn.execute(
+        "SELECT MAX(end_time) AS latest FROM recordings WHERE camera = ?", (camera,)
+    ).fetchone()
+    latest_segment_end = None
+    if latest_row and latest_row["latest"] is not None:
+        latest_segment_end = latest_row["latest"]
+
+    return {
+        "camera": camera,
+        "queried": [start, end],
+        "recorded": [tuple(interval) for interval in merged],
+        "latest_segment_end": latest_segment_end,
+        "authoritative_through": now - publish_lag_s,
+    }
 
 
 def parse_event_data(row: sqlite3.Row) -> dict[str, Any]:
