@@ -24,7 +24,9 @@ def client(frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path) -> Test
             config_path=fake_config,
             db_path=frigate_db_path,
         ),
-        sidecar=SidecarSection(db_path=sidecar_db_path, bind_port=5001),
+        sidecar=SidecarSection(
+            db_path=sidecar_db_path, bind_port=5001, require_frigate_auth=False
+        ),
     )
     return TestClient(create_app(settings))
 

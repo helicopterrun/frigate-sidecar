@@ -46,10 +46,19 @@ def _set_decision(
 
 
 def promote(settings: Settings, filename: str, name: str) -> dict[str, str]:
-    """Promote a train crop into the `name` library, then record the decision."""
+    """Promote a train crop into the `name` library, then record the decision.
+
+    The name ends up both in an upstream URL path and in a directory Frigate
+    creates under its face library, so path separators and traversal segments
+    are rejected outright rather than relying on escaping alone.
+    """
     name = name.strip()
     if not name:
         raise FacePromoteError("a non-empty name is required to promote")
+    if any(c in name for c in "/\\") or ".." in name or any(ord(c) < 32 for c in name):
+        raise FacePromoteError(f"invalid library name: {name!r}")
+    if any(c in filename for c in "/\\") or ".." in filename:
+        raise FacePromoteError(f"invalid training filename: {filename!r}")
     try:
         with FrigateClient(settings.frigate.base_url) as fc:
             fc.train_face(name, filename)
