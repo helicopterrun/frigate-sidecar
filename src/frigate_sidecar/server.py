@@ -28,7 +28,6 @@ from frigate_sidecar.routes import score_histogram as score_histogram_routes
 from frigate_sidecar.routes import scrub as scrub_routes
 from frigate_sidecar.routes import toybox as toybox_routes
 from frigate_sidecar.routes import triage as triage_routes
-from frigate_sidecar.routes import wildlife as wildlife_routes
 
 _PACKAGE_ROOT = Path(__file__).parent
 _TEMPLATES_DIR = _PACKAGE_ROOT / "templates"
@@ -118,7 +117,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(analysis_routes.router)
     app.include_router(faces_routes.router)
     app.include_router(toybox_routes.router)
-    app.include_router(wildlife_routes.router)
     app.include_router(scrub_routes.router)
     # Proxy is a catch-all (/{path:path}) and MUST be registered last so every
     # other route -- /v1/*, /static, /healthz, the sidecar's own pages -- wins
