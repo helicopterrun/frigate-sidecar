@@ -1,6 +1,6 @@
 # frigate-sidecar: scrub-cache + Frigate proxy — implementation spec
 
-**Status:** design spec, ready to build against. Written 2026-07-30.
+**Status:** design spec, ready to build against. Written 2026-07-30, revised 2026-07-30 after client-side review (PR #3) and Phase 1 measurements against the live box.
 **Audience:** whoever implements the sidecar side of Elsinore's reel.
 **Companions (client side, in the Elsinore repo):**
 - `writing/sidecar-requirements-2026-07-29.md` — what the reel wants, and the measurement behind each ask. This spec is the server-side answer to it.
@@ -24,6 +24,8 @@ Plus a small set of `/v1` read endpoints that collapse the reel's per-window fan
 ### The one principle everything else serves
 
 > **Predictability over density.** 0.5 fps uniform beats 1 fps irregular. The single largest source of complexity in the reel today is that Frigate's frame cadence is bimodal and lands on no boundary. A declared interval turns frame-time into arithmetic (`cell = round((t − start) / interval)`) and deletes a stack of client code: the snap grid, the frame ticks, the 31-second nearest-frame tolerance, and the staleness badge.
+>
+> **This win is scoped to the continuous-retention window (~4 days) and opted-in cameras — not everywhere, always.** Past the continuous window, on cameras not opted in, and against any deployment without the sidecar, the client still runs the full bare-Frigate path with all four of those mechanisms. Client-side review confirmed both paths are permanent, not a migration. Design and document accordingly: this deletes client complexity *conditionally*, which is a smaller win than originally framed but still a real one.
 
 ### Non-negotiables (inherited from Elsinore PROJECT_PLAN §6 — not re-litigated)
 
@@ -95,11 +97,9 @@ For **proxying app traffic**, the sidecar should forward to Frigate's **authenti
 
 Config therefore grows a **second** Frigate URL: `frigate.proxy_base_url` (the authed `:8971`) distinct from `frigate.base_url` (the internal `:5000`). See §7.
 
-**Protecting the `/v1` endpoints themselves:** the sprite cache is low-sensitivity (320×180 preview stills, same footage the proxied `/preview` already exposes). Two viable options:
-- **(a)** Require the same Frigate auth cookie on `/v1/*` and validate it by a cheap upstream call (proxy a `HEAD /api/…` and mirror 401). Uniform with the rest.
-- **(b)** Trust the LAN / the existing NPM reverse-proxy layer that already fronts this host (per the current deployment, Nginx Proxy Manager terminates TLS and can gate access).
+**Protecting the `/v1` endpoints themselves — decided: option (a), authenticate `/v1`.** The sprite cache is not low-sensitivity: it serves footage stills, on the same hostname the `/api` proxy already demands a Frigate session for. Leaving `/v1` open behind only the LAN/NPM layer (the originally-recommended option (b)) would make the sidecar a way around Frigate's own auth for imagery — client-side review flagged this as blocking, correctly. The rule: **`/v1` must never be less protected than the endpoints it sits beside.**
 
-Recommend **(b) for v1** (simplest, matches how the sidecar's other pages are already exposed) with a note that **(a)** is the clean answer once off-LAN relay (Elsinore §12.4) is real. Flagged in §12.
+Require the same Frigate auth cookie on `/v1/*`. Validating it on every request against Frigate would add real latency, so validate once and cache the result for ~60 s (per-session, keyed on the cookie value) rather than a per-request upstream round trip. This costs the client nothing — Elsinore already sends cookies on every request via `FrigateSession.playbackCookieContext()` — and costs the server a small amount of code for a real property. Unauthenticated `/v1` requests get `401` with the same `www-authenticate` shape the proxy relays from Frigate, so the client's existing 401-handling path covers both.
 
 ---
 
@@ -129,10 +129,11 @@ Each of these cost a debugging session on bare Frigate; bake them in from the st
     "generated": true                  // false = running but hasn't backfilled yet
   },
   "proxy":  { "enabled": true },
-  "push":   { "enabled": false },
-  "http2":  true                       // is this origin reachable over HTTP/2 (§6.5)
+  "push":   { "enabled": false }
 }
 ```
+
+**No `capabilities.http2` field** (dropped — client-side review finding, correct: `URLSession` negotiates HTTP/2 via ALPN on its own without being told; `httpMaximumConnectionsPerHost` is fixed at session-creation time, before any capability probe response arrives, so the client can't act on the flag without tearing down its session anyway; and the FastAPI app has no visibility into what the terminating proxy actually negotiated with the client, so behind NPM it would just echo back whatever NPM was configured to claim, not reality). Still enable HTTP/2 on whatever fronts the origin (§6.5) — it's real and worth doing — just don't advertise it as a capability.
 
 - A `404`, or `scrub_cache.enabled == false`, means **fall back to bare Frigate**.
 - `cameras` lists what is *generated*, not merely what's enabled — a sidecar that's up but hasn't backfilled a given camera is a different state from one that has, and the reel shows the difference rather than looking broken.
@@ -150,14 +151,17 @@ This answers *"what frames do I have, and at what cadence"* — distinct from re
     { "start": 1785294000, "end": 1785380400, "interval": 5.0, "width": 320, "height": 180 }
   ],
   "generated_through": 1785384060,
-  "retention_days": 14
+  "retention_days": 4
 }
 ```
 
-- **`interval` is a hard contract:** every frame in `[start, end)` exists at `start + n·interval`. If one is genuinely missing (a recording gap), **split the bucket** rather than fudge the interval. The client relies on this to place frames by arithmetic with no per-frame list.
+- **`interval` is a hard contract, with a stated and enforced error bound:** every frame in `[start, end)` exists within `interval / 2` of `start + n·interval`. This is not automatic — Frigate's own recording segments are *about* ten seconds and their starts drift, so per-segment sampling produces a series offset from the bucket grid and from other cameras' series. The generator **records the achieved timestamp per cell** during generation and asserts it against the bound; when it can't be held, **split the bucket** rather than silently rounding two different moments onto the same cell (§5.2, §11 test). A recording gap is the same case, handled the same way. The client relies on this bound to place frames by arithmetic with no per-frame list.
 - **`generated_through`** is the newest moment with a frame behind it — the sidecar's own live-edge lag, stated so the reel never guesses.
-- Buckets may **thin with age** (`interval` 1.0 recent, 5.0 older). Expected; the reel draws it honestly.
+- Buckets may **thin with age** (`interval` 1.0 recent, 5.0 older) — see §5.5 for exactly what "older" means now that continuous retention is ~4 days, not 14.
+- **Buckets do not overlap in time for a given camera.** The bucket schema's primary key is `(camera, start_ts, interval_s)`, so a moment could in principle carry both a 1.0 s and a 5.0 s bucket if thinning and generation raced — the generator must retire (or never emit) the finer bucket once a coarser one supersedes its span, so a client never has to choose between two buckets for the same instant.
+- **Past `retention_days`, there is nothing to sample, and the response says so as a distinct state.** A span older than `retention_days` is not "not generated yet" (which implies it's still coming) — it's a span that will *never* have a bucket. The client compares the queried range against `retention_days` (both fields it already has) to distinguish "will never exist" from "lagging"; no separate flag is needed, but this must be documented explicitly so the two states aren't drawn identically (client-side review finding 1).
 - **No `frames[]` array anywhere.** The uniform interval makes it redundant, and a redundant array is one that can disagree with the image.
+- **Never a placeholder or black cell.** A synthesized/blank frame presented as footage is worse than a hole — split the bucket instead (same rule as the gap case above).
 
 ### 4.3 Sprite sheets — `GET /v1/scrub/{camera}/sheets?start={ts}&end={ts}` and the images
 
@@ -166,20 +170,20 @@ GET /v1/scrub/{camera}/sheets?start={ts}&end={ts}
 200 → {
   "sheets": [
     {
-      "url": "/v1/scrub/doorbell/sheet/1785380400-1.0.webp",
+      "url": "/v1/scrub/doorbell/sheet/1785380400-1.0-96.jpg",
       "start": 1785380400, "interval": 1.0,
       "cols": 12, "rows": 8, "cell_w": 320, "cell_h": 180, "count": 96
     }
   ]
 }
 
-GET /v1/scrub/{camera}/sheet/{start}-{interval}.webp   → image/webp (or image/jpeg), immutable
+GET /v1/scrub/{camera}/sheet/{start}-{interval}-{count}.jpg   → image/jpeg (or image/webp), always immutable
 ```
 
 - **Cell for time `t`:** `idx = round((t − start) / interval)`, laid out **row-major** — `row = idx // cols`, `col = idx % cols`. No timestamp list; nothing to get out of sync.
+- **Sheet URLs are content-addressed by `(start, interval, count)`, not just `(start, interval)`.** The earlier draft kept one URL while a still-filling sheet's `count` grew, served with `Cache-Control: immutable` — that's a silent-wrong-frame bug: the client caches the image at `count=12`, the generator advances it to `count=40`, the URL doesn't change, and the client's cell-index arithmetic now points past what it has cached with no way to detect the mismatch (client-side review finding 3, blocking). Putting `count` in the filename makes **every version of a sheet its own immutable object** — the live/still-filling sheet is genuinely a different URL each time it grows, `immutable` is true unconditionally, and the client builds the URL from `count`, which `/sheets` already returns. No freshness reasoning exists anywhere in the system.
 - **Why sheets, not individual frames:** measured, individual frame fetches saturate at ~88 frames/s over six HTTP/1.1 connections and going wider *worsens* per-request latency (p95 110 ms → 250 ms from 6→24 conns) without the client being able to use the throughput. One sheet fetch covering a whole drag span sidesteps the connection cap entirely.
-- **Sizing:** cap a sheet at ~**96 cells** (≈ two minutes of 1 fps timeline). At 320×180 that's a decoded footprint of ~20 MB; the client holds two or three. `count` may be < `cols·rows` for the newest (still-filling) sheet.
-- The `sheet/{start}-{interval}.webp` filename is content-addressed by (bucket start, interval), so it's immutable once complete → the immutable cache header applies and the client's own URL cache serves repeats.
+- **Sizing:** cap a sheet at ~**96 cells** (≈ two minutes of 1 fps timeline). At 320×180 that's a decoded footprint of **~21 MB** (measured: 12×8 grid = 3840×1440 RGBA); the client holds **two**, not three (client-side review measured its own memory budget and settled on two — match that number here so both sides size to the same figure). `count` may be < `cols·rows` for the newest (still-filling) sheet.
 
 ### 4.4 Recording coverage (what Frigate recorded) — `GET /v1/coverage/{camera}?start={ts}&end={ts}`
 
@@ -190,14 +194,17 @@ The field that would have prevented four bugs this week. Read straight from `fri
   "camera": "doorbell",
   "queried":  [1785380000, 1785384000],
   "recorded": [[1785380000, 1785381240], [1785381600, 1785383990]],
-  "published_through": 1785383990,
-  "retention_days": 30
+  "latest_segment_end": 1785383990,
+  "authoritative_through": 1785384033.8,
+  "retention_days": 4
 }
 ```
 
 - **`queried`** is the span this answer covers. Anything outside it is **unknown, not empty**. This one field is the whole ask: it lets the reel stop conflating "no recording" with "I haven't looked". *(Bare Frigate's empty array means both.)*
 - **`recorded`** as merged intervals, not raw segments — the reel already merges them; doing it server-side saves parsing and removes segment-boundary off-by-ones.
-- **`published_through`** is where the recorder has actually committed = `MAX(end_time)` over the camera's `recordings` rows. Measured: the newest segment trails real time by **4–10 s** because a segment is published only once complete. The reel currently hard-codes a 20 s "don't make claims" band; with this it uses the real number.
+- **`published_through` is split into two fields with different meanings — this was wrong in the original draft (client-side review finding 4, blocking).** The original single field was `MAX(end_time)` over the camera's `recordings` rows, meant as the boundary beyond which the client makes no coverage claims. But when a camera goes **offline**, `MAX(end_time)` stops advancing — so the "no claims" band grows without bound and the reel stops hatching a genuine outage, which is exactly backwards: a dead camera would render identically to a span the sidecar just hasn't fetched yet.
+  - **`latest_segment_end`** — diagnostic only. The newest committed segment's `end_time`, straight from `MAX(end_time)`. Useful for a camera-health display; **must not** gate coverage claims.
+  - **`authoritative_through`** — `now − measured_publish_lag`, using the *measured* commit lag (**6.2 s**, both `alley-wide` and `doorbell` measured live 2026-07-30 — within the review's estimated 4–10 s range), not the newest segment. **Only this field gates what the client claims as covered.** It keeps advancing at wall-clock rate even while a camera is silently dead, so `recorded` stops matching `authoritative_through` immediately — which is the outage signal.
 - **`ETag`** required (§4.0): the window containing *now* is re-polled every ~10 s; a `304` lets the sidecar decide how often the answer really changes.
 
 ### 4.5 One call per reel window — `GET /v1/reel/{camera}?start={ts}&end={ts}&motion_scale={s}`
@@ -208,16 +215,22 @@ Collapses the three-or-four parallel requests the reel makes to paint one window
 200 → {
   "queried":  [start, end],
   "recorded": [[…]],
-  "published_through": 1785383990,
-  "frames": { "start": …, "interval": 1.0, "count": 3600 },      // descriptor, not data — mirrors scrub coverage
+  "latest_segment_end": 1785383990,
+  "authoritative_through": 1785384033.8,
+  "frames": [
+    { "start": …, "interval": 1.0, "count": 3600 },
+    { "start": …, "interval": 5.0, "count": 120 }
+  ],
   "motion": { "start": …, "interval": 10, "values": [0,4,61,88,…] },
   "events": [ { "id": "…", "label": "person", "zones": ["driveway"],
-               "start": 1785381200, "end": 1785381260, "score": 0.81 } ]
+               "start": 1785381200, "end": null, "score": 0.81 } ]
 }
 ```
 
 - **`motion.values` is a bare array on a declared grid** — `value[i]` covers `[start + i·interval, start + (i+1)·interval)`. An hour at `scale=10` is 360 numbers, not 360 timestamped objects. Biggest byte win on the page and it costs nothing to produce.
-- `frames` is the same descriptor as §4.2 (start/interval/count), so the client places cells by arithmetic.
+- **`frames` is an array of descriptors, not one descriptor.** A single reel window commonly straddles the recent/aged thinning boundary (§5.5), so one `{start, interval, count}` can't express two different cadences inside the same response — it needed the same shape as `/v1/scrub/{camera}/coverage`'s `buckets[]` (§4.2), so make it identical: an array. Each descriptor is the same start/interval/count triple, and the client places cells by arithmetic per-bucket exactly as it does against §4.2.
+- **`events[].end` is nullable and `null` means "still in progress."** An event that hasn't closed yet (the object is still present) has no end time. The client's `ObjectTrack` keys `sawExit` off a nullable end and deliberately draws no exit cap when it's null — the server must emit `null`, not omit the field or send a placeholder timestamp, or the client draws a false exit.
+- **`queried` is inclusive of `start`, exclusive of `end`** — `[start, end)`, matching how `recorded` and bucket spans are already documented (§4.2, §4.4). Stated explicitly here since it wasn't spelled out originally and both sides need to agree.
 - Deletes client-side: three window caches, three in-flight guards, and the `ReelDataSource` latest-wins pump that exists only because those three sources could disagree about which window they described.
 - **ETag** as §4.0.
 
@@ -237,6 +250,8 @@ Turns the reel from a ruler into a search tool — "take me to the next interest
 ```
 200 → { "highlights": [ { "start": …, "end": …, "reason": "person", "score": 0.9 } ] }
 ```
+
+- **`highlights[].reason` is a Frigate object label** (`person`, `car`, `package`, …) — the same vocabulary as `review`/`events` label fields, not a separate category scheme. State this explicitly: the client maps labels to lanes and deliberately returns `nil` for unrecognized ones, so an undocumented or inconsistent vocabulary here would silently drop every highlight.
 
 Cheap for the sidecar: precompute from `review` items + motion. This is the one item that adds a *feature* rather than removing client complexity — build it after Tier 0, before the rest of Tier 1.
 
@@ -258,18 +273,22 @@ The sidecar already opens `frigate.db` read-only (`db.py::open_frigate_ro`). Fri
 - **`recorded`** intervals and **`published_through`** for §4.4 (`MAX(end_time)`),
 - exactly which spans have footage, so the generator never wastes ffmpeg on a gap.
 
-### 5.2 Sampling to a uniform interval
+### 5.2 Sampling to a uniform interval — **GOP-driven, measured, not assumed**
 
-For a target bucket `[t0, t1)` at `interval = N` seconds, per contributing segment:
+**Measured (M1, 2026-07-30, live box):** GOP on a real `alley-wide` recording segment is **exactly 1.0 s** (15 fps stream, keyframe every 15 frames, landing on whole-second boundaries). This is the best case flagged as an open question in the earlier draft, and it resolves cleanly: **keyframe-only decode gives ~1 fps natively, at roughly a third the CPU cost of full decode-and-discard** (M2: 0.68 s wall / 111% CPU / 79 MB RSS for keyframe-only vs. 1.36 s wall / 176% CPU / 117 MB RSS for `fps=1/N` full decode, both on the same 10 s segment — extrapolated across 10 cameras continuously: ~18 CPU-hours/day keyframe-only vs. ~57 CPU-hours/day full decode).
+
+Given that, sample with keyframe skipping, not a full-decode `fps` filter, for the 1 fps recent tier:
 
 ```
-ffmpeg -nostdin -loglevel error -ss <offset> -i <segment.mp4> \
-       -vf "fps=1/N,scale=320:180" -q:v 4 -f image2 <outdir>/%06d.jpg
+ffmpeg -nostdin -loglevel error -skip_frame nokey -vsync 0 -i <segment.mp4> \
+       -vf "scale=320:180" -q:v 8 -f image2 <outdir>/%06d.jpg
 ```
 
-- `-vf fps=1/N` resamples to exactly one frame per N seconds — **this is what makes the cadence uniform and honest**: it selects the real frame nearest each grid point, never interpolates.
+- `-skip_frame nokey -vsync 0` decodes only keyframes and passes them through 1:1 (no cfr resync, which would otherwise duplicate frames to fill a target rate) — **this is what makes the cadence uniform and honest** on this deployment's GOP, at a fraction of full-decode cost. It selects real frames, never interpolates.
+- **This assumes GOP ≈ target interval.** If a future camera or Frigate config produces a coarser GOP (e.g. one keyframe per full 10 s segment), keyframe-only decode would only yield 0.1 fps and the generator must fall back to `-vf fps=1/N` full decode for that camera, or accept a coarser default interval for it. Check GOP once per camera at startup (one `ffprobe` call) rather than assuming uniformity across the fleet — a mixed-hardware deployment could have mixed GOPs.
+- For the **aged tier** (interval coarser than the measured GOP, §5.5), `-vf fps=1/N` full decode is fine — the tier already isn't the CPU-sensitive one.
 - `scale=320:180` — §1.5 of the requirements: 320×180 is enough; don't spend disk on resolution. Spend budget on interval and retention instead.
-- Frame `k` from segment start maps to wall-clock `segment.start_time + k·N`, which maps to sheet cell `round((t − bucket.start) / N)`.
+- Frame `k` from segment start maps to wall-clock `segment.start_time + k·(actual keyframe spacing)`, which maps to sheet cell `round((t − bucket.start) / N)`. **Record each cell's achieved timestamp** and assert it's within `interval / 2` of the grid point (§4.2); split the bucket when it isn't — this is the client-side review's finding 7 (cadence needs an error bound and verification), now load-bearing since per-segment sampling is exactly the mechanism that can silently drift off-grid.
 - Reuse the concurrency discipline already in `wildlife.py`: an `asyncio.Semaphore` (start at 3) caps simultaneous ffmpeg processes, and a per-extraction timeout kills a wedged one.
 
 ### 5.3 Tiling into sheets
@@ -279,7 +298,9 @@ Accumulate frames into a montage of `cols × rows` (target ~96 cells, e.g. 12×8
 - **ffmpeg `tile` filter** in one pass: `-vf "fps=1/N,scale=320:180,tile=12x8" ` writes montage(s) directly — fewest processes, no intermediate JPEGs.
 - **Pillow/`opencv`** compositing from the per-frame JPEGs — more control over partial (still-filling) sheets and re-encoding to WebP.
 
-Recommend the **ffmpeg `tile`** path for completed buckets (cheap, one process) and Pillow only for the **live, partially-filled** sheet that's re-tiled each cycle until full. Output **WebP** (13.6 KB/frame measured on Frigate's own WebP; comparable here) with **JPEG as the shipping fallback** — `capabilities.scrub_cache.format` tells the client which, so JPEG-first can ship before WebP tiling lands with zero contract change.
+Recommend the **ffmpeg `tile`** path for completed buckets (cheap, one process) and Pillow only for the **live, partially-filled** sheet that's re-tiled each cycle until full.
+
+**Default output format: JPEG, not WebP** — reversed from the earlier draft. Measured (M4, 2026-07-30): a real 96-cell sheet built from consecutive `alley-wide` keyframes came out **604 KB as JPEG (`-q:v 8`) vs. 827 KB as WebP (`-lossless 0 -q:v 75`)** — WebP did not win on real (noisy) camera content the way the estimate assumed. Worse, omitting `-lossless 0` on the WebP encoder silently produces a **near-lossless ~1 MB file** — an easy mistake that would have shipped 70% oversized sheets. Ship JPEG as the default and only path initially; `capabilities.scrub_cache.format` still exists so WebP can be added later as an explicit opt-in (with `-lossless 0` mandatory and documented, not implied) without a contract change.
 
 Write atomically: extract to a temp file in the cache dir, then `os.replace` into place (the exact atomic-publish pattern in `wildlife.py::wildlife_poster`). A sheet is only advertised in `/v1/scrub/.../sheets` once fully written.
 
@@ -295,11 +316,32 @@ Two implementation shapes:
 
 Recommend **(a)** for the continuous forward edge, with the CLI (§5.7) also available for **(b)** and for one-shot backfill. Either way it is *not* hourly.
 
-### 5.5 Retention & thinning
+### 5.5 Retention & thinning — **4 days, not 14, and this is a hard ceiling**
 
-- Keep a **recent tier at 1 fps** and **thin older spans** to a coarser interval (e.g. 5 s past 24 h) by generating those buckets at the coarser `interval`. The bucket schema already carries `interval`, so the reel draws the thinning honestly.
+**⛔ Blocking correction (client-side review finding 1, independently reconfirmed, M3):** continuous (uniformly-sampleable) footage does not last 14 days. Measured `doorbell` and independently reconfirmed on `alley-wide`, `crows-nest`, and `street` (2026-07-30):
+
+| days back | alley-wide | crows-nest | street |
+|---|---|---|---|
+| 1 | 100% | 100% | 100% |
+| 3 | 100% | 100% | 100% |
+| 4.2 | 1% | 1% | 4% |
+| 7 | 1% | 0% | 14% |
+| 9 | 0% | 0% | 1% |
+
+Every camera checked shows the same shape: a **hard cliff at ~4 days** (matches `record.continuous.days: 4.0` in the live config), then a thin, per-camera-inconsistent motion-only tail out to ~8–9 days (`record.motion.days: 8.0`), then nothing. This is a config fact, not noise — expect it to hold across the fleet.
+
+Consequences:
+- **`scrub.retention_days` defaults to 4, not 14.** Past day 4, there is no continuous source to sample uniformly at all — 14 days was never buildable regardless of disk budget.
+- **Days 4–8 are a distinct, explicitly degraded state**, not a thinning tier. Motion-only clips give 1–14% hourly coverage in the measurements above — a uniform-interval bucket there fragments into dozens of short buckets per hour. This is not the same shape as the recent/aged thinning below and the generator should not try to force it into that shape; either skip generation past day 4 entirely (recommended — simplest, and the CPU/disk cost buys little for what's a fragmentary, inconsistent tail) or generate it accepting heavy fragmentation and document that explicitly. **Recommend: skip past day 4.** `retention_days: 4` then means exactly what it says.
+- **`aged_after_h: 24` has little room to matter inside a 4-day window** — reconsider whether a second thinning tier earns its complexity at all versus just running the whole 4-day window at 1 fps (see disk math below — 4 days at 1 fps is affordable without thinning).
+- Keep a **recent tier at 1 fps** across the full continuous window; only add a coarser aged tier if the disk math below doesn't fit the deployment's actual free space (§5.5 disk math, and see the hard constraint in §8.3 on cache placement).
 - A prune pass (part of the loop, or `fsc scrub prune`) drops sheets whose bucket `end < now − retention_days`, oldest-first — the bounded-by-mtime eviction `wildlife.py::_prune_poster_cache` already demonstrates.
-- **Disk math (from the requirements, for sign-off in §12):** 1 fps · 320×180 · sprite-JPEG ≈ **0.4–0.5 GB/camera/day**; 8 cameras × 14 days ≈ **50–60 GB**. If that's too much, make the recent tier 1 fps and everything past 24 h drop to 0.2 fps — the buckets say which, so the reel needs no change.
+
+**Disk math — measured, not estimated (M4, 2026-07-30):** a real 96-cell, 320×180 JPEG sheet (`-q:v 8`) off `alley-wide` came to 604 KB (6.3 KB/frame). At 900 sheets/day (86400 s ÷ 96 cells) that's **~544 MB/camera/day**. Across the live deployment's actual **ten** cameras (not eight — corrected count, see §5.5.1) at the corrected 4-day retention: **~21.8 GB total**, in line with the client-side review's own corrected estimate (~18 GB) once the retention correction is applied. This replaces the earlier 50–60 GB estimate (which was both over-retained at 14 days and undercounted at 8 cameras).
+
+#### 5.5.1 Camera count correction
+
+The deployment has **ten** cameras, not eight: `alley-wide, crows-nest, doorbell, garden, gate, package, stairway-tight, stairway-wide, street, walkway`. The "8 cameras" figure in the earlier draft and in the Elsinore requirements doc was a counting error on the client side, propagated here. Use 10 for all capacity planning in this spec and in `scrub.cameras` defaults.
 
 ### 5.6 Degraded HTTP-only generator (fallback only)
 
@@ -364,21 +406,30 @@ class FrigateSection(BaseModel):
     proxy_base_url: str = "http://frigate.lan:8971"    # NEW: authed origin for app-traffic proxy (§3.2)
     config_path: Path = Path("/opt/frigate/config.yml")
     db_path: Path = Path("/opt/frigate/database/frigate.db")
-    media_path: Path = Path("/media/frigate")          # NEW: RO mount of Frigate recordings (§8.2)
+    media_path: Path = Path("/media/frigate")          # NEW: the DB's container-side recordings root — used
+                                                         # only to strip this prefix from recordings.path (§8.2)
+    recordings_path: Path = Path("/mnt/frigate-storage/recordings/recordings")  # NEW: host-side path the
+                                                         # sidecar actually reads from (M6) — deployment-specific,
+                                                         # must not be assumed 1:1 with media_path
 
 class ScrubSection(BaseModel):
     enabled: bool = False                              # off by default; opt-in per deployment
-    cameras: list[str] = []                            # [] = all cameras; else the opt-in set (§12 Q3)
-    cache_dir: Path = Path("/data/scrub")              # sheets live alongside the sidecar DB
-    recent_interval_s: float = 1.0                     # 1 fps recent tier
-    aged_interval_s: float = 5.0                       # thinned tier
+    cameras: list[str] = []                            # [] = all 10 cameras (§5.5.1); else the opt-in set (§12 Q3)
+    cache_dir: Path = Path("/data/scrub")              # MUST be a separate filesystem from Frigate's
+                                                         # recordings volume — see §8.3, this is now a hard
+                                                         # requirement, not a suggestion
+    recent_interval_s: float = 1.0                     # 1 fps recent tier, GOP-driven (§5.2)
+    aged_interval_s: float = 5.0                       # thinned tier — reconsider whether this earns its
+                                                         # complexity now that the window is 4 days, not 14 (§5.5)
     aged_after_h: float = 24.0                         # when to drop to the aged interval
-    retention_days: int = 14                           # ours to set, independent of record.retain.days
+    retention_days: int = 4                            # hard ceiling: continuous footage on this deployment
+                                                         # ends at ~4 days (M3); past this, nothing to sample
     cell_w: int = 320
     cell_h: int = 180
     sheet_cols: int = 12
     sheet_rows: int = 8                                # 96 cells ≈ 2 min at 1 fps
-    format: str = "webp"                               # "webp" | "jpeg" (§5.3)
+    format: str = "jpeg"                                # "jpeg" | "webp" (§5.3) — JPEG measured smaller on
+                                                         # real camera content (M4); WebP is opt-in only
     generate_interval_s: float = 60.0                  # the ~60 s continuous edge (NOT hourly) (§5.4)
     ffmpeg_concurrency: int = 3                         # semaphore width (matches wildlife)
 
@@ -432,12 +483,25 @@ CREATE INDEX IF NOT EXISTS idx_scrub_sheet_cam ON scrub_sheets(camera, start_ts)
 ### 8.2 On-disk layout & path mapping
 
 ```
-{scrub.cache_dir}/{camera}/{interval}/{bucket_start}.webp
+{scrub.cache_dir}/{camera}/{interval}/{sheet_start}-{interval}-{count}.jpg
 ```
 
-Content-addressed by (camera, interval, bucket start) → immutable once complete → the immutable cache header applies and the sheet URL is stable forever.
+**Corrected from the earlier draft**, which wrote `{bucket_start}.webp` — that conflates the *bucket's* start with the *sheet's* start. A bucket spans up to `retention_days` at one interval; a sheet holds only ~96 cells (≈2 min at 1 fps), so one bucket is covered by roughly thirty sheets, each with its own `start_ts` per `scrub_sheets` (§8.1). The on-disk filename must key off the sheet, and — per the immutable-URL fix in §4.3 — must include `count` too, matching the URL exactly.
 
-**Path mapping:** `recordings.path` in `frigate.db` is Frigate's *container* path (e.g. `/media/frigate/recordings/2026-07-30/…`). The sidecar sees that tree at `frigate.media_path`. If the two roots differ, map by replacing Frigate's recordings root prefix with `frigate.media_path`. Verify against the live deployment (the faces config already hard-codes a host-side media path — `/mnt/frigate-storage/recordings/...` — so the mapping is deployment-specific and belongs in config).
+Content-addressed by (camera, interval, sheet start, count) → immutable once complete → the immutable cache header applies and the sheet URL is stable forever.
+
+**Path mapping — two-part rewrite, deployment-specific (M6, measured live):** `recordings.path` in `frigate.db` holds Frigate's *container* path, e.g. `/media/frigate/recordings/2026-07-30/14/alley-wide/30.44.mp4`. On the current deployment, `docker inspect frigate` shows that container path bind-mounted from a host directory that itself contains a **nested `recordings/` segment** — the real host path is `/mnt/frigate-storage/recordings/recordings/2026-07-30/...`, confirmed by directly reading a segment at that path. This is not a simple 1:1 substitution and must not be assumed one:
+
+1. Strip the `frigate.media_path` prefix (the DB's container-side root, e.g. `/media/frigate`) from `recordings.path`.
+2. Reattach `frigate.recordings_path` (the sidecar's own host-side path to the same tree, §7) — which may itself have deployment-specific quirks like the nested `recordings/` segment above.
+
+Both fields are now explicit config (§7), not inferred. Get the correct value for a new deployment by the same method used here: `docker inspect <frigate-container> --format '{{json .Mounts}}'` on the Frigate host, then confirm with a direct `ls` of a `recordings.path` row rewritten through the candidate prefix.
+
+### 8.3 Cache placement — must be a separate filesystem (hard requirement)
+
+**Measured (M5, 2026-07-30):** the filesystem backing Frigate's own recordings (`/mnt/frigate-storage/recordings`, which is what `/media/frigate` bind-mounts from) is **99% full — 27 GB free** on the live deployment. This is worse than the client-side review's own snapshot (93% full / 124 GB free) taken hours earlier; free space on this volume is actively shrinking. Even the corrected ~22 GB disk estimate (§5.5) would consume nearly all remaining headroom and risk Frigate itself hitting `ENOSPC` on its own recordings.
+
+**`scrub.cache_dir` must be provisioned on a separate filesystem from Frigate's recordings volume before this ships.** This was "worth stating" in the earlier draft; the current measurement makes it a hard blocker for deployment, independent of the code. No second local volume was found on the box in this pass — provisioning one (a second disk, a network share, or running the sidecar against its own separate host disk) is a deployment prerequisite, not a config default. Verify at startup: if `scrub.cache_dir` resolves to the same filesystem as `frigate.recordings_path` (compare `st_dev`), log loudly and refuse to enable `scrub.enabled` rather than silently competing with Frigate for the last few GB.
 
 ---
 
@@ -451,16 +515,20 @@ Content-addressed by (camera, interval, bucket start) → immutable once complet
     volumes:
       - /opt/frigate/config.yml:/opt/frigate/config.yml:ro
       - /opt/frigate/database/frigate.db:/opt/frigate/database/frigate.db:ro
-      - /media/frigate:/media/frigate:ro          # NEW — recordings, read-only
-      - /opt/frigate-sidecar/data:/data           # sheets live here (scrub.cache_dir=/data/scrub)
+      - /mnt/frigate-storage/recordings/recordings:/media/frigate:ro   # NEW — recordings, RO (M6: real host path,
+                                                                          # note the nested recordings/ segment)
+      - /path/to/separate-volume/scrub:/data/scrub                     # sheets live here — MUST be a different
+                                                                          # filesystem than the recordings mount
+                                                                          # above (§8.3, hard requirement — the
+                                                                          # recordings volume is 99% full)
       - ./config/sidecar.yml:/etc/frigate-sidecar/sidecar.yml:ro
 ```
 
-For the **systemd/LXC deployment** (the one actually in use — an editable install restarted via `systemctl restart frigate-sidecar.service`), the recordings path is a host path already present; just point `frigate.media_path` at it. No mount needed.
+For the **systemd/LXC deployment** (the one actually in use — an editable install restarted via `systemctl restart frigate-sidecar.service`), the recordings path is a host path already present; point `frigate.recordings_path` directly at `/mnt/frigate-storage/recordings/recordings` (M6). No mount needed, but `scrub.cache_dir` still needs to land on a volume other than that one.
 
-### 9.2 ffmpeg must be present
+### 9.2 ffmpeg must be present — confirmed missing, now blocking for both features
 
-`wildlife.py` already shells out to `ffmpeg`, and the generator depends on it. The current `Dockerfile` (`python:3.12-slim`) does **not** install it — so the Docker path needs `RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg`. The systemd/LXC deployment relies on host ffmpeg (already true for wildlife posters). Flag this as a real gap for the Docker image regardless of this spec.
+`wildlife.py` already shells out to `ffmpeg`, and the generator depends on it. Confirmed live (M7, 2026-07-30): `ffmpeg`/`ffprobe` are present on the Frigate host itself but **absent from this repo's own runtime environment**, and the current `Dockerfile` (`python:3.12-slim`) does not install them — so the Docker path needs `RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg`. This is not a hypothetical gap: `wildlife.py` is *already broken* in the container image today for exactly this reason. Fixing the Dockerfile is now a **blocker for this PR**, not a side note, since scrub-cache generation depends on it too. The systemd/LXC deployment relies on host ffmpeg, which is present there.
 
 ### 9.3 Generator process
 
@@ -468,7 +536,7 @@ If §5.4(a) in-process: nothing new to deploy — the FastAPI lifespan starts th
 
 ### 9.4 HTTP/2 at the edge
 
-Enable HTTP/2 on whatever fronts `:5001` (the existing NPM/Nginx TLS terminator is the natural place — §6.5). One config line; advertise via `capabilities.http2`.
+Enable HTTP/2 on whatever fronts `:5001` (the existing NPM/Nginx TLS terminator is the natural place — §6.5). One config line. **Not advertised via capabilities** (§4.1) — `URLSession` negotiates it itself and the flag can only be wrong.
 
 ---
 
@@ -492,9 +560,11 @@ The reel must never *require* a `/v1` endpoint to be usable. This is the load-be
 
 Follow the existing `tests/` conventions (`test_api.py`, `test_sampler.py`, `test_recorder.py`, `conftest.py` fixtures; `pytest` + `pytest-asyncio`, already configured).
 
-- **`test_scrub_generate`** — given a fixture segment (a tiny checked-in mp4) and a fake `recordings` row, assert the generator writes a sheet with the declared `count`, that cell `k` is the frame at `start + k·interval`, and that a gap **splits the bucket** rather than fudging the interval.
-- **`test_scrub_coverage`** — bucket rows → coverage JSON: interval contract holds, `generated_through` is the true edge, aged buckets carry the coarser interval.
-- **`test_reel_bundle`** — one call returns `queried`/`recorded`/`published_through`/`frames`/`motion`/`events`; `motion.values` is a bare array on the declared grid, zero-filled to the full requested range; `queried` ≠ `recorded` when the window overhangs available footage.
+- **`test_scrub_generate`** — given a fixture segment (a tiny checked-in mp4) and a fake `recordings` row, assert the generator writes a sheet with the declared `count`, that cell `k`'s **achieved timestamp is within `interval / 2` of the grid point** `start + k·interval` (not just approximately right — assert the bound), and that a gap **splits the bucket** rather than fudging the interval. This is the highest-value test in the suite per the client-side review — the cadence guarantee is silent until two series collide on one cell.
+- **`test_scrub_coverage`** — bucket rows → coverage JSON: interval contract holds, `generated_through` is the true edge, aged buckets carry the coarser interval, a span past `retention_days` is distinguishable from a lagging one.
+- **`test_scrub_sheet_url_immutable`** — two generations of the same live (still-filling) sheet produce two different URLs (differing `count`); both are served with an unconditional `immutable` header; no cache-freshness logic exists anywhere in the sheet-serving path.
+- **`test_reel_bundle`** — one call returns `queried`/`recorded`/`latest_segment_end`/`authoritative_through`/`frames`/`motion`/`events`; `frames` is an array of descriptors (not a single one) when the window straddles the thinning boundary; `motion.values` is a bare array on the declared grid, zero-filled to the full requested range; `queried` ≠ `recorded` when the window overhangs available footage; an in-progress event serializes `end: null`.
+- **`test_authoritative_through_survives_camera_outage`** — a camera with no new segments for N minutes: `latest_segment_end` stays frozen at the last real segment, but `authoritative_through` keeps advancing at wall-clock rate — the divergence between the two is the outage signal, and the test asserts it doesn't collapse back to one field.
 - **`test_motion_totalizes`** — a short-window / coarse-scale upstream response is aggregated & zero-filled to cover the *full* requested range (the two measured cliffs).
 - **`test_proxy_passthrough`** — `Range` and `Authorization` forwarded; `206`/`401`/`404` mirrored; `..` traversal rejected; `set-cookie`/`etag` relayed. (Mock the upstream with `httpx` transport, as the wildlife proxy tests would.)
 - **Contract-hygiene asserts** — unknown `/v1` path → JSON 404 (never HTML 200); immutable header on completed sheets; ETag → 304 on `If-None-Match`; all times float.
@@ -504,15 +574,15 @@ Follow the existing `tests/` conventions (`test_api.py`, `test_sampler.py`, `tes
 
 ## 12. Open decisions — need sign-off before/while building
 
-The first two (from §3) change the build shape; the rest are the requirements doc's open questions, carried here so they're decided deliberately.
+The first two (from §3) change the build shape; the rest are the requirements doc's open questions, carried here so they're decided deliberately. Several are now resolved by Phase 1 measurement rather than left open — marked below.
 
-1. **Generation source** — recordings via `/media` RO mount (recommended: uniform + no hourly hole) vs HTTP-only preview (no mount, but can't promise clean cadence). §3.1.
-2. **Proxy target & `/v1` auth** — proxy to authed `:8971` with cookie pass-through (recommended); protect `/v1` via the existing NPM/LAN layer for v1, upstream-validated cookie later. §3.2.
-3. **Disk budget** — accept ~50–60 GB (8 cams × 14 d × 1 fps), or make recent-tier 1 fps and everything past 24 h drop to 0.2 fps? Either is drawable honestly; the buckets declare which. §5.5.
-4. **Retention independent of `record.retain.days`?** The point of owning the cache is that we set this. Decide up front — it changes nothing in the schema (there's a `retention_days`), but confirms whether it must ever differ per camera.
-5. **All cameras or a chosen set?** Eight cameras of always-on ffmpeg is real CPU. `scrub.cameras` + `capabilities.scrub_cache.cameras` support a per-camera opt-in; decide the default. §7.
-6. **Backfill on first run** — batch the whole retention window, or forward-only + fill history lazily? Drives whether the reel shows "generating". §5.7.
-7. **Sheet span / cell size** — 96 cells (12×8) at 320×180 ≈ 2 min/sheet, ~20 MB decoded, hold 2–3. Confirm or tune. §4.3.
+1. **Generation source** — recordings via `/media` RO mount (recommended: uniform + no hourly hole) vs HTTP-only preview (no mount, but can't promise clean cadence). §3.1. **Unchanged — still recording segments.**
+2. **Proxy target & `/v1` auth** — proxy to authed `:8971` with cookie pass-through. **`/v1` auth is now resolved, not open: authenticate it (option (a)), per §3.2.** The earlier "trust the LAN" option would have made the sidecar a way around Frigate's own auth for footage stills.
+3. **Disk budget** — **resolved by measurement:** ~22 GB (10 cams × 4 d × 1 fps, JPEG), not the earlier 50–60 GB estimate — both the camera count (8→10) and the retention window (14→4 days) were wrong. §5.5. Still open: `scrub.cache_dir` needs a home on a filesystem other than the 99%-full recordings volume (§8.3) — this is a deployment task, not a design decision.
+4. **Retention independent of `record.retain.days`?** **Resolved: yes, but capped.** The schema's `retention_days` is ours to set, but it cannot exceed what continuous recording actually provides (~4 days, measured, §5.5) regardless of how much disk is available.
+5. **All cameras or a chosen set?** **Ten** cameras (corrected count, §5.5.1) of always-on ffmpeg, keyframe-only decode: ~18 CPU-hours/day fleet-wide (M2). `scrub.cameras` + `capabilities.scrub_cache.cameras` support a per-camera opt-in; still open whether the default is all-10 or an explicit opt-in list — the CPU number now exists to decide it with.
+6. **Backfill on first run** — batch the whole retention window, or forward-only + fill history lazily? Drives whether the reel shows "generating". Still open. §5.7.
+7. **Sheet span / cell size** — 96 cells (12×8) at 320×180 ≈ 2 min/sheet, **~21 MB decoded** (measured/computed precisely: 3840×1440 RGBA), client holds **two** (matches client-side review's own memory budget, tightened from "2–3"). §4.3.
 
 ---
 
