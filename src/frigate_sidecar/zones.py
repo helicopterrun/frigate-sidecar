@@ -67,16 +67,24 @@ def zones_containing_box(
     """Zones whose polygon contains the bbox's bottom-center point.
 
     Mirrors Frigate's own semantic: zone presence is evaluated at the
-    bottom-center of the bbox, not the centroid. Box is [x1, y1, x2, y2]
-    in normalized [0,1] coords. Returns empty set if box is missing/invalid.
+    bottom-center of the bbox, not the centroid.
 
-    Full-frame zones (e.g. `*_critter` regional gates) are excluded — they're
-    trivially active for any in-frame box and add no spatial signal.
+    `box` is Frigate's `event.data.box`: normalized **[x, y, w, h]** (that is
+    what `to_relative_box` writes), so bottom-center is `(x + w/2, y + h)`.
+    Reading it as `[x1, y1, x2, y2]` — which this did — put the test point at
+    `((x+w)/2, h)`, a place unrelated to the object, so the detail page's
+    "active zone" highlighting was wrong whenever it mattered.
+    `analysis/zone_hits.py` has always read the same field as [x, y, w, h].
+
+    Returns empty set if box is missing/invalid. Full-frame zones (e.g.
+    `*_critter` regional gates) are excluded — they're trivially active for any
+    in-frame box and add no spatial signal.
     """
     if not box or len(box) != 4:
         return set()
-    cx = (box[0] + box[2]) / 2.0
-    by = box[3]
+    x, y, w, h = box
+    cx = x + w / 2.0
+    by = y + h
     return {
         z["name"]
         for z in zones
@@ -96,7 +104,11 @@ def load_camera_zones(config_path: str | Path) -> dict[str, list[dict[str, Any]]
     try:
         with p.open() as f:
             cfg = yaml.safe_load(f) or {}
-    except OSError:
+    except (OSError, yaml.YAMLError):
+        # A malformed config.yml is Frigate's problem, not a reason to 500 the
+        # triage detail page -- render it without the zone overlay instead.
+        return {}
+    if not isinstance(cfg, dict):
         return {}
 
     out: dict[str, list[dict[str, Any]]] = {}

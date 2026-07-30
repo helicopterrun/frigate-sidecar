@@ -79,8 +79,9 @@ def sample(
     seed: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return a list of sampled events with media URLs populated."""
-    if seed is not None:
-        random.seed(seed)
+    # Own RNG instance: seeding the global one made an explicit `--seed` here
+    # reach into every other consumer of `random` in the process.
+    rng = random.Random(seed) if seed is not None else random.Random()
 
     where, params = time_window_clause(days, "e.start_time")
     if camera:
@@ -144,7 +145,7 @@ def sample(
     quotas = SampleQuota.for_n(n)
     by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for evs in bands.values():
-        random.shuffle(evs)
+        rng.shuffle(evs)
         for ev in evs:
             by_group[_BAND_TO_GROUP[ev["score_band"]]].append(ev)
 
@@ -158,7 +159,7 @@ def sample(
         "high_tail": quotas.high_tail,
     }.items():
         pool = by_group.get(group, [])
-        random.shuffle(pool)
+        rng.shuffle(pool)
         picked = 0
         for ev in pool:
             if picked >= quota:
@@ -173,7 +174,7 @@ def sample(
         remaining: list[dict[str, Any]] = []
         for evs in by_group.values():
             remaining.extend(evs)
-        random.shuffle(remaining)
+        rng.shuffle(remaining)
         seen = {ev["id"] for ev in selected}
         for ev in remaining:
             if len(selected) >= n:

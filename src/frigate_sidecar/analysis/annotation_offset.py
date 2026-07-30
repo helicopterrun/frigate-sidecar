@@ -25,8 +25,8 @@ class AnnotationOffsetUnavailable(RuntimeError):
 
 def _require_deps() -> tuple[Any, Any]:
     try:
-        import cv2  # type: ignore[import-not-found]
-        import numpy as np  # type: ignore[import-not-found]
+        import cv2
+        import numpy as np
     except ImportError as exc:
         raise AnnotationOffsetUnavailable(
             "cv2 / numpy not installed. Install with `pip install \"frigate-sidecar[annotation]\"`."

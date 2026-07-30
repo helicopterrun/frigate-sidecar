@@ -9,7 +9,7 @@ sidecar DB (`toybox_scores`). The game itself is fully client-side
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Final, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -22,7 +22,7 @@ router = APIRouter(tags=["toybox"])
 
 # Only one game today, but the board is namespaced by `game` so adding another
 # later doesn't require a schema change.
-GAME_STATES50 = "states50"
+GAME_STATES50: Final = "states50"
 _TOP_N = 10
 _NAME_MAX = 8  # arcade initials are short; keep the board tidy
 
@@ -65,13 +65,20 @@ def toybox_view(request: Request) -> Any:
 
 @router.get("/toybox/scores")
 def toybox_scores(request: Request, game: str = GAME_STATES50) -> JSONResponse:
+    if game not in KNOWN_GAMES:
+        raise HTTPException(status_code=404, detail=f"unknown game: {game}")
     return JSONResponse({"game": game, "scores": _top_scores(_settings(request), game)})
+
+
+#: Boards that exist. `game` namespaces the table, so accepting free text let
+#: a caller create unbounded leaderboards nobody can see.
+KNOWN_GAMES = (GAME_STATES50,)
 
 
 class ScorePayload(BaseModel):
     name: str = Field(..., min_length=1)
     score: int = Field(..., ge=0, le=50)
-    game: str = GAME_STATES50
+    game: Literal["states50"] = GAME_STATES50
 
 
 @router.post("/toybox/scores")
