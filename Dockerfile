@@ -7,6 +7,13 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# wildlife.py and the scrub-cache generator both shell out to ffmpeg/ffprobe;
+# the image was missing it (confirmed live 2026-07-30, M7 in
+# docs/scrub-cache-and-proxy-spec.md) -- this was already broken for
+# wildlife.py, not just a new requirement for scrub-cache.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 

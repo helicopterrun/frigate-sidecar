@@ -31,6 +31,18 @@ class FrigateSection(BaseModel):
     base_url: str = "http://frigate.lan:5000"
     config_path: Path = Path("/opt/frigate/config.yml")
     db_path: Path = Path("/opt/frigate/database/frigate.db")
+    # Authed origin used ONLY to proxy app traffic (routes/proxy.py). Auth stays
+    # entirely Frigate's — the sidecar forwards the client's own cookie and never
+    # holds a password. Deliberately separate from base_url (unauth, sidecar's
+    # own server-to-server calls) — do not merge them (docs/scrub-cache-and-proxy-spec.md §3.2).
+    proxy_base_url: str = "http://frigate.lan:8971"
+    # DB's container-side recordings root, as stored in recordings.path. Used
+    # only to strip this prefix before reattaching recordings_path (§8.2).
+    media_path: Path = Path("/media/frigate")
+    # Host-side path to Frigate's recordings root, as the sidecar itself sees it.
+    # Deployment-specific — measured live at /mnt/frigate-storage/recordings/recordings
+    # on the current box (nested `recordings/` segment; see docs spec §8.2 M6).
+    recordings_path: Path = Path("/mnt/frigate-storage/recordings/recordings")
 
 
 class SidecarSection(BaseModel):
@@ -92,6 +104,39 @@ class WatchdogSection(BaseModel):
     max_restarts_per_hour: int = 3
 
 
+class ScrubSection(BaseModel):
+    """Uniform-cadence sprite-sheet scrub cache (docs/scrub-cache-and-proxy-spec.md).
+
+    Off by default; opt-in per deployment. `retention_days` is capped by how
+    long continuous (non-motion-only) recording actually lasts on this
+    deployment -- measured at ~4 days, not the record.retain.days config value.
+    """
+
+    enabled: bool = False
+    cameras: list[str] = Field(default_factory=list)  # [] = all cameras
+    cache_dir: Path = Path("/data/scrub")  # MUST be a separate filesystem from
+    # frigate.recordings_path -- verified at startup, see routes/scrub.py.
+    recent_interval_s: float = 1.0
+    aged_interval_s: float = 5.0
+    aged_after_h: float = 24.0
+    retention_days: int = 4
+    cell_w: int = 320
+    cell_h: int = 180
+    sheet_cols: int = 12
+    sheet_rows: int = 8
+    format: str = "jpeg"  # "jpeg" | "webp" -- JPEG measured smaller on real
+    # camera content (see docs spec §5.3 M4); WebP requires -lossless 0.
+    generate_interval_s: float = 60.0  # continuous edge, NOT hourly (§5.4)
+    ffmpeg_concurrency: int = 3
+
+
+class ProxySection(BaseModel):
+    enabled: bool = True
+    pass_request_headers: list[str] = Field(
+        default_factory=lambda: ["range", "authorization", "cookie"]
+    )
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="FRIGATE_SIDECAR_",
@@ -103,6 +148,8 @@ class Settings(BaseSettings):
     sidecar: SidecarSection = Field(default_factory=SidecarSection)
     face: FaceSection = Field(default_factory=FaceSection)
     watchdog: WatchdogSection = Field(default_factory=WatchdogSection)
+    scrub: ScrubSection = Field(default_factory=ScrubSection)
+    proxy: ProxySection = Field(default_factory=ProxySection)
     log_level: str = "INFO"
 
 

@@ -19,9 +19,11 @@ app = typer.Typer(
 triage_app = typer.Typer(help="Sample borderline events and record tp/fp/skip labels.")
 analysis_app = typer.Typer(help="Read-only analyses over Frigate's DB and live API.")
 faces_app = typer.Typer(help="Score + curate Frigate's auto-saved face training crops.")
+scrub_app = typer.Typer(help="Uniform-cadence scrub-cache generation (sprite sheets).")
 app.add_typer(triage_app, name="triage")
 app.add_typer(analysis_app, name="analysis")
 app.add_typer(faces_app, name="faces")
+app.add_typer(scrub_app, name="scrub")
 
 
 @app.command()
@@ -382,6 +384,98 @@ def analysis_annotation_offset(
         "suggested_offset_ms", "confidence",
     ]
     typer.echo(render_table(headers, result))
+
+
+# ----- Scrub subcommands (docs/scrub-cache-and-proxy-spec.md §5.7) -----
+
+
+@scrub_app.command("generate")
+def scrub_generate(
+    camera: str | None = typer.Option(None, "--camera"),
+    output_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Run one generation cycle now (forward edge). Mirrors what the in-process
+    ~60s loop does, for a systemd-timer deployment (§5.4 option (b)) or manual
+    backfill kickstart."""
+    import asyncio
+
+    from frigate_sidecar.scrub.generator import generate_cycle
+
+    s = load_settings()
+    if camera:
+        s = s.model_copy(update={"scrub": s.scrub.model_copy(update={"cameras": [camera]})})
+    results = asyncio.run(generate_cycle(s))
+    if output_json:
+        typer.echo(json.dumps(results))
+        return
+    for r in results:
+        typer.echo(json.dumps(r))
+
+
+@scrub_app.command("backfill")
+def scrub_backfill(
+    camera: str = typer.Option(..., "--camera"),
+    days: int = typer.Option(4, help="Capped at scrub.retention_days regardless of this value."),
+) -> None:
+    """One-time history fill for `camera`, repeatedly cycling until the
+    generator catches up to `now` (§5.7). Cadence is still the same
+    interval-verified generator -- this just loops it instead of waiting on
+    the 60s timer."""
+    import asyncio
+    import time as _time
+
+    from frigate_sidecar.scrub.generator import generate_cycle
+
+    s = load_settings()
+    days = min(days, s.scrub.retention_days)
+    s = s.model_copy(
+        update={
+            "scrub": s.scrub.model_copy(
+                update={"cameras": [camera], "retention_days": s.scrub.retention_days}
+            )
+        }
+    )
+    start = _time.time()
+    cutoff = start - days * 86400
+    total_frames = 0
+    while True:
+        results = asyncio.run(generate_cycle(s))
+        new_frames = sum(r.get("new_frames", 0) for r in results)
+        total_frames += new_frames
+        if new_frames == 0:
+            break
+    typer.echo(json.dumps({"camera": camera, "since": cutoff, "new_frames": total_frames}))
+
+
+@scrub_app.command("prune")
+def scrub_prune(camera: str | None = typer.Option(None, "--camera")) -> None:
+    """Drop sheets/buckets past scrub.retention_days, oldest-first."""
+    from frigate_sidecar.scrub.generator import prune
+
+    s = load_settings()
+    typer.echo(json.dumps(prune(s, camera=camera)))
+
+
+@scrub_app.command("coverage")
+def scrub_coverage_cmd(camera: str = typer.Option(..., "--camera")) -> None:
+    """Print what's generated for `camera` (debug)."""
+    import time as _time
+
+    from frigate_sidecar import db
+
+    s = load_settings()
+    conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        buckets = db.list_scrub_buckets(conn, camera, 0, _time.time())
+        generated_through = db.latest_generated_through(conn, camera)
+    finally:
+        conn.close()
+    typer.echo(
+        json.dumps(
+            {"camera": camera, "buckets": buckets, "generated_through": generated_through},
+            default=str,
+        )
+    )
 
 
 if __name__ == "__main__":
