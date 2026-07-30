@@ -25,32 +25,55 @@ def within_bound(achieved: float, start: float, interval: float, k: int) -> bool
     return abs(achieved - grid_point(start, interval, k)) <= interval / 2 + 1e-9
 
 
-def sheet_filename(start: float, interval: float, count: int) -> str:
+#: Sheet image formats, keyed by the `scrub.format` setting.
+EXT_FOR_FORMAT = {"jpeg": ".jpg", "webp": ".webp"}
+
+
+def ext_for_format(fmt: str) -> str:
+    return EXT_FOR_FORMAT.get(fmt.lower(), ".jpg")
+
+
+def fmt_time(x: float) -> str:
+    """Render a wall-clock timestamp for a filename or directory name.
+
+    Never `%g`: at six significant digits every epoch second in the same
+    ~11-day window renders identically (1785380400 and 1785380496 both become
+    "1.78538e+09"), which silently collapses distinct objects onto one name.
+
+    Bucket/sheet starts land on whole seconds in practice; render as an integer
+    when exact (matching the spec's own examples, e.g. "1785380400-1.0-96.jpg"),
+    otherwise keep full precision.
+    """
+    return str(int(x)) if x == int(x) else repr(float(x))
+
+
+def sheet_filename(start: float, interval: float, count: int, ext: str = ".jpg") -> str:
     """Content-addressed filename -- (start, interval, count) is the whole key
     (spec §4.3 finding 3: count MUST be in the name so a growing live sheet
-    never reuses an immutable URL)."""
+    never reuses an immutable URL).
 
-    def _fmt_start(x: float) -> str:
-        # Bucket/sheet starts land on whole seconds in practice; render as an
-        # integer when exact (matches the spec's own examples, e.g.
-        # "1785380400-1.0-96.jpg"), otherwise keep full precision.
-        return str(int(x)) if x == int(x) else repr(float(x))
+    `ext` follows `scrub.format`: a WebP sheet written to a `.jpg` name was
+    served as `image/jpeg` (the route types the response off the suffix), and
+    the `.webp` URL form the spec describes was unreachable.
+    """
 
     def _fmt_interval(x: float) -> str:
         # Interval always carries a decimal point (spec examples: "1.0", "5.0").
         return f"{float(x):.1f}" if x == int(x) else repr(float(x))
 
-    return f"{_fmt_start(start)}-{_fmt_interval(interval)}-{count}.jpg"
+    return f"{fmt_time(start)}-{_fmt_interval(interval)}-{count}{ext}"
 
 
-def sheet_rel_path(camera: str, interval: float, start: float, count: int) -> str:
+def sheet_rel_path(
+    camera: str, interval: float, start: float, count: int, ext: str = ".jpg"
+) -> str:
     """On-disk path under scrub.cache_dir (spec §8.2)."""
     interval_dir = f"{interval:g}"
-    return f"{camera}/{interval_dir}/{sheet_filename(start, interval, count)}"
+    return f"{camera}/{interval_dir}/{sheet_filename(start, interval, count, ext)}"
 
 
-def sheet_url(camera: str, start: float, interval: float, count: int) -> str:
-    return f"/v1/scrub/{camera}/sheet/{sheet_filename(start, interval, count)}"
+def sheet_url(camera: str, start: float, interval: float, count: int, ext: str = ".jpg") -> str:
+    return f"/v1/scrub/{camera}/sheet/{sheet_filename(start, interval, count, ext)}"
 
 
 def parse_sheet_spec(spec: str) -> tuple[float, float, int]:
@@ -108,6 +131,14 @@ def assign_cells(
     the interval/2 achieved-timestamp bound and splitting on violation or on a
     recording gap (spec §4.2, §5.2) -- never silently rounding, never a
     placeholder cell.
+
+    Cell indices within a bucket must also be *contiguous*. That is the bucket
+    row's own contract ("every frame in [start_ts, end_ts) exists within
+    interval_s/2 of start_ts + n*interval_s"), and it is what lets a client map
+    cell position back to wall-clock time. A jump of a little over one interval
+    can otherwise pass both the gap and drift checks -- frames at t=0, 1.4, 2.6
+    with interval 1.0 land on cells 0, 1, 3 -- leaving cell 2 with nothing in
+    it and every later cell describing a moment it doesn't contain.
     """
     accepted: list[Assignment] = []
     prev_ts: float | None = None
@@ -128,9 +159,9 @@ def assign_cells(
             # rounding two different moments onto the same cell.
             return AssignResult(bucket_start, accepted, frame.timestamp, frames[i:])
 
-        if accepted and accepted[-1].idx == idx:
-            # Two frames landed on the same cell (shouldn't happen with sane
-            # input, but never overwrite silently) -- split here too.
+        if accepted and idx != accepted[-1].idx + 1:
+            # Either a repeat of the last cell or a skipped one: both break the
+            # bucket's contiguity contract, so split rather than record a hole.
             return AssignResult(bucket_start, accepted, frame.timestamp, frames[i:])
 
         accepted.append(Assignment(idx=idx, timestamp=frame.timestamp, path=frame.path))

@@ -8,12 +8,13 @@ Loading precedence (highest wins):
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import (
     BaseSettings,
@@ -25,6 +26,8 @@ DEFAULT_CONFIG_PATHS = (
     "/etc/frigate-sidecar/sidecar.yml",
     "./config/sidecar.yml",
 )
+
+logger = logging.getLogger(__name__)
 
 
 class FrigateSection(BaseModel):
@@ -39,16 +42,36 @@ class FrigateSection(BaseModel):
     # DB's container-side recordings root, as stored in recordings.path. Used
     # only to strip this prefix before reattaching recordings_path (§8.2).
     media_path: Path = Path("/media/frigate")
-    # Host-side path to Frigate's recordings root, as the sidecar itself sees it.
-    # Deployment-specific — measured live at /mnt/frigate-storage/recordings/recordings
-    # on the current box (nested `recordings/` segment; see docs spec §8.2 M6).
-    recordings_path: Path = Path("/mnt/frigate-storage/recordings/recordings")
+    # Host-side path that `media_path` is REPLACED BY, not the recordings tree
+    # root. `recordings.path` is `<media_path>/recordings/<date>/...`, so the
+    # `recordings/` segment comes from the DB value and must not be repeated
+    # here: pointing this at .../recordings/recordings mapped every segment to a
+    # path one level too deep, every file lookup missed, and generation produced
+    # nothing at all (§8.2 M6). Verify with:
+    #   python -c "from frigate_sidecar.scrub.mapping import map_recording_path"
+    # against a real `recordings.path` row before trusting a new value.
+    recordings_path: Path = Path("/mnt/frigate-storage/recordings")
 
 
 class SidecarSection(BaseModel):
     db_path: Path = Path("/data/frigate-sidecar.db")
     bind_host: str = "0.0.0.0"
     bind_port: int = 5001
+    # Every endpoint the sidecar owns -- the triage UI, /faces, /analysis,
+    # /toybox, /v1 -- requires the same Frigate session cookie the proxy
+    # already forwards to Frigate. On by default: the sidecar sits on the same
+    # LAN origin as Frigate and exposes event history, face crops and
+    # label/promote writes, so leaving it open makes it a bypass of Frigate's
+    # own auth. The proxy catch-all is deliberately NOT gated here (Frigate
+    # authenticates that traffic itself, and its 401 must reach the client).
+    # Set false only on a deployment where Frigate's own auth is disabled.
+    require_frigate_auth: bool = True
+    # A cookie that validated upstream is trusted this long before being
+    # re-checked, so /v1 doesn't add a round-trip per request.
+    auth_cache_ttl_s: float = 60.0
+    # Hard cap on remembered sessions (Frigate rotates its JWT, so the key
+    # space is unbounded without one).
+    auth_cache_max_entries: int = 1024
 
 
 class FaceSection(BaseModel):
@@ -127,7 +150,29 @@ class ScrubSection(BaseModel):
     format: str = "jpeg"  # "jpeg" | "webp" -- JPEG measured smaller on real
     # camera content (see docs spec §5.3 M4); WebP requires -lossless 0.
     generate_interval_s: float = 60.0  # continuous edge, NOT hourly (§5.4)
+    # Retention sweep cadence for the in-process generator. Pruning used to be
+    # CLI-only, so an unattended deployment grew past retention_days forever.
+    prune_interval_s: float = 3600.0
+    # Bounds concurrent ffmpeg/ffprobe children. Segments within a camera are
+    # sampled serially (cell assignment is order-dependent), so today this only
+    # matters if a CLI backfill runs alongside the in-process generator.
     ffmpeg_concurrency: int = 3
+    # Work budget per camera per tier per cycle. On a cold start there is no
+    # resume point, so a tier's window is the whole retention horizon: without a
+    # cap the very first cycle tries to sample every segment in it (days of
+    # ffmpeg on a multi-camera deployment) before the loop comes up for air.
+    # 120 x 10s segments = 20 min of footage per camera per cycle, well above
+    # the ~6 segments/cycle the live edge actually produces, so this only ever
+    # bites while catching up.
+    max_segments_per_cycle: int = 120
+
+    @field_validator("format")
+    @classmethod
+    def _known_format(cls, v: str) -> str:
+        fmt = v.strip().lower()
+        if fmt not in ("jpeg", "webp"):
+            raise ValueError(f"scrub.format must be 'jpeg' or 'webp', got {v!r}")
+        return fmt
 
 
 class ProxySection(BaseModel):
@@ -151,6 +196,26 @@ class Settings(BaseSettings):
     scrub: ScrubSection = Field(default_factory=ScrubSection)
     proxy: ProxySection = Field(default_factory=ProxySection)
     log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def _check_origins(self) -> Settings:
+        """Warn (don't fail) when both Frigate origins are the same.
+
+        `base_url` is the unauthenticated origin the sidecar calls itself;
+        `proxy_base_url` is the authenticated one it forwards client traffic
+        to and validates sessions against. Pointing both at the unauthenticated
+        port silently turns the `/v1` session check into a no-op -- any cookie
+        would pass -- so it's worth a loud line in the log even though a
+        Frigate install with auth disabled is a legitimate configuration.
+        """
+        if self.frigate.base_url.rstrip("/") == self.frigate.proxy_base_url.rstrip("/"):
+            logger.warning(
+                "frigate.base_url and frigate.proxy_base_url are identical (%s) -- if that "
+                "origin does not require a Frigate session, the sidecar's own auth check "
+                "cannot reject anything (docs/scrub-cache-and-proxy-spec.md §3.2)",
+                self.frigate.base_url,
+            )
+        return self
 
 
 class _StaticYamlSource(PydanticBaseSettingsSource):

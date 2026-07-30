@@ -120,3 +120,64 @@ def test_cell_index_row_major() -> None:
     idx2 = grid.cell_index(1013.0, 1000.0, 1.0)
     row2, col2 = divmod(idx2, cols)
     assert (row2, col2) == (1, 1)
+
+
+def test_skipped_cell_index_splits_bucket() -> None:
+    """A jump of just over one interval passes both the gap check (<=1.5x) and
+    the drift check, yet lands on a non-consecutive cell -- which would leave a
+    hole in the sheet and shift every later cell's meaning. It must split.
+    """
+    interval = 1.0
+    start = 1000.0
+    frames = [
+        grid.Frame(timestamp=start + 0.0, path="f0.jpg"),
+        grid.Frame(timestamp=start + 1.4, path="f1.jpg"),  # cell 1, within bound
+        grid.Frame(timestamp=start + 2.6, path="f2.jpg"),  # cell 3 -- skips cell 2
+    ]
+    result = grid.assign_cells(frames, start, interval)
+    assert [a.idx for a in result.accepted] == [0, 1]
+    assert result.split_at == start + 2.6
+    assert [f.path for f in result.remaining] == ["f2.jpg"]
+
+
+def test_repeated_cell_index_still_splits() -> None:
+    interval = 1.0
+    start = 1000.0
+    frames = [
+        grid.Frame(timestamp=start + 0.0, path="f0.jpg"),
+        grid.Frame(timestamp=start + 0.2, path="dup.jpg"),  # also cell 0
+    ]
+    result = grid.assign_cells(frames, start, interval)
+    assert [a.idx for a in result.accepted] == [0]
+    assert result.split_at == start + 0.2
+
+
+def test_accepted_indices_are_always_contiguous() -> None:
+    """The bucket row's contract: every grid point in [start_ts, end_ts) has a
+    frame behind it, so a client can map cell position back to wall-clock."""
+    interval = 1.0
+    start = 1000.0
+    frames = [
+        grid.Frame(timestamp=start + t, path=f"f{i}.jpg")
+        for i, t in enumerate([0.0, 1.1, 2.0, 3.4, 4.5, 5.4])
+    ]
+    result = grid.assign_cells(frames, start, interval)
+    idxs = [a.idx for a in result.accepted]
+    assert idxs == list(range(len(idxs)))
+
+
+def test_sheet_filename_carries_the_format_extension() -> None:
+    """A WebP sheet written to a `.jpg` name was served as image/jpeg, because
+    the route types the response off the suffix."""
+    start = 1_785_380_400.0
+    assert grid.sheet_filename(start, 1.0, 96, ".webp") == "1785380400-1.0-96.webp"
+    assert grid.ext_for_format("webp") == ".webp"
+    assert grid.ext_for_format("jpeg") == ".jpg"
+    assert grid.sheet_rel_path("doorbell", 1.0, start, 96, ".webp") == (
+        "doorbell/1/1785380400-1.0-96.webp"
+    )
+    assert grid.sheet_url("doorbell", start, 1.0, 96, ".webp") == (
+        "/v1/scrub/doorbell/sheet/1785380400-1.0-96.webp"
+    )
+    # Round-trips through the parser the route uses.
+    assert grid.parse_sheet_spec("1785380400-1.0-96.webp") == (1785380400.0, 1.0, 96)

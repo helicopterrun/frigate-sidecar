@@ -54,15 +54,22 @@ async def _probe_duration(segment_path: Path, *, timeout_s: float) -> float:
         return 10.0  # Frigate segments are ~10s; safe fallback.
 
 
-async def probe_keyframe_pts(
-    segment_path: Path, *, timeout_s: float = _PROBE_TIMEOUT_S
+# ffmpeg renamed the per-frame timestamp field: `pkt_pts_time` through 4.x,
+# `pts_time` from 5.x (the old name was removed in 6). Ask for the modern one
+# first and fall back, otherwise the whole keyframe path silently returns no
+# timestamps on one side of that split -- and "no timestamps" reads exactly
+# like "no keyframes", which sends the generator down the expensive
+# full-decode fallback at best and yields zero frames at worst.
+_PTS_ENTRIES = ("pts_time", "pkt_pts_time")
+
+
+async def _probe_frame_entry(
+    segment_path: Path, entry: str, *, timeout_s: float
 ) -> list[float]:
-    """Presentation timestamps (seconds, relative to segment start) of every
-    keyframe in the segment, via one `ffprobe` call (§5.2)."""
     proc = await asyncio.create_subprocess_exec(
         _FFPROBE, "-v", "error", "-select_streams", "v",
         "-skip_frame", "nokey",
-        "-show_entries", "frame=pkt_pts_time",
+        "-show_entries", f"frame={entry}",
         "-of", "csv=p=0",
         str(segment_path),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
@@ -75,12 +82,24 @@ async def probe_keyframe_pts(
         raise FfmpegError(f"ffprobe keyframe scan timed out on {segment_path}") from exc
     pts: list[float] = []
     for line in out.decode().splitlines():
-        line = line.strip()
+        line = line.strip().rstrip(",")
         if not line:
             continue
         with contextlib.suppress(ValueError):
             pts.append(float(line))
     return pts
+
+
+async def probe_keyframe_pts(
+    segment_path: Path, *, timeout_s: float = _PROBE_TIMEOUT_S
+) -> list[float]:
+    """Presentation timestamps (seconds, relative to segment start) of every
+    keyframe in the segment, via one `ffprobe` call (§5.2)."""
+    for entry in _PTS_ENTRIES:
+        pts = await _probe_frame_entry(segment_path, entry, timeout_s=timeout_s)
+        if pts:
+            return pts
+    return []
 
 
 async def extract_keyframes(
