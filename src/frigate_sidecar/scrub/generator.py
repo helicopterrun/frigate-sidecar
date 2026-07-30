@@ -133,31 +133,80 @@ def _persist_cells(
                 Path(a.path).replace(dst)
 
 
-async def generate_camera(
+def _retire_stale_recent_buckets(
+    sidecar_conn: sqlite3.Connection,
+    cache_dir: Path,
+    camera: str,
+    recent_interval_s: float,
+    boundary: float,
+) -> None:
+    """Drop any recent-tier bucket/sheet that now falls (even partially)
+    before `boundary` (§4.2 non-overlap, §5.5 thinning).
+
+    `boundary` (= now - aged_after_h) advances every cycle, so a recent
+    bucket created when it was still "recent" eventually ages past it. Once
+    that happens the aged tier owns that span at its own coarser interval,
+    so the finer recent-tier bucket must be retired rather than left to
+    overlap it. A bucket straddling the boundary is retired wholesale too
+    (rather than clipped) -- the aged tier will regenerate the whole span
+    fresh from the underlying recordings, which is simpler than surgically
+    splitting an already-tiled sheet, and correct since the source segments
+    are still on disk within retention.
+    """
+    stale = sidecar_conn.execute(
+        "SELECT start_ts FROM scrub_buckets WHERE camera = ? AND interval_s = ? AND start_ts < ?",
+        (camera, recent_interval_s, boundary),
+    ).fetchall()
+    if not stale:
+        return
+    sheet_paths = sidecar_conn.execute(
+        "SELECT path FROM scrub_sheets WHERE camera = ? AND interval_s = ? AND start_ts < ?",
+        (camera, recent_interval_s, boundary),
+    ).fetchall()
+    sidecar_conn.execute(
+        "DELETE FROM scrub_buckets WHERE camera = ? AND interval_s = ? AND start_ts < ?",
+        (camera, recent_interval_s, boundary),
+    )
+    sidecar_conn.execute(
+        "DELETE FROM scrub_sheets WHERE camera = ? AND interval_s = ? AND start_ts < ?",
+        (camera, recent_interval_s, boundary),
+    )
+    sidecar_conn.commit()
+    for r in sheet_paths:
+        p = cache_dir / r["path"]
+        with contextlib.suppress(OSError):
+            p.unlink()
+
+
+async def _generate_tier(
     settings: Settings,
     camera: str,
     *,
+    interval_s: float,
+    window_start: float,
+    window_end: float,
     frigate_conn: sqlite3.Connection,
     sidecar_conn: sqlite3.Connection,
-    now: float,
     gop_cache: GopCache,
     sem: asyncio.Semaphore,
 ) -> dict[str, Any]:
-    """Extend `camera`'s scrub cache toward `now` by one generation cycle
-    (§5.4). Safe to call repeatedly / concurrently across cameras."""
+    """Extend one thinning tier's (interval_s's) buckets toward `window_end`,
+    never emitting frames outside `[window_start, window_end)` (§4.2
+    non-overlap, §5.5 thinning tiers)."""
     scrub = settings.scrub
-    interval_s = scrub.recent_interval_s
     cols, rows = scrub.sheet_cols, scrub.sheet_rows
     cell_w, cell_h = scrub.cell_w, scrub.cell_h
-    retention_cutoff = now - scrub.retention_days * 86400
 
-    generated_through = db.latest_generated_through(sidecar_conn, camera)
-    since = max(generated_through or retention_cutoff, retention_cutoff)
+    if window_end <= window_start:
+        return {"camera": camera, "segments": 0, "new_frames": 0}
+
+    generated_through = db.latest_generated_through(sidecar_conn, camera, interval_s)
+    since = max(generated_through or window_start, window_start)
 
     rows_ = frigate_conn.execute(
         "SELECT path, start_time, end_time FROM recordings "
-        "WHERE camera = ? AND end_time > ? ORDER BY start_time",
-        (camera, since),
+        "WHERE camera = ? AND end_time > ? AND start_time < ? ORDER BY start_time",
+        (camera, since, window_end),
     ).fetchall()
     if not rows_:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -201,7 +250,12 @@ async def generate_camera(
         except ffmpeg_io.FfmpegError as exc:
             logger.warning("scrub: sampling failed for %s: %s", seg_path, exc)
             continue
-        frames = [f for f in frames if f.timestamp > bucket_generated_through - interval_s]
+        frames = [
+            f
+            for f in frames
+            if f.timestamp > bucket_generated_through - interval_s
+            and window_start <= f.timestamp < window_end
+        ]
         if not frames:
             continue
 
@@ -287,6 +341,67 @@ async def generate_camera(
                 pending = []
 
     return {"camera": camera, "segments": len(rows_), "new_frames": new_frames}
+
+
+async def generate_camera(
+    settings: Settings,
+    camera: str,
+    *,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    now: float,
+    gop_cache: GopCache,
+    sem: asyncio.Semaphore,
+) -> dict[str, Any]:
+    """Extend `camera`'s scrub cache toward `now` by one generation cycle
+    (§5.4), across both thinning tiers (§5.5).
+
+    Spans within `aged_after_h` of `now` are generated at the recent tier's
+    `recent_interval_s`; older spans (down to `retention_days`) at the
+    coarser `aged_interval_s`. The two tiers never overlap (§4.2): a recent
+    bucket that ages past the boundary is retired (`_retire_stale_recent_buckets`)
+    rather than left to coexist with the aged bucket that now covers its
+    span, and a segment straddling the boundary is naturally split between
+    the two tier passes below (each pass only accepts frames inside its own
+    `[window_start, window_end)`).
+    """
+    scrub = settings.scrub
+    retention_cutoff = now - scrub.retention_days * 86400
+    aged_boundary = now - scrub.aged_after_h * 3600
+    # Clamp: if aged_after_h is large enough to push the boundary before the
+    # retention cutoff, there's no aged window at all -- everything in
+    # retention is "recent".
+    effective_boundary = max(aged_boundary, retention_cutoff)
+
+    _retire_stale_recent_buckets(
+        sidecar_conn, scrub.cache_dir, camera, scrub.recent_interval_s, effective_boundary
+    )
+
+    total_segments = 0
+    total_new_frames = 0
+
+    if effective_boundary > retention_cutoff:
+        aged_result = await _generate_tier(
+            settings, camera,
+            interval_s=scrub.aged_interval_s,
+            window_start=retention_cutoff, window_end=effective_boundary,
+            frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
+            gop_cache=gop_cache, sem=sem,
+        )
+        total_segments += aged_result["segments"]
+        total_new_frames += aged_result["new_frames"]
+
+    recent_result = await _generate_tier(
+        settings, camera,
+        interval_s=scrub.recent_interval_s,
+        window_start=effective_boundary, window_end=now,
+        frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
+        gop_cache=gop_cache, sem=sem,
+    )
+    total_segments += recent_result["segments"]
+    total_new_frames += recent_result["new_frames"]
+
+    return {"camera": camera, "segments": total_segments, "new_frames": total_new_frames}
 
 
 async def generate_cycle(settings: Settings, *, now: float | None = None) -> list[dict[str, Any]]:

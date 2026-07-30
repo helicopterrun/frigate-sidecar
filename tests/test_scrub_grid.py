@@ -20,6 +20,32 @@ def test_achieved_timestamp_within_bound_all_accepted() -> None:
         assert grid.within_bound(a.timestamp, start, interval, a.idx)
 
 
+def test_achieved_timestamp_within_bound_uses_own_interval_not_hardcoded_1s() -> None:
+    """Same guarantee as above, but at the aged tier's own coarser interval
+    (5.0s, §5.5) -- the /2 bound must scale with `interval`, not be hardcoded
+    to the recent tier's 1.0s (would wrongly reject valid aged-tier frames,
+    or wrongly accept off-grid ones)."""
+    interval = 5.0
+    start = 2000.0
+    frames = [grid.Frame(timestamp=start + k * interval, path=f"f{k}.jpg") for k in range(6)]
+    result = grid.assign_cells(frames, start, interval)
+    assert result.split_at is None
+    assert len(result.accepted) == 6
+    for a in result.accepted:
+        assert grid.within_bound(a.timestamp, start, interval, a.idx)
+        # A 1.0s-scaled bound would be too tight for these 5.0s-spaced
+        # frames were the check hardcoded -- pin the actual math directly.
+        assert abs(a.timestamp - grid.grid_point(start, interval, a.idx)) <= interval / 2
+
+    # A frame drifted by 2.5s (exactly interval/2 at 5.0s) is still within
+    # bound; one micro-epsilon further out is not -- proves the bound tracks
+    # `interval`, not a fixed 1.0s/0.5s constant.
+    edge = grid.Frame(timestamp=start + 6 * interval + interval / 2, path="edge.jpg")
+    assert grid.within_bound(edge.timestamp, start, interval, 6)
+    too_far = grid.Frame(timestamp=start + 6 * interval + interval / 2 + 0.1, path="far.jpg")
+    assert not grid.within_bound(too_far.timestamp, start, interval, 6)
+
+
 def test_drift_off_grid_splits_bucket() -> None:
     interval = 1.0
     start = 1000.0

@@ -284,10 +284,26 @@ def list_scrub_buckets(
     return [dict(r) for r in rows]
 
 
-def latest_generated_through(conn: sqlite3.Connection, camera: str) -> float | None:
-    row = conn.execute(
-        "SELECT MAX(generated_through) AS g FROM scrub_buckets WHERE camera = ?", (camera,)
-    ).fetchone()
+def latest_generated_through(
+    conn: sqlite3.Connection, camera: str, interval_s: float | None = None
+) -> float | None:
+    """Newest `generated_through` across this camera's buckets.
+
+    When `interval_s` is given, restricts to that tier's buckets only -- each
+    thinning tier (§5.5) tracks its own resume point independently, since a
+    single camera can have both a recent- and an aged-tier bucket in flight
+    at once.
+    """
+    if interval_s is None:
+        row = conn.execute(
+            "SELECT MAX(generated_through) AS g FROM scrub_buckets WHERE camera = ?", (camera,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT MAX(generated_through) AS g FROM scrub_buckets "
+            "WHERE camera = ? AND interval_s = ?",
+            (camera, interval_s),
+        ).fetchone()
     return row["g"] if row and row["g"] is not None else None
 
 
