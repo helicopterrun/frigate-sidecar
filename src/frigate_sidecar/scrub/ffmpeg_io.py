@@ -43,17 +43,79 @@ def _interrupted(returncode: int | None, stderr_tail: str) -> bool:
     )
 
 
-async def probe_gop_seconds(segment_path: Path, *, timeout_s: float = _PROBE_TIMEOUT_S) -> float:
-    """Best-effort GOP length in seconds: keyframe spacing (§5.2 M1).
+async def probe_display_aspect(
+    segment_path: Path, *, timeout_s: float = _PROBE_TIMEOUT_S
+) -> float | None:
+    """Display aspect ratio of the video stream, or None if it can't be read.
 
-    Returns the median spacing between consecutive keyframe pts. Falls back
-    to the segment's own duration (i.e. "one keyframe per segment", the
-    coarse case) if fewer than two keyframes are found.
+    Storage dimensions alone are not the display shape: a stream can carry a
+    non-square sample aspect ratio, so the ratio has to be `width*SAR_n` over
+    `height*SAR_d`. Frigate's own cameras here are all square-sampled, but
+    getting this wrong for an anamorphic source would reintroduce exactly the
+    squeeze this is meant to remove.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        _FFPROBE, "-v", "error", "-select_streams", "v",
+        "-show_entries", "stream=width,height,sample_aspect_ratio",
+        "-of", "csv=p=0", str(segment_path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except asyncio.TimeoutError as exc:
+        proc.kill()
+        await proc.wait()
+        raise FfmpegError(f"ffprobe geometry timed out on {segment_path}") from exc
+    if proc.returncode != 0:
+        return None
+
+    line = next((ln for ln in out.decode().splitlines() if ln.strip()), "")
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) < 2:
+        return None
+    try:
+        width, height = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+
+    sar_n = sar_d = 1
+    if len(parts) > 2 and ":" in parts[2]:
+        try:
+            n, d = (int(x) for x in parts[2].split(":"))
+            # ffprobe reports "0:1" when the SAR is simply unknown.
+            if n > 0 and d > 0:
+                sar_n, sar_d = n, d
+        except ValueError:
+            pass
+    return (width * sar_n) / (height * sar_d)
+
+
+async def probe_keyframe_deltas(
+    segment_path: Path, *, timeout_s: float = _PROBE_TIMEOUT_S
+) -> list[float]:
+    """Spacings between consecutive keyframes in one segment.
+
+    Returned rather than reduced so callers can pool across segments: a 10s
+    segment holding a 5s GOP yields exactly two keyframes, so its "median"
+    spacing is a single sample, and whether it reads 4.5 or 5.0 depends only on
+    where the segment boundary happened to fall.
     """
     pts = await probe_keyframe_pts(segment_path, timeout_s=timeout_s)
-    if len(pts) < 2:
+    return [b - a for a, b in zip(pts, pts[1:], strict=False)]
+
+
+async def probe_gop_seconds(segment_path: Path, *, timeout_s: float = _PROBE_TIMEOUT_S) -> float:
+    """Best-effort GOP length in seconds for a single segment (§5.2 M1).
+
+    Falls back to the segment's own duration (i.e. "one keyframe per segment",
+    the coarse case) if fewer than two keyframes are found. Prefer pooling
+    `probe_keyframe_deltas` across several segments where the answer matters.
+    """
+    deltas = sorted(await probe_keyframe_deltas(segment_path, timeout_s=timeout_s))
+    if not deltas:
         return await _probe_duration(segment_path, timeout_s=timeout_s)
-    deltas = sorted(b - a for a, b in zip(pts, pts[1:], strict=False))
     return deltas[len(deltas) // 2]
 
 

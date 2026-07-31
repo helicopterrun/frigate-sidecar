@@ -51,15 +51,17 @@ async def _scrub_generation_loop(app: FastAPI) -> None:
     reachable only from the CLI, so an unattended deployment kept every sheet
     it ever generated.
     """
-    from frigate_sidecar.scrub.generator import generate_cycle, prune
+    from frigate_sidecar.scrub.generator import SourceProfile, generate_cycle, prune
 
     settings: Settings = app.state.settings
     interval = settings.scrub.generate_interval_s
     next_prune = time.time() + settings.scrub.prune_interval_s
+    # Measured GOP and aspect per camera, kept for the process lifetime.
+    profile = SourceProfile()
     while True:
         caught_up = True
         try:
-            results = await generate_cycle(settings, now=time.time())
+            results = await generate_cycle(settings, now=time.time(), profile=profile)
             # A camera that spent its whole backfill share still has history
             # behind it. Sleeping the full interval anyway makes a cold backfill
             # spend most of its wall-clock idle; the live edge only ever needs a

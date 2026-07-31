@@ -47,14 +47,21 @@ _CELLS_DIRNAME = ".cells"
 
 
 @dataclass
-class GopCache:
-    """Per-camera GOP probe result, checked once per camera per process
-    lifetime (one ffprobe call, §5.2) rather than per-segment."""
+class SourceProfile:
+    """What we've measured about each camera's stream: keyframe spacing and
+    display shape.
 
-    seconds: dict[str, float]
+    Probed once per camera per process rather than per segment or per cycle --
+    neither changes unless the camera is reconfigured, and re-probing every
+    cycle cost two ffprobe calls per camera against an ~80s cycle.
+    """
+
+    gop_s: dict[str, float]
+    aspect: dict[str, float]
 
     def __init__(self) -> None:
-        self.seconds = {}
+        self.gop_s = {}
+        self.aspect = {}
 
 
 def _cells_dir(cache_dir: Path, camera: str, interval_s: float, sheet_start: float) -> Path:
@@ -285,7 +292,7 @@ async def _generate_tier(
     budget: int,
     frigate_conn: sqlite3.Connection,
     sidecar_conn: sqlite3.Connection,
-    gop_cache: GopCache,
+    profile: SourceProfile,
     sem: asyncio.Semaphore,
 ) -> dict[str, Any]:
     """Sample `[since, window_end)` for one thinning tier, never emitting frames
@@ -297,7 +304,9 @@ async def _generate_tier(
     """
     scrub = settings.scrub
     cols, rows = scrub.sheet_cols, scrub.sheet_rows
-    cell_w, cell_h = scrub.cell_w, scrub.cell_h
+    cell_w, cell_h = await camera_cell_size(
+        settings, camera, frigate_conn=frigate_conn, profile=profile
+    )
     cells_per_sheet = cols * rows
 
     if window_end <= window_start or budget <= 0:
@@ -316,24 +325,29 @@ async def _generate_tier(
     if not rows_:
         return {"camera": camera, "segments": 0, "new_frames": 0}
 
-    if camera not in gop_cache.seconds:
+    if camera not in profile.gop_s:
         first_path = map_recording_path(
             rows_[0]["path"], settings.frigate.media_path, settings.frigate.recordings_path
         )
         try:
-            gop_cache.seconds[camera] = await ffmpeg_io.probe_gop_seconds(first_path)
+            profile.gop_s[camera] = await ffmpeg_io.probe_gop_seconds(first_path)
         except ffmpeg_io.FfmpegError:
-            gop_cache.seconds[camera] = interval_s  # assume best case; drift check will catch it
-    gop_s = gop_cache.seconds[camera]
+            profile.gop_s[camera] = interval_s  # assume best case; drift check will catch it
+    gop_s = profile.gop_s[camera]
 
     # Resume an open bucket only if it actually ends where this pass begins.
     # With live-edge and backfill passes interleaved, the newest incomplete
     # bucket is usually the live one; attaching an older backfill pass to it
     # would seal it at the wrong end and hand cell assignment negative indices.
+    # Geometry is part of the match: a bucket recorded at one cell size can't be
+    # continued at another, or its row would describe cells it doesn't contain
+    # and re-tiling would stretch the ones already stored.
     open_bucket = sidecar_conn.execute(
         "SELECT * FROM scrub_buckets WHERE camera = ? AND interval_s = ? AND complete = 0 "
+        "AND width = ? AND height = ? "
         "AND generated_through BETWEEN ? AND ? ORDER BY start_ts DESC LIMIT 1",
-        (camera, interval_s, since - interval_s * 1.5, since + interval_s * 1.5),
+        (camera, interval_s, cell_w, cell_h,
+         since - interval_s * 1.5, since + interval_s * 1.5),
     ).fetchone()
     bucket_start = open_bucket["start_ts"] if open_bucket else None
     bucket_generated_through = open_bucket["generated_through"] if open_bucket else since
@@ -552,7 +566,7 @@ async def _backfill_tier(
     budget: int,
     frigate_conn: sqlite3.Connection,
     sidecar_conn: sqlite3.Connection,
-    gop_cache: GopCache,
+    profile: SourceProfile,
     sem: asyncio.Semaphore,
 ) -> dict[str, int]:
     """Fill holes in one tier, newest first, each from its newest end.
@@ -588,7 +602,7 @@ async def _backfill_tier(
             since=newest["start_time"] if newest else hole_start,
             budget=budget,
             frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-            gop_cache=gop_cache, sem=sem,
+            profile=profile, sem=sem,
         )
         segments += result["segments"]
         frames += result["new_frames"]
@@ -596,16 +610,10 @@ async def _backfill_tier(
     return {"segments": segments, "new_frames": frames}
 
 
-async def camera_gop_seconds(
-    settings: Settings,
-    camera: str,
-    *,
-    frigate_conn: sqlite3.Connection,
-    gop_cache: GopCache,
-) -> float | None:
-    """Measured keyframe spacing for `camera`, cached per cache instance."""
-    if camera in gop_cache.seconds:
-        return gop_cache.seconds[camera]
+def _newest_segment(
+    settings: Settings, camera: str, frigate_conn: sqlite3.Connection
+) -> Path | None:
+    """A segment to probe this camera's stream properties from."""
     row = frigate_conn.execute(
         "SELECT path FROM recordings WHERE camera = ? ORDER BY end_time DESC LIMIT 1",
         (camera,),
@@ -615,14 +623,102 @@ async def camera_gop_seconds(
     seg = map_recording_path(
         row["path"], settings.frigate.media_path, settings.frigate.recordings_path
     )
-    if not seg.exists():
-        return None
-    try:
-        gop = await ffmpeg_io.probe_gop_seconds(seg)
-    except ffmpeg_io.FfmpegError:
-        return None
-    gop_cache.seconds[camera] = gop
+    return seg if seg.exists() else None
+
+
+#: Segments pooled to measure a camera's keyframe spacing. One is not enough:
+#: a 10s segment holding a 5s GOP contains two keyframes, so it offers a single
+#: spacing sample that reads 4.5 or 5.0 purely by where the segment was cut.
+#: Measured on this deployment, one camera produced both from consecutive
+#: segments -- and since the interval keys every bucket, sheet and directory,
+#: that spawned a second tier for the same camera.
+_GOP_PROBE_SEGMENTS = 5
+
+
+async def camera_gop_seconds(
+    settings: Settings,
+    camera: str,
+    *,
+    frigate_conn: sqlite3.Connection,
+    profile: SourceProfile,
+) -> float | None:
+    """Median keyframe spacing for `camera`, pooled across recent segments."""
+    if camera in profile.gop_s:
+        return profile.gop_s[camera]
+
+    rows = frigate_conn.execute(
+        "SELECT path FROM recordings WHERE camera = ? ORDER BY end_time DESC LIMIT ?",
+        (camera, _GOP_PROBE_SEGMENTS),
+    ).fetchall()
+    deltas: list[float] = []
+    fallback: float | None = None
+    for row in rows:
+        seg = map_recording_path(
+            row["path"], settings.frigate.media_path, settings.frigate.recordings_path
+        )
+        if not seg.exists():
+            continue
+        try:
+            found = await ffmpeg_io.probe_keyframe_deltas(seg)
+        except ffmpeg_io.FfmpegError:
+            continue
+        if found:
+            deltas.extend(found)
+        elif fallback is None:
+            # No keyframe pair anywhere in the segment: one per segment at most.
+            with contextlib.suppress(ffmpeg_io.FfmpegError):
+                fallback = await ffmpeg_io.probe_gop_seconds(seg)
+
+    if not deltas:
+        if fallback is None:
+            return None
+        profile.gop_s[camera] = fallback
+        return fallback
+
+    deltas.sort()
+    gop = deltas[len(deltas) // 2]
+    profile.gop_s[camera] = gop
     return gop
+
+
+async def camera_cell_size(
+    settings: Settings,
+    camera: str,
+    *,
+    frigate_conn: sqlite3.Connection,
+    profile: SourceProfile,
+) -> tuple[int, int]:
+    """Cell dimensions for `camera`: `cell_w` wide, height from the source shape.
+
+    Scaling every camera to a fixed `cell_w x cell_h` squeezes anything whose
+    aspect ratio isn't that of the configured cell -- a 4:3 camera rendered into
+    a 16:9 cell comes out anamorphically narrowed, and nothing downstream can
+    undo it because the pixels are already wrong. The height is therefore
+    derived from the source's display aspect, and travels per sheet in the
+    `cell_w`/`cell_h` metadata clients already read.
+
+    Falls back to the configured `cell_h` when the shape can't be measured.
+    """
+    scrub = settings.scrub
+    if not scrub.preserve_source_aspect:
+        return scrub.cell_w, scrub.cell_h
+
+    aspect = profile.aspect.get(camera)
+    if aspect is None:
+        seg = _newest_segment(settings, camera, frigate_conn)
+        if seg is not None:
+            try:
+                measured = await ffmpeg_io.probe_display_aspect(seg)
+            except ffmpeg_io.FfmpegError:
+                measured = None
+            if measured:
+                profile.aspect[camera] = aspect = measured
+    if not aspect:
+        return scrub.cell_w, scrub.cell_h
+
+    height = round(scrub.cell_w / aspect)
+    height += height % 2  # even dimensions keep the scaler on its fast path
+    return scrub.cell_w, max(2, height)
 
 
 def tier_plan(
@@ -670,7 +766,7 @@ async def generate_camera(
     frigate_conn: sqlite3.Connection,
     sidecar_conn: sqlite3.Connection,
     now: float,
-    gop_cache: GopCache,
+    profile: SourceProfile,
     sem: asyncio.Semaphore,
 ) -> dict[str, Any]:
     """Advance `camera`'s scrub cache by one generation cycle (§5.4), across
@@ -709,12 +805,12 @@ async def generate_camera(
 
     live = await generate_live_edge(
         settings, camera, frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-        now=now, gop_cache=gop_cache, sem=sem,
+        now=now, profile=profile, sem=sem,
     )
     back = await generate_backfill(
         settings, camera, budget=scrub.backfill_segments_per_cycle,
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-        now=now, gop_cache=gop_cache, sem=sem,
+        now=now, profile=profile, sem=sem,
     )
     return {
         "camera": camera,
@@ -731,7 +827,7 @@ async def generate_live_edge(
     frigate_conn: sqlite3.Connection,
     sidecar_conn: sqlite3.Connection,
     now: float,
-    gop_cache: GopCache,
+    profile: SourceProfile,
     sem: asyncio.Semaphore,
 ) -> dict[str, Any]:
     """Hold `camera`'s recent tier against wall clock. Cheap and always first.
@@ -742,7 +838,7 @@ async def generate_live_edge(
     """
     scrub = settings.scrub
     gop_s = await camera_gop_seconds(
-        settings, camera, frigate_conn=frigate_conn, gop_cache=gop_cache
+        settings, camera, frigate_conn=frigate_conn, profile=profile
     )
     plan = tier_plan(settings, now, gop_s)
     interval_s, window_start, window_end = plan[0]
@@ -768,7 +864,7 @@ async def generate_live_edge(
         since=live_since,
         budget=max(1, scrub.live_edge_segments),
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-        gop_cache=gop_cache, sem=sem,
+        profile=profile, sem=sem,
     )
     return {"camera": camera, **result}
 
@@ -781,7 +877,7 @@ async def generate_backfill(
     frigate_conn: sqlite3.Connection,
     sidecar_conn: sqlite3.Connection,
     now: float,
-    gop_cache: GopCache,
+    profile: SourceProfile,
     sem: asyncio.Semaphore,
 ) -> dict[str, Any]:
     """Fill history behind the live edge with whatever budget is left.
@@ -790,7 +886,7 @@ async def generate_backfill(
     the coarser aged tier.
     """
     gop_s = await camera_gop_seconds(
-        settings, camera, frigate_conn=frigate_conn, gop_cache=gop_cache
+        settings, camera, frigate_conn=frigate_conn, profile=profile
     )
     segments = 0
     frames = 0
@@ -806,7 +902,7 @@ async def generate_backfill(
             window_start=w_start, window_end=w_end,
             budget=remaining,
             frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-            gop_cache=gop_cache, sem=sem,
+            profile=profile, sem=sem,
         )
         segments += result["segments"]
         frames += result["new_frames"]
@@ -822,15 +918,26 @@ async def generate_backfill(
     }
 
 
-async def generate_cycle(settings: Settings, *, now: float | None = None) -> list[dict[str, Any]]:
-    """One generation pass across all opted-in cameras (§5.4)."""
+async def generate_cycle(
+    settings: Settings,
+    *,
+    now: float | None = None,
+    profile: SourceProfile | None = None,
+) -> list[dict[str, Any]]:
+    """One generation pass across all opted-in cameras (§5.4).
+
+    Pass a `profile` to keep measured stream properties between cycles; without
+    one every cycle re-probes each camera's GOP and aspect, which is two ffprobe
+    calls per camera against an ~80s cycle. Callers that want isolation (tests,
+    one-shot CLI runs) simply omit it.
+    """
     import time as _time
 
     now = now if now is not None else _time.time()
     started = _time.monotonic()
     scrub = settings.scrub
     sem = asyncio.Semaphore(scrub.ffmpeg_concurrency)
-    gop_cache = GopCache()
+    profile = profile if profile is not None else SourceProfile()
 
     conn = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
     try:
@@ -857,7 +964,7 @@ async def generate_cycle(settings: Settings, *, now: float | None = None) -> lis
             try:
                 _merge(camera, await generate_live_edge(
                     settings, camera, frigate_conn=conn, sidecar_conn=conn,
-                    now=now, gop_cache=gop_cache, sem=sem,
+                    now=now, profile=profile, sem=sem,
                 ))
             except Exception:
                 logger.exception("scrub: live edge failed for camera %s", camera)
@@ -875,7 +982,7 @@ async def generate_cycle(settings: Settings, *, now: float | None = None) -> lis
             try:
                 _merge(camera, await generate_backfill(
                     settings, camera, budget=share, frigate_conn=conn, sidecar_conn=conn,
-                    now=now, gop_cache=gop_cache, sem=sem,
+                    now=now, profile=profile, sem=sem,
                 ))
             except Exception:
                 logger.exception("scrub: backfill failed for camera %s", camera)
