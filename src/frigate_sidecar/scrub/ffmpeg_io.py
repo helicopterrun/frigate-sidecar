@@ -23,6 +23,26 @@ class FfmpegError(RuntimeError):
     pass
 
 
+class FfmpegInterrupted(FfmpegError):
+    """The child was killed by a signal rather than failing on its input.
+
+    systemd's default KillMode=control-group SIGTERMs every process in the
+    unit's cgroup, so a service restart takes any in-flight extraction with it.
+    ffmpeg exits 255 with nothing on stderr in that case. Reported as an
+    ordinary failure it looks like a camera problem -- and lands
+    disproportionately on whichever cameras are slowest to extract, which makes
+    the false pattern look meaningful.
+    """
+
+
+def _interrupted(returncode: int | None, stderr_tail: str) -> bool:
+    # Negative: killed by a signal directly. 255 with nothing to say: ffmpeg's
+    # own exit code when it stops on a received signal.
+    return returncode is not None and (
+        returncode < 0 or (returncode == 255 and stderr_tail == "no stderr")
+    )
+
+
 async def probe_gop_seconds(segment_path: Path, *, timeout_s: float = _PROBE_TIMEOUT_S) -> float:
     """Best-effort GOP length in seconds: keyframe spacing (§5.2 M1).
 
@@ -138,9 +158,11 @@ async def extract_keyframes_with_pts(
         await proc.wait()
         raise FfmpegError(f"ffmpeg keyframe extract timed out on {segment_path}") from exc
     if proc.returncode != 0:
-        raise FfmpegError(
+        tail = _stderr_tail(err)
+        error_cls = FfmpegInterrupted if _interrupted(proc.returncode, tail) else FfmpegError
+        raise error_cls(
             f"ffmpeg keyframe extract failed on {segment_path} "
-            f"(rc={proc.returncode}): {_stderr_tail(err)}"
+            f"(rc={proc.returncode}): {tail}"
         )
 
     pts = [float(m.group(1)) for m in _SHOWINFO_PTS.finditer(err)]
@@ -203,8 +225,9 @@ async def extract_fps(
         await proc.wait()
         raise FfmpegError(f"ffmpeg fps extract timed out on {segment_path}") from exc
     if proc.returncode != 0:
-        raise FfmpegError(
-            f"ffmpeg fps extract failed on {segment_path} "
-            f"(rc={proc.returncode}): {_stderr_tail(err)}"
+        tail = _stderr_tail(err)
+        error_cls = FfmpegInterrupted if _interrupted(proc.returncode, tail) else FfmpegError
+        raise error_cls(
+            f"ffmpeg fps extract failed on {segment_path} (rc={proc.returncode}): {tail}"
         )
     return sorted(out_dir.glob("*.jpg"))

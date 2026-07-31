@@ -390,6 +390,11 @@ async def _generate_tier(
                     seg_path, row["start_time"], interval_s, gop_s, sem, work_dir,
                     cell_w=cell_w, cell_h=cell_h,
                 )
+            except ffmpeg_io.FfmpegInterrupted as exc:
+                # Shutdown took the child with it; not a fault of the segment,
+                # and the hole-finder picks it up next cycle.
+                logger.debug("scrub: sampling interrupted for %s: %s", seg_path, exc)
+                continue
             except ffmpeg_io.FfmpegError as exc:
                 logger.warning("scrub: sampling failed for %s: %s", seg_path, exc)
                 continue
@@ -591,6 +596,73 @@ async def _backfill_tier(
     return {"segments": segments, "new_frames": frames}
 
 
+async def camera_gop_seconds(
+    settings: Settings,
+    camera: str,
+    *,
+    frigate_conn: sqlite3.Connection,
+    gop_cache: GopCache,
+) -> float | None:
+    """Measured keyframe spacing for `camera`, cached per cache instance."""
+    if camera in gop_cache.seconds:
+        return gop_cache.seconds[camera]
+    row = frigate_conn.execute(
+        "SELECT path FROM recordings WHERE camera = ? ORDER BY end_time DESC LIMIT 1",
+        (camera,),
+    ).fetchone()
+    if row is None:
+        return None
+    seg = map_recording_path(
+        row["path"], settings.frigate.media_path, settings.frigate.recordings_path
+    )
+    if not seg.exists():
+        return None
+    try:
+        gop = await ffmpeg_io.probe_gop_seconds(seg)
+    except ffmpeg_io.FfmpegError:
+        return None
+    gop_cache.seconds[camera] = gop
+    return gop
+
+
+def tier_plan(
+    settings: Settings, now: float, gop_s: float | None
+) -> list[tuple[float, float, float]]:
+    """`[(interval, window_start, window_end), ...]`, newest tier first.
+
+    Normally two tiers: `recent_interval_s` within `aged_after_h` of now, the
+    coarser `aged_interval_s` behind it (§5.5).
+
+    When the camera's own keyframe spacing is coarser than `recent_interval_s`,
+    the recent tier uses the keyframe cadence instead. Forcing a finer interval
+    than the source provides means decoding every frame -- about five times the
+    cost of keyframe extraction -- to synthesise stills the encoder never made
+    distinct. If that lands at or past `aged_interval_s` the two tiers would
+    describe the same cadence, so they collapse into one covering the whole
+    retention window; there is nothing left for thinning to save.
+    """
+    scrub = settings.scrub
+    retention_cutoff = now - scrub.retention_days * 86400
+    boundary = max(now - scrub.aged_after_h * 3600, retention_cutoff)
+
+    recent = scrub.recent_interval_s
+    if scrub.match_keyframe_cadence and gop_s and gop_s > recent * _GOP_TOLERANCE:
+        # Snapped to a half-second grid, never used raw. A measured GOP is a
+        # median of observed spacings, so it comes out as 4.995056 rather than
+        # 5.0 -- and the interval is part of every bucket key, sheet filename
+        # and cache directory name. An unsnapped value would put that noise in
+        # the URLs, and re-measuring slightly differently later would strand
+        # everything generated under the previous one as a separate tier.
+        recent = max(recent, round(gop_s * 2.0) / 2.0)
+
+    if recent >= scrub.aged_interval_s:
+        return [(recent, retention_cutoff, now)]
+    plan = [(recent, boundary, now)]
+    if boundary > retention_cutoff:
+        plan.append((scrub.aged_interval_s, retention_cutoff, boundary))
+    return plan
+
+
 async def generate_camera(
     settings: Settings,
     camera: str,
@@ -669,27 +741,30 @@ async def generate_live_edge(
     generated?" check answers no for the one window people actually scrub.
     """
     scrub = settings.scrub
-    retention_cutoff = now - scrub.retention_days * 86400
-    effective_boundary = max(now - scrub.aged_after_h * 3600, retention_cutoff)
-
-    _retire_stale_recent_buckets(
-        sidecar_conn, scrub.cache_dir, camera, scrub.recent_interval_s, effective_boundary
+    gop_s = await camera_gop_seconds(
+        settings, camera, frigate_conn=frigate_conn, gop_cache=gop_cache
     )
+    plan = tier_plan(settings, now, gop_s)
+    interval_s, window_start, window_end = plan[0]
+    if len(plan) > 1:
+        # Only retire when a coarser tier actually exists to supersede this one;
+        # collapsed plans would otherwise delete their own buckets.
+        _retire_stale_recent_buckets(
+            sidecar_conn, scrub.cache_dir, camera, interval_s, window_start
+        )
 
     # Resume from where the recent tier actually reaches, but
     #    never crawl up from further back than `live_edge_lookback_s` -- a
     #    stale cache jumps to the edge and lets backfill close the gap behind
     #    it, rather than making every recent scrub wait for a day of history.
-    recent_through = db.latest_generated_through(
-        sidecar_conn, camera, scrub.recent_interval_s
-    )
-    live_since = max(effective_boundary, now - scrub.live_edge_lookback_s)
+    recent_through = db.latest_generated_through(sidecar_conn, camera, interval_s)
+    live_since = max(window_start, now - scrub.live_edge_lookback_s)
     if recent_through is not None and recent_through > live_since:
         live_since = recent_through
     result = await _generate_tier(
         settings, camera,
-        interval_s=scrub.recent_interval_s,
-        window_start=effective_boundary, window_end=now,
+        interval_s=interval_s,
+        window_start=window_start, window_end=window_end,
         since=live_since,
         budget=max(1, scrub.live_edge_segments),
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
@@ -714,17 +789,13 @@ async def generate_backfill(
     Recent tier first -- it is what someone scrubbing the last day sees -- then
     the coarser aged tier.
     """
-    scrub = settings.scrub
-    retention_cutoff = now - scrub.retention_days * 86400
-    effective_boundary = max(now - scrub.aged_after_h * 3600, retention_cutoff)
-
+    gop_s = await camera_gop_seconds(
+        settings, camera, frigate_conn=frigate_conn, gop_cache=gop_cache
+    )
     segments = 0
     frames = 0
     remaining = budget
-    for interval_s, w_start, w_end in (
-        (scrub.recent_interval_s, effective_boundary, now),
-        (scrub.aged_interval_s, retention_cutoff, effective_boundary),
-    ):
+    for interval_s, w_start, w_end in tier_plan(settings, now, gop_s):
         if remaining <= 0:
             break
         if w_end <= w_start:
@@ -819,12 +890,15 @@ async def generate_cycle(settings: Settings, *, now: float | None = None) -> lis
         # Worst across cameras of each camera's *newest* bucket. Taking the max
         # over every row instead measures the oldest backfill bucket in the
         # table, which has nothing to do with whether the edge is being held.
+        # Across every interval, not just the configured one: a camera whose
+        # source is coarser generates at its own cadence, so filtering on
+        # `recent_interval_s` would read its stale rows from before that and
+        # report a lag that only ever grows.
         lag_row = conn.execute(
             "SELECT MIN(newest) AS furthest FROM ("
             "  SELECT camera, MAX(generated_through) AS newest FROM scrub_buckets"
-            "  WHERE interval_s = ? GROUP BY camera"
-            ")",
-            (scrub.recent_interval_s,),
+            "  GROUP BY camera"
+            ")"
         ).fetchone()
         # Against wall clock at log time, not the cycle's own `now`: a camera
         # serviced at the start of a 500s cycle is 500s stale by the end, and

@@ -11,6 +11,14 @@ Environment="FRIGATE_SIDECAR_CONFIG=/opt/frigate-sidecar/config/sidecar.yml"
 ExecStart=/usr/bin/python3 -m frigate_sidecar serve
 Restart=on-failure
 RestartSec=5
+# Signal only the main process on stop. The default (control-group) SIGTERMs
+# every process in the unit's cgroup, which kills in-flight ffmpeg children out
+# from under the scrub generator -- they exit 255 with no stderr, which reads as
+# a camera fault and lands on whichever cameras are slowest to extract. With
+# `mixed`, uvicorn shuts down, the generator's task is cancelled, and its
+# children exit on their own.
+KillMode=mixed
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

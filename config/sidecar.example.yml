@@ -79,6 +79,15 @@ scrub:
   cache_dir: /data/scrub
   recent_interval_s: 1.0
   aged_interval_s: 5.0
+  # Generate a camera at its own keyframe cadence when that is coarser than
+  # recent_interval_s, rather than full-decoding to force the configured rate.
+  # A source whose GOP is longer than the target can only hit it by decoding
+  # every frame -- ~5x the cost -- to synthesise stills the encoder never made
+  # distinct. UniFi Protect cameras emit a keyframe every 5s and expose no
+  # setting to change it; Dahua-style cameras here emit one a second. The
+  # cadence travels per bucket in `interval`, so a camera generating at 5s is
+  # contract-compatible: it just yields a still every 5s while scrubbing.
+  match_keyframe_cadence: true
   aged_after_h: 24.0
   # Capped by how long CONTINUOUS (non-motion-only) recording actually lasts,
   # not by disk budget or record.retain.days. Measured at ~4 days on the

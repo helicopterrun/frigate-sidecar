@@ -141,6 +141,18 @@ class ScrubSection(BaseModel):
     # frigate.recordings_path -- verified at startup, see routes/scrub.py.
     recent_interval_s: float = 1.0
     aged_interval_s: float = 5.0
+    # Generate a camera at its own keyframe cadence when that is coarser than
+    # `recent_interval_s`, instead of full-decoding to force the configured
+    # rate. A source whose GOP is longer than the target interval can only hit
+    # that interval by decoding every frame -- measured at ~5x the cost of
+    # keyframe extraction, and on the reference deployment the three UniFi
+    # Protect cameras (5s GOP, against 1s on the seven Dahua ones) accounted for
+    # roughly 70% of the generator's total work while being 30% of the fleet.
+    # The cadence is per bucket and travels to the client in `interval`, so a
+    # camera generating at 5s is contract-compatible; it just yields a still
+    # every 5s rather than every second. Turn off to force the configured
+    # interval everywhere and pay the decode.
+    match_keyframe_cadence: bool = True
     aged_after_h: float = 24.0
     retention_days: int = 4
     cell_w: int = 320
