@@ -29,6 +29,7 @@ from frigate_sidecar.frigate_api import (
     async_activity_motion,
     get_async_client,
 )
+from frigate_sidecar.frigate_config import recording_retention_days
 from frigate_sidecar.scrub import grid
 from frigate_sidecar.scrub.motion import aggregate_motion, safe_fetch_scale
 
@@ -156,7 +157,17 @@ async def coverage(camera: str, start: float, end: float, request: Request) -> A
     finally:
         conn.close()
 
-    result["retention_days"] = settings.scrub.retention_days
+    # Named for what it is. `retention_days` here was the *scrub cache's*
+    # horizon on an endpoint otherwise entirely about what Frigate recorded, and
+    # §4.2 tells clients to compare a queried range against `retention_days` to
+    # tell "will never exist" from "still lagging" -- apply that to this
+    # response and you conclude recordings stop at 4 days when the motion band
+    # runs to 8. (That reasoning belongs to /v1/scrub/{camera}/coverage, which
+    # reports its own `retention_days` and is unambiguous there.)
+    result["scrub_retention_days"] = settings.scrub.retention_days
+    result["recording_retention_days"] = recording_retention_days(
+        settings.frigate.config_path, camera
+    )
     return _etagged(request, result)
 
 
@@ -322,7 +333,7 @@ def _events_json(conn: Any, camera: str, start: float, end: float) -> list[dict[
             zones = json.loads(zones_raw) if zones_raw else []
         except (json.JSONDecodeError, TypeError):
             zones = []
-        score = row["score"] if "score" in cols else None
+        score = db.event_top_score(row)
         out.append(
             {
                 "id": row["id"],
@@ -387,13 +398,78 @@ async def reel(
     return _etagged(request, body)
 
 
+def _cluster_highlights(
+    highlights: list[dict[str, Any]], cluster_s: float
+) -> list[dict[str, Any]]:
+    """Collapse runs of highlights into one destination each.
+
+    One person walking past a camera emits three or four events -- measured
+    across three cameras, 40-50% of consecutive highlights are under 45s apart
+    -- so a naive "jump to the next highlight" presses the same person four
+    times. The gap is measured end-to-start, so a long event followed closely
+    by another counts as continuing rather than as a new destination.
+
+    `highlights` must be in ascending start order; the result keeps that order.
+    """
+    if cluster_s <= 0 or not highlights:
+        return highlights
+
+    def _extent(item: dict[str, Any]) -> float:
+        """Where an item finishes, treating in-progress as still at its start."""
+        return item["start"] if item["end"] is None else item["end"]
+
+    clusters: list[dict[str, Any]] = []
+    for item in highlights:
+        current = clusters[-1] if clusters else None
+        if current is not None and item["start"] - _extent(current) <= cluster_s:
+            # A member with no end is still running, so the destination has no
+            # end either -- synthesising one would assert an exit that hasn't
+            # happened, the same reason events[].end stays null in /v1/reel.
+            current["end"] = (
+                None
+                if current["end"] is None or item["end"] is None
+                else max(current["end"], item["end"])
+            )
+            current["events"] += 1
+            # The destination is described by its most confident member.
+            if (item["score"] or -1.0) > (current["score"] or -1.0):
+                current["score"] = item["score"]
+                current["reason"] = item["reason"]
+        else:
+            clusters.append({**item, "events": 1})
+    return clusters
+
+
 @router.get("/highlights/{camera}")
-async def highlights(camera: str, request: Request, before: float, limit: int = 10) -> Any:
-    """Ranked index of interesting moments (§4.7), precomputed from `event`
-    rows -- `reason` is a Frigate object label (person/car/package/...), the
-    same vocabulary the client already maps to lanes."""
+async def highlights(
+    camera: str,
+    request: Request,
+    before: float,
+    limit: int = 10,
+    order: str = "recent",
+    cluster_s: float = 0.0,
+) -> Any:
+    """Index of interesting moments (§4.7), from `event` rows -- `reason` is a
+    Frigate object label (person/car/package/...), the same vocabulary the
+    client already maps to lanes.
+
+    These are **raw events by default**, newest first: `limit` bounds the events
+    considered, not the destinations returned, and one subject crossing the
+    frame produces several. Two opt-in knobs, both off by default so an existing
+    consumer sees no change:
+
+    * `cluster_s` groups events within that many seconds of each other into one
+      destination (`events` counts the members) -- what a "jump to the next
+      interesting thing" control actually wants.
+    * `order=score` ranks by peak confidence instead of recency. Recency stays
+      the default because a client scanning for adjacency depends on time order.
+    """
     settings = request.app.state.settings
     limit = max(1, min(limit, 100))
+    if order not in ("recent", "score"):
+        raise _bad_range("order must be 'recent' or 'score'")
+    if cluster_s < 0:
+        raise _bad_range("cluster_s must be >= 0")
 
     conn = db.open_frigate_ro(settings.frigate.db_path)
     try:
@@ -402,24 +478,27 @@ async def highlights(camera: str, request: Request, before: float, limit: int = 
                 status_code=404,
                 detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
             )
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(event)")}
-        score_col = "top_score" if "top_score" in cols else "score"
         rows = conn.execute(
-            f"SELECT id, label, start_time, end_time, {score_col} AS score FROM event "
-            "WHERE camera = ? AND start_time < ? ORDER BY start_time DESC LIMIT ?",
+            "SELECT * FROM event WHERE camera = ? AND start_time < ? "
+            "ORDER BY start_time DESC LIMIT ?",
             (camera, before, limit),
         ).fetchall()
     finally:
         conn.close()
 
-    return {
-        "highlights": [
-            {
-                "start": r["start_time"],
-                "end": r["end_time"],
-                "reason": r["label"],
-                "score": r["score"],
-            }
-            for r in rows
-        ]
-    }
+    items = [
+        {
+            "start": r["start_time"],
+            "end": r["end_time"],
+            "reason": r["label"],
+            "score": db.event_top_score(r),
+        }
+        for r in rows
+    ]
+    # Clustering needs ascending order; the response is newest-first.
+    items = _cluster_highlights(list(reversed(items)), cluster_s)
+    items.reverse()
+    if order == "score":
+        items.sort(key=lambda h: (h["score"] if h["score"] is not None else -1.0), reverse=True)
+
+    return {"highlights": items}
