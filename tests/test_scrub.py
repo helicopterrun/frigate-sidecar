@@ -7,6 +7,7 @@ auth requirement.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -156,7 +157,12 @@ def test_coverage_merges_intervals_and_splits_authoritative_from_latest(
     # wall-clock and is what the client should trust (docs spec §4.4 finding 4).
     assert body["latest_segment_end"] < body["authoritative_through"]
     assert abs(body["authoritative_through"] - (now - db.DEFAULT_PUBLISH_LAG_S)) < 1.0
-    assert body["retention_days"] == 4
+    # `retention_days` here meant the *scrub cache's* horizon on an endpoint
+    # about what Frigate recorded -- and §4.2 tells clients to read that field
+    # as "past this, it will never exist", which on this deployment would say
+    # recordings stop at 4 days when the motion band runs to 8.
+    assert "retention_days" not in body
+    assert body["scrub_retention_days"] == 4
     assert body["queried"] == [now - 300, now]
 
 
@@ -562,3 +568,192 @@ def test_generation_loop_skips_the_idle_wait_while_catching_up(
 
     assert sleeps, "loop should always yield"
     assert (sleeps[0] == 60.0) is expect_sleep
+
+
+# ----- /v1/highlights: score, ranking, clustering (§4.7) -----
+
+
+def _seed_events(
+    frigate_db: Path, camera: str, specs: list[tuple[float, float, str, float]]
+) -> None:
+    """specs: (start, end, label, top_score) -- score lives in `data`, as
+    current Frigate writes it (the columns are NULL for every row)."""
+    conn = sqlite3.connect(frigate_db)
+    for i, (start, end, label, top) in enumerate(specs):
+        conn.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time, score, top_score, "
+            "zones, data) VALUES (?, ?, ?, ?, ?, NULL, NULL, '[]', ?)",
+            (f"h{i}", camera, label, start, end, json.dumps({"top_score": top, "score": top})),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_highlights_report_a_score_from_the_data_blob(
+    client: TestClient, frigate_db_with_recordings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Current Frigate leaves the score/top_score COLUMNS null and writes into
+    `data`, so reading the column made `score` null on every highlight -- and
+    an always-null field is one every consumer has to write a comment about."""
+    _skip_auth(monkeypatch)
+    now = time.time()
+    _seed_events(frigate_db_with_recordings, "doorbell", [
+        (now - 300, now - 290, "person", 0.91),
+        (now - 200, now - 195, "car", 0.62),
+    ])
+    r = client.get(
+        "/v1/highlights/doorbell",
+        params={"before": now, "limit": 50},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    scored = [h for h in r.json()["highlights"] if h["score"] is not None]
+    assert len(scored) >= 2, "every seeded event should carry a score"
+    assert all(0.0 <= h["score"] <= 1.0 for h in scored)
+
+
+def test_reel_events_also_carry_a_score(
+    client: TestClient, frigate_db_with_recordings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same column-vs-blob bug, same fix -- /v1/reel read the column too."""
+    _skip_auth(monkeypatch)
+
+    async def _no_motion(
+        request: object, camera: str, s: float, e: float, sc: float
+    ) -> list[float]:
+        return []
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _no_motion)
+    now = time.time()
+    _seed_events(frigate_db_with_recordings, "doorbell", [(now - 100, now - 90, "person", 0.77)])
+    r = client.get(
+        "/v1/reel/doorbell",
+        params={"start": now - 200, "end": now, "motion_scale": 10},
+        headers={"cookie": "session=fake"},
+    )
+    scored = [e for e in r.json()["events"] if e["score"] is not None]
+    assert scored and any(abs(e["score"] - 0.77) < 1e-6 for e in scored)
+
+
+def test_highlights_default_to_raw_events_newest_first(
+    client: TestClient, frigate_db_with_recordings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default order is unchanged: a client scanning for adjacency depends on
+    it, so ranking and clustering are both opt-in."""
+    _skip_auth(monkeypatch)
+    now = time.time()
+    _seed_events(frigate_db_with_recordings, "doorbell", [
+        (now - 300, now - 295, "person", 0.9),
+        (now - 250, now - 245, "person", 0.5),
+    ])
+    r = client.get(
+        "/v1/highlights/doorbell",
+        params={"before": now, "limit": 50},
+        headers={"cookie": "session=fake"},
+    )
+    starts = [h["start"] for h in r.json()["highlights"]]
+    assert starts == sorted(starts, reverse=True)
+    assert all("events" not in h for h in r.json()["highlights"])
+
+
+def test_highlights_cluster_runs_into_single_destinations(
+    client: TestClient, frigate_db_with_recordings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One subject crossing frame emits several events -- measured, 40-50% of
+    consecutive highlights are under 45s apart -- so an unclustered "jump to
+    next" presses the same person four times."""
+    _skip_auth(monkeypatch)
+    now = time.time()
+    base = now - 4000
+    _seed_events(frigate_db_with_recordings, "doorbell", [
+        (base, base + 10, "person", 0.60),
+        (base + 20, base + 30, "person", 0.95),   # same subject, 10s gap
+        (base + 40, base + 50, "person", 0.70),   # same subject, 10s gap
+        (base + 900, base + 910, "car", 0.80),    # a genuinely separate visit
+    ])
+    r = client.get(
+        "/v1/highlights/doorbell",
+        params={"before": now, "limit": 50, "cluster_s": 45},
+        headers={"cookie": "session=fake"},
+    )
+    got = [h for h in r.json()["highlights"] if base - 1 <= h["start"] <= base + 1000]
+    assert len(got) == 2, f"expected 2 destinations, got {len(got)}"
+    newest, run = got[0], got[1]
+    assert newest["reason"] == "car" and newest["events"] == 1
+    assert run["events"] == 3
+    assert run["start"] == pytest.approx(base)          # earliest start of the run
+    assert run["end"] == pytest.approx(base + 50)       # latest end
+    assert run["score"] == pytest.approx(0.95)          # most confident member
+
+
+def test_highlights_can_rank_by_score(
+    client: TestClient, frigate_db_with_recordings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§4.7 calls these ranked; `order=score` is what makes that true without
+    reordering the response for consumers that depend on time order."""
+    _skip_auth(monkeypatch)
+    now = time.time()
+    _seed_events(frigate_db_with_recordings, "doorbell", [
+        (now - 300, now - 295, "person", 0.42),
+        (now - 250, now - 245, "car", 0.99),
+        (now - 200, now - 195, "person", 0.71),
+    ])
+    r = client.get(
+        "/v1/highlights/doorbell",
+        params={"before": now, "limit": 50, "order": "score"},
+        headers={"cookie": "session=fake"},
+    )
+    scores = [h["score"] for h in r.json()["highlights"] if h["score"] is not None]
+    assert scores == sorted(scores, reverse=True)
+    assert scores[0] == pytest.approx(0.99)
+
+
+@pytest.mark.parametrize(
+    ("params", "why"),
+    [({"order": "sideways"}, "unknown order"), ({"cluster_s": -5}, "negative window")],
+)
+def test_highlights_reject_bad_parameters(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, params: dict, why: str
+) -> None:
+    _skip_auth(monkeypatch)
+    r = client.get(
+        "/v1/highlights/doorbell",
+        params={"before": time.time(), **params},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 400, why
+    assert r.json()["detail"]["error"] == "bad_range"
+
+
+def test_clustering_keeps_an_in_progress_destination_open(
+    client: TestClient, frigate_db_with_recordings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If any member is still running the destination has no end, for the same
+    reason events[].end stays null in /v1/reel: a synthesised end asserts an
+    exit that hasn't happened."""
+    _skip_auth(monkeypatch)
+    now = time.time()
+    base = now - 5000
+    conn = sqlite3.connect(frigate_db_with_recordings)
+    conn.execute(
+        "INSERT INTO event (id, camera, label, start_time, end_time, score, top_score, zones, data)"
+        " VALUES ('c0', 'doorbell', 'person', ?, ?, NULL, NULL, '[]', ?)",
+        (base, base + 10, json.dumps({"top_score": 0.5})),
+    )
+    conn.execute(
+        "INSERT INTO event (id, camera, label, start_time, end_time, score, top_score, zones, data)"
+        " VALUES ('c1', 'doorbell', 'person', ?, NULL, NULL, NULL, '[]', ?)",
+        (base + 20, json.dumps({"top_score": 0.8})),
+    )
+    conn.commit()
+    conn.close()
+
+    r = client.get(
+        "/v1/highlights/doorbell",
+        params={"before": now, "limit": 50, "cluster_s": 45},
+        headers={"cookie": "session=fake"},
+    )
+    got = [h for h in r.json()["highlights"] if base - 1 <= h["start"] <= base + 1000]
+    assert len(got) == 1 and got[0]["events"] == 2
+    assert got[0]["end"] is None
+    assert got[0]["score"] == pytest.approx(0.8)

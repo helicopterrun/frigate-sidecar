@@ -103,18 +103,48 @@ Full contract, error vocabulary, and rationale: [`docs/scrub-cache-and-proxy-spe
 | Method | Path | What it does |
 |---|---|---|
 | `GET` | `/v1/capabilities` | Unauthenticated. Reports whether the scrub cache and proxy are enabled, which cameras have generated data, and the sidecar version. |
-| `GET` | `/v1/coverage/{camera}?start=&end=` | Recording coverage read live from `frigate.db` — what Frigate actually recorded in `[start, end)`, plus `latest_segment_end` (diagnostic) and `authoritative_through` (the boundary the client should actually trust). ETag'd. |
+| `GET` | `/v1/coverage/{camera}?start=&end=` | Recording coverage read live from `frigate.db` — what Frigate actually recorded in `[start, end)`, plus `latest_segment_end` (diagnostic) and `authoritative_through` (the boundary the client should actually trust). `recording_retention_days` comes from Frigate's own `record` config (the outer bound of the continuous and motion bands); `scrub_retention_days` is the cache's separate, usually shorter horizon — **do not read one as the other**. ETag'd. |
 | `GET` | `/v1/scrub/{camera}/coverage?start=&end=` | Scrub-cache coverage — which buckets of sprite data exist, distinct from recording coverage. Compares against `retention_days` so the client can tell "will never be generated" from "still lagging". |
 | `GET` | `/v1/scrub/{camera}/sheets?start=&end=` | Index of sprite sheets covering the window: immutable, content-addressed URLs (`{start}-{interval}-{count}`) plus grid geometry. |
 | `GET` | `/v1/scrub/{camera}/sheet/{start}-{interval}-{count}.{jpg,webp}` | One sprite-sheet image. Every distinct fill-count is its own immutable object — no cache-freshness reasoning needed anywhere in the path. |
 | `GET` | `/v1/motion/{camera}?start=&end=&scale=` | Totalized motion at any `scale`, always covering the full requested range, zero-filled where there's genuinely no data (works around two measured gaps in Frigate's own `/api/.../activity/motion`). |
 | `GET` | `/v1/reel/{camera}?start=&end=&motion_scale=` | One call per reel window: coverage + scrub buckets (as `frames[]`) + motion + events, one cache lifetime. ETag'd. |
-| `GET` | `/v1/highlights/{camera}?before=&limit=` | Ranked recent tracked-object events (`reason` is a Frigate label: person/car/package/…) for jump-to-highlight UI. |
+| `GET` | `/v1/highlights/{camera}?before=&limit=&order=&cluster_s=` | Recent tracked-object events (`reason` is a Frigate label: person/car/package/…) for jump-to-highlight UI. **Raw events, newest first, by default** — see below. |
 | `*` | `/{path:path}` (catch-all) | Transparent reverse proxy to Frigate's authenticated origin (`frigate.proxy_base_url`) — `/api/*`, `/vod/*`, `/live/*`, `/preview/*`, everything else. Forwards `Range`/`Authorization`/`Cookie`/`Accept-Encoding`, streams the body **raw** so `content-encoding` and `content-length` stay consistent, relays `content-range`/`etag`/`location`/`www-authenticate` (incl. 401) unchanged, emits each `Set-Cookie` separately, and passes the HTTP method through (not GET-only). Registered last, so `/v1/*`, `/static`, and `/healthz` always win first. |
 | `WS` | `/{path:path}` (catch-all) | WebSocket relay to the same origin — Frigate's `/ws` state feed and go2rtc's WebRTC signalling, so live view works through the single base URL. |
 
 Unknown paths under endpoints the sidecar owns (not the proxy catch-all) return
 JSON 404s, never HTML: `{"error": "<code>", "message": "..."}`.
+
+### Highlights are events, not destinations
+
+`/v1/highlights` returns **raw tracked-object events**, newest first. That is
+worth stating plainly because the endpoint's purpose ("take me to the next
+interesting thing") implies destinations, and events cluster hard: measured
+across three cameras, 40–50% of consecutive highlights are less than 45s apart
+(39/99, 46/99, 49/99, with median gaps of 306s / 57s / 48s). One person walking
+past emits three or four, so an unclustered "next highlight" control presses the
+same person four times.
+
+Two opt-in parameters, both off by default so existing consumers see no change:
+
+- `cluster_s=45` groups events within that many seconds into one destination at
+  the run's earliest start, with `events` counting the members, `end` the latest
+  end, and `reason`/`score` taken from the most confident member. Gaps are
+  measured end-to-start, so a long event followed closely by another counts as
+  continuing.
+- `order=score` ranks by peak confidence rather than recency. Recency stays the
+  default because a client scanning for adjacency depends on time order.
+
+`limit` bounds the **events considered**, not the destinations returned, and its
+reach in wall-clock time varies enormously with how busy a camera is: `limit=100`
+covered 3.4 hours on one camera and 152 hours on another on the reference
+deployment. A client filtering for a sparse label (`package` was 3 in 100) must
+page; one call is never enough on its own.
+
+`score` is the event's peak confidence. Current Frigate keeps it in the `data`
+JSON blob and leaves the `score`/`top_score` columns NULL, so anything reading
+the column alone reports null for every event.
 
 ## CLI
 

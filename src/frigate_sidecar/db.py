@@ -258,6 +258,36 @@ def parse_event_data(row: sqlite3.Row) -> dict[str, Any]:
     return out
 
 
+def event_top_score(row: sqlite3.Row) -> float | None:
+    """Peak confidence for an event, wherever this Frigate version keeps it.
+
+    Current Frigate writes scores into the `data` JSON blob and leaves the
+    `score`/`top_score` *columns* NULL -- all 80,664 rows on the reference
+    deployment. Reading the column alone therefore returned null for every
+    event, which is what made `/v1/highlights`' `score` field permanently
+    empty and its "ranked" contract unmeetable. The analysis modules have
+    always gone through `parse_event_data` for this reason; the `/v1` read
+    layer went straight to the column.
+    """
+    keys = row.keys()  # noqa: SIM118 - sqlite3.Row needs .keys()
+    parsed: dict[str, Any] = {}
+    raw = row["data"] if "data" in keys else None
+    if raw:
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            parsed = {}
+    for value in (
+        parsed.get("top_score"),
+        parsed.get("score"),
+        row["top_score"] if "top_score" in keys else None,
+        row["score"] if "score" in keys else None,
+    ):
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
 def time_window_clause(days: float, column: str = "start_time") -> tuple[str, list[Any]]:
     """Build a `<column> >= ?` clause for the last `days` days.
 
