@@ -826,8 +826,11 @@ async def generate_cycle(settings: Settings, *, now: float | None = None) -> lis
             ")",
             (scrub.recent_interval_s,),
         ).fetchone()
+        # Against wall clock at log time, not the cycle's own `now`: a camera
+        # serviced at the start of a 500s cycle is 500s stale by the end, and
+        # measuring from `now` would report it as current.
         worst_lag = (
-            now - lag_row["furthest"]
+            _time.time() - lag_row["furthest"]
             if lag_row and lag_row["furthest"] is not None
             else float("nan")
         )

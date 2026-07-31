@@ -203,6 +203,19 @@ def run() -> None:
     import uvicorn
 
     settings = load_settings()
+    # uvicorn's log_level only configures uvicorn's own loggers; the root logger
+    # keeps its WARNING default, so everything the sidecar itself logs below
+    # that -- the per-cycle scrub telemetry in particular -- was written and
+    # then dropped. The watchdog entry point has always done this; the server
+    # never did.
+    logging.basicConfig(
+        level=settings.log_level.upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    # httpx logs a line per request at INFO. Every proxied request goes through
+    # it, so at this cadence that is thousands of lines an hour burying anything
+    # the sidecar has to say (the watchdog quiets it for the same reason).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     uvicorn.run(
         create_app(settings),
         host=settings.sidecar.bind_host,
