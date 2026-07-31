@@ -58,8 +58,8 @@ def record(
         existing_row = conn.execute(
             "SELECT label FROM triage_labels WHERE event_id = ?", (event_id,)
         ).fetchone()
-        before = existing_row["label"] if existing_row else None
-        if existing_row and not force:
+        before = str(existing_row["label"]) if existing_row else None
+        if existing_row and before is not None and not force:
             raise AlreadyLabeledError(event_id, before)
 
         conn.execute(

@@ -114,16 +114,26 @@ def open_frigate_ro(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+# Databases whose schema this process has already applied. Every request opens
+# its own connection, and replaying ~15 DDL statements plus the seed INSERT on
+# each one is pure overhead once the file exists.
+_SCHEMA_APPLIED: set[str] = set()
+
+
 def open_sidecar(path: str | Path) -> sqlite3.Connection:
     """Open the sidecar DB read/write, creating directory + schema if needed."""
     p = Path(path)
+    key = str(p.resolve())
+    needs_schema = key not in _SCHEMA_APPLIED or not p.exists()
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(p, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 3000")
     conn.execute("PRAGMA journal_mode = WAL")
-    conn.executescript(SIDECAR_SCHEMA)
-    conn.commit()
+    if needs_schema:
+        conn.executescript(SIDECAR_SCHEMA)
+        conn.commit()
+        _SCHEMA_APPLIED.add(key)
     return conn
 
 
@@ -234,8 +244,12 @@ def parse_event_data(row: sqlite3.Row) -> dict[str, Any]:
     return out
 
 
-def time_window_clause(days: float, column: str = "start_time") -> tuple[str, list[float]]:
-    """Build a `<column> >= ?` clause for the last `days` days."""
+def time_window_clause(days: float, column: str = "start_time") -> tuple[str, list[Any]]:
+    """Build a `<column> >= ?` clause for the last `days` days.
+
+    The returned params list is the caller's to extend with further bound
+    values (camera, label, ...), so it is deliberately not float-only.
+    """
     cutoff = time.time() - days * 86400
     return f"{column} >= ?", [cutoff]
 

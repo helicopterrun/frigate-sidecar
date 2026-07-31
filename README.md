@@ -71,14 +71,32 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now frigate-sidecar.service
 ```
 
+## Auth
+
+**Every endpoint the sidecar owns requires the client's Frigate session
+cookie** — the triage UI, `/faces`, `/analysis`, `/toybox` and `/v1` alike. The
+sidecar has no user database and never holds a password: it validates the
+cookie against `frigate.proxy_base_url` and caches the pass for
+`sidecar.auth_cache_ttl_s`. Since the sidecar serves event history, face crops
+of identified people, and writes that reach back into Frigate (labels, Frigate+
+submissions, face-library promotion), an open sidecar is a way around Frigate's
+own auth.
+
+Three deliberate exceptions:
+
+- `/v1/capabilities`, `/healthz`, `/version` — reachability probes a client
+  needs *before* it has a session (plus `/static`).
+- the reverse-proxy catch-all — Frigate authenticates that traffic itself, and
+  its 401 + `WWW-Authenticate` challenge must reach the client intact.
+
+Set `sidecar.require_frigate_auth: false` only if your Frigate has auth
+disabled, in which case there is no session to check.
+
 ## API
 
-All new endpoints are under `/v1` and require the same Frigate session cookie
-the client already sends to `/api/*` — `/v1` is never less protected than the
-endpoints it sits beside. `/v1/capabilities` is the one exception (unauthenticated,
-so a client can probe reachability before it has a session). Every `/v1`
-endpoint is optional: a client should degrade to talking to bare Frigate
-directly when `/v1/capabilities` reports nothing.
+All new endpoints are under `/v1`. Every `/v1` endpoint is optional: a client
+should degrade to talking to bare Frigate directly when `/v1/capabilities`
+reports nothing.
 
 Full contract, error vocabulary, and rationale: [`docs/scrub-cache-and-proxy-spec.md`](docs/scrub-cache-and-proxy-spec.md).
 
@@ -92,7 +110,8 @@ Full contract, error vocabulary, and rationale: [`docs/scrub-cache-and-proxy-spe
 | `GET` | `/v1/motion/{camera}?start=&end=&scale=` | Totalized motion at any `scale`, always covering the full requested range, zero-filled where there's genuinely no data (works around two measured gaps in Frigate's own `/api/.../activity/motion`). |
 | `GET` | `/v1/reel/{camera}?start=&end=&motion_scale=` | One call per reel window: coverage + scrub buckets (as `frames[]`) + motion + events, one cache lifetime. ETag'd. |
 | `GET` | `/v1/highlights/{camera}?before=&limit=` | Ranked recent tracked-object events (`reason` is a Frigate label: person/car/package/…) for jump-to-highlight UI. |
-| `*` | `/{path:path}` (catch-all) | Transparent reverse proxy to Frigate's authenticated origin (`frigate.proxy_base_url`) — `/api/*`, `/vod/*`, `/live/*`, `/preview/*`, everything else. Forwards `Range`/`Authorization`/`Cookie`, relays `content-range`/`etag`/`set-cookie`/`www-authenticate` (incl. 401) unchanged, and passes the HTTP method through (not GET-only). Registered last, so `/v1/*`, `/static`, and `/healthz` always win first. |
+| `*` | `/{path:path}` (catch-all) | Transparent reverse proxy to Frigate's authenticated origin (`frigate.proxy_base_url`) — `/api/*`, `/vod/*`, `/live/*`, `/preview/*`, everything else. Forwards `Range`/`Authorization`/`Cookie`/`Accept-Encoding`, streams the body **raw** so `content-encoding` and `content-length` stay consistent, relays `content-range`/`etag`/`location`/`www-authenticate` (incl. 401) unchanged, emits each `Set-Cookie` separately, and passes the HTTP method through (not GET-only). Registered last, so `/v1/*`, `/static`, and `/healthz` always win first. |
+| `WS` | `/{path:path}` (catch-all) | WebSocket relay to the same origin — Frigate's `/ws` state feed and go2rtc's WebRTC signalling, so live view works through the single base URL. |
 
 Unknown paths under endpoints the sidecar owns (not the proxy catch-all) return
 JSON 404s, never HTML: `{"error": "<code>", "message": "..."}`.
@@ -108,8 +127,9 @@ docker exec frigate-sidecar fsc analysis score-histogram --days 7
 ```
 
 Scrub-cache generation is also driven from the CLI (`fsc scrub ...`), run
-continuously in-process by the server (never hourly — see §5.4 of the spec)
-but scriptable for backfill/maintenance:
+continuously in-process by the server (never hourly — see §5.4 of the spec),
+which also sweeps retention every `scrub.prune_interval_s`. The CLI stays
+useful for backfill/maintenance:
 
 ```sh
 docker exec frigate-sidecar fsc scrub generate            # one generation cycle, all configured cameras
@@ -144,9 +164,16 @@ Two settings sections back the new features:
   `:8971`), used only by the reverse proxy for app traffic. Kept separate from
   `frigate.base_url` (unauthenticated, used for the sidecar's own
   server-to-server calls) — do not point both at the same port.
-- `frigate.recordings_path` — host-side path to Frigate's recordings root, as
-  the sidecar itself sees it. Deployment-specific; verify with `docker inspect`
-  on the Frigate host per §8.2 of the spec before trusting the default.
+- `frigate.recordings_path` — the host-side path that **replaces**
+  `frigate.media_path` in `recordings.path`. Rows read
+  `<media_path>/recordings/<date>/...`, so the `recordings/` segment comes from
+  the DB value and must not be repeated here; pointing it at
+  `…/recordings/recordings` maps every segment one level too deep and
+  generation produces nothing. Deployment-specific; verify with `docker inspect`
+  on the Frigate host per §8.2 of the spec, then confirm against a real
+  `recordings.path` row. Startup logs an error if the path doesn't resolve, and
+  the generator warns when segment files don't map.
+- `sidecar.require_frigate_auth` — see [Auth](#auth) above. On by default.
 
 ## Status
 

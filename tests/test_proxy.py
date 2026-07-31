@@ -18,12 +18,12 @@ from frigate_sidecar.server import create_app
 
 
 class _StubResponse:
-    def __init__(self, status_code: int, headers: dict[str, str], body: bytes) -> None:
+    def __init__(self, status_code: int, headers: Any, body: bytes) -> None:
         self.status_code = status_code
-        self.headers = headers
+        self.headers = httpx.Headers(headers)
         self._body = body
 
-    async def aiter_bytes(self) -> Any:
+    async def aiter_raw(self) -> Any:
         yield self._body
 
     async def aclose(self) -> None:
@@ -64,7 +64,9 @@ def client(frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path) -> Test
             config_path=fake_config,
             db_path=frigate_db_path,
         ),
-        sidecar=SidecarSection(db_path=sidecar_db_path, bind_port=5001),
+        sidecar=SidecarSection(
+            db_path=sidecar_db_path, bind_port=5001, require_frigate_auth=False
+        ),
         proxy=ProxySection(enabled=True),
     )
     return TestClient(create_app(settings))
@@ -148,9 +150,73 @@ def test_proxy_disabled_returns_404(
     fake_config.write_text("cameras: {}\n")
     settings = Settings(
         frigate=FrigateSection(config_path=fake_config, db_path=frigate_db_path),
-        sidecar=SidecarSection(db_path=sidecar_db_path, bind_port=5001),
+        sidecar=SidecarSection(
+            db_path=sidecar_db_path, bind_port=5001, require_frigate_auth=False
+        ),
         proxy=ProxySection(enabled=False),
     )
     c = TestClient(create_app(settings))
     r = c.get("/api/config")
     assert r.status_code == 404
+
+
+def test_gzipped_body_is_relayed_raw_with_matching_length(client: TestClient) -> None:
+    """The body must stay in the encoding its `content-length` describes.
+
+    httpx decodes `content-encoding` when you iterate the decoded stream, so
+    forwarding the upstream length beside a decoded body described the wrong
+    number of bytes for every gzipped Frigate response (i.e. all of /api/*).
+    """
+    import gzip
+
+    payload = b'{"cameras": ["doorbell", "alley-overview"]}'
+    body = gzip.compress(payload)
+    _StubAsyncClient.next_response = _StubResponse(
+        200,
+        {
+            "content-type": "application/json",
+            "content-encoding": "gzip",
+            "content-length": str(len(body)),
+        },
+        body,
+    )
+    r = client.get("/api/config", headers={"accept-encoding": "gzip"})
+    assert r.status_code == 200
+    assert r.headers["content-length"] == str(len(body))
+    assert r.json() == {"cameras": ["doorbell", "alley-overview"]}
+    # The client's own negotiation travels upstream with the raw relay.
+    fwd = {k.lower(): v for k, v in _StubAsyncClient.last_request["headers"].items()}
+    assert fwd["accept-encoding"] == "gzip"
+
+
+def test_multiple_set_cookie_headers_are_relayed_separately(client: TestClient) -> None:
+    """Frigate's login sets more than one cookie; reading them off the header
+    mapping comma-joined them into a single malformed value."""
+    _StubAsyncClient.next_response = _StubResponse(
+        200,
+        [
+            ("content-type", "application/json"),
+            ("set-cookie", "frigate_token=abc; Path=/; HttpOnly"),
+            ("set-cookie", "frigate_refresh=def; Path=/; HttpOnly"),
+        ],
+        b"{}",
+    )
+    r = client.get("/api/login")
+    cookies = r.headers.get_list("set-cookie")
+    assert len(cookies) == 2
+    assert cookies[0].startswith("frigate_token=abc")
+    assert cookies[1].startswith("frigate_refresh=def")
+
+
+def test_location_header_is_relayed_on_redirect(client: TestClient) -> None:
+    _StubAsyncClient.next_response = _StubResponse(302, {"location": "/login"}, b"")
+    r = client.get("/api/whatever", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login"
+
+
+def test_options_is_proxied(client: TestClient) -> None:
+    _StubAsyncClient.next_response = _StubResponse(204, {"allow": "GET, POST"}, b"")
+    r = client.options("/api/config")
+    assert r.status_code == 204
+    assert _StubAsyncClient.last_request["method"] == "OPTIONS"

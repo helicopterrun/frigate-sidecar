@@ -7,13 +7,65 @@ one place to set timeouts / headers / base URL.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import httpx
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from fastapi import FastAPI
 
 
 class FrigateAPIError(RuntimeError):
     pass
+
+
+def get_async_client(app: FastAPI) -> httpx.AsyncClient:
+    """One pooled AsyncClient per app, created lazily and closed on shutdown.
+
+    Used by the reverse proxy, the `/v1` motion fetch and the session check.
+    A fresh client per request threw away keep-alive to Frigate and paid a new
+    connection setup on every proxied media range request.
+
+    `read=None` is the media default (VOD/live are long-lived streams the user
+    pauses and seeks); the short-lived callers pass their own `timeout=`.
+    """
+    client = getattr(app.state, "http_client", None)
+    if client is None or getattr(client, "is_closed", False):
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, read=None), follow_redirects=False
+        )
+        app.state.http_client = client
+    return client
+
+
+async def async_activity_motion(
+    client: httpx.AsyncClient,
+    base_url: str,
+    camera: str,
+    start: float,
+    end: float,
+    scale: float,
+    *,
+    timeout: float = 10.0,
+) -> list[dict[str, Any]]:
+    """Async twin of `FrigateClient.activity_motion`.
+
+    `/v1/motion` and `/v1/reel` are async handlers, so using the sync client
+    there blocked the event loop -- and with it every other request -- for the
+    whole upstream round-trip.
+    """
+    url = f"{base_url.rstrip('/')}/api/review/activity/motion"
+    params: dict[str, str | float] = {
+        "cameras": camera, "after": start, "before": end, "scale": scale,
+    }
+    try:
+        r = await client.get(url, params=params, timeout=timeout)
+        r.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise FrigateAPIError(f"GET {url}: {exc}") from exc
+    data = r.json()
+    return data if isinstance(data, list) else []
 
 
 class FrigatePlusError(RuntimeError):
@@ -75,8 +127,14 @@ class FrigateClient:
         Calls POST /api/faces/train/{name}/classify, which `shutil.move`s the
         crop out of train/ into the {name}/ dir and clears the classifier so the
         new image is picked up. Raises FrigateAPIError on any non-success.
+
+        `name` is percent-encoded with no safe characters: unescaped, a name
+        containing `../` or `?` rewrote the whole upstream path (httpx
+        normalises dot segments and honours a query separator), which turned
+        this into an arbitrary-endpoint POST against Frigate's unauthenticated
+        origin.
         """
-        url = f"{self.base_url}/api/faces/train/{name}/classify"
+        url = f"{self.base_url}/api/faces/train/{quote(name, safe='')}/classify"
         try:
             r = self._client.post(url, json={"training_file": training_file})
         except httpx.HTTPError as exc:

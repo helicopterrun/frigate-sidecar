@@ -21,7 +21,18 @@ RUN pip install .
 
 ENV FRIGATE_SIDECAR_CONFIG=/etc/frigate-sidecar/sidecar.yml
 
+# Drop root: nothing here needs it. The inputs are bind-mounted read-only and
+# /data is the only thing written, so the compose file's data dir must be owned
+# by (or group-writable for) this uid.
+RUN useradd --system --uid 10001 --create-home sidecar \
+    && mkdir -p /data \
+    && chown -R sidecar:sidecar /data
+USER sidecar
+
 EXPOSE 5001
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/healthz', timeout=5)"
 
 ENTRYPOINT ["python", "-m", "frigate_sidecar"]
 CMD ["serve"]

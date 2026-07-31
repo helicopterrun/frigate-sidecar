@@ -388,6 +388,10 @@ def analysis_annotation_offset(
 
 # ----- Scrub subcommands (docs/scrub-cache-and-proxy-spec.md §5.7) -----
 
+# Backfill runs the same generator in a loop; this bounds a run that never
+# converges (e.g. the live edge outrunning it) instead of looping forever.
+_BACKFILL_MAX_CYCLES = 500
+
 
 @scrub_app.command("generate")
 def scrub_generate(
@@ -427,24 +431,35 @@ def scrub_backfill(
     from frigate_sidecar.scrub.generator import generate_cycle
 
     s = load_settings()
-    days = min(days, s.scrub.retention_days)
+    # `--days` bounds the window the generator actually walks: it is the
+    # retention horizon for this run, capped by the configured one. Without
+    # this the option was inert and every backfill covered full retention.
+    days = max(1, min(days, s.scrub.retention_days))
     s = s.model_copy(
         update={
-            "scrub": s.scrub.model_copy(
-                update={"cameras": [camera], "retention_days": s.scrub.retention_days}
-            )
+            "scrub": s.scrub.model_copy(update={"cameras": [camera], "retention_days": days})
         }
     )
     start = _time.time()
     cutoff = start - days * 86400
     total_frames = 0
-    while True:
+    # Safety stop: the live edge keeps producing frames, so "no new frames"
+    # is the intended exit but must not be the only one.
+    for _ in range(_BACKFILL_MAX_CYCLES):
         results = asyncio.run(generate_cycle(s))
         new_frames = sum(r.get("new_frames", 0) for r in results)
         total_frames += new_frames
         if new_frames == 0:
             break
-    typer.echo(json.dumps({"camera": camera, "since": cutoff, "new_frames": total_frames}))
+    else:
+        typer.echo(
+            f"# stopped after {_BACKFILL_MAX_CYCLES} cycles; re-run to continue", err=True
+        )
+    typer.echo(
+        json.dumps(
+            {"camera": camera, "days": days, "since": cutoff, "new_frames": total_frames}
+        )
+    )
 
 
 @scrub_app.command("prune")

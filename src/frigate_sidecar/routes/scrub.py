@@ -1,17 +1,15 @@
 """`/v1` scrub-cache + recording-coverage read layer.
 
-Serves the capability probe and the coverage/reel endpoints straight from
-`frigate.db` (read-only, already opened via `db.open_frigate_ro`) -- no
-generation required for `/v1/coverage`, which alone removes the bug class
-where "nothing recorded" and "not fetched" looked identical to the client.
+Serves the capability probe, the coverage/reel endpoints and the sprite-sheet
+index/images. Coverage comes straight from `frigate.db` (read-only, via
+`db.open_frigate_ro`) -- no generation required for `/v1/coverage`, which alone
+removes the bug class where "nothing recorded" and "not fetched" looked
+identical to the client. The sheets themselves are produced by the generator
+(`scrub/generator.py`, docs spec §5) and read back here.
 
-Sprite-sheet generation (the actual scrub cache) is a separate, larger piece
-(docs/scrub-cache-and-proxy-spec.md §5) not yet implemented here; this module
-currently serves `/v1/capabilities` (reporting `scrub_cache.enabled=false`
-until the generator lands) and `/v1/coverage/{camera}`.
-
-See docs/scrub-cache-and-proxy-spec.md §4 for the full contract this answers to,
-and §3.2 for why `/v1/*` requires the same Frigate auth cookie as `/api/*`.
+See docs/scrub-cache-and-proxy-spec.md §4 for the full contract this answers to.
+Auth (§3.2 -- `/v1` is never less protected than `/api`) is applied centrally in
+`frigate_sidecar.auth`, which covers every sidecar-owned route, not just these.
 """
 
 from __future__ import annotations
@@ -22,12 +20,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
 from frigate_sidecar import __version__, db
-from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient
+from frigate_sidecar.frigate_api import (
+    FrigateAPIError,
+    async_activity_motion,
+    get_async_client,
+)
 from frigate_sidecar.scrub import grid
 from frigate_sidecar.scrub.motion import aggregate_motion, safe_fetch_scale
 
@@ -36,11 +37,18 @@ router = APIRouter(prefix="/v1", tags=["v1"])
 # Error vocabulary (docs spec §4.0) -- always paired with a machine-readable
 # `error` field so the client can distinguish "nothing here yet" from "broken".
 _ERR_CAMERA_UNKNOWN = "camera_unknown"
-_ERR_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
 _ERR_NOT_GENERATED = "not_generated"
 _ERR_BAD_RANGE = "bad_range"
+# `upstream_unavailable` also belongs to this vocabulary; it is raised by the
+# shared auth gate (frigate_sidecar.auth.ERR_UPSTREAM_UNAVAILABLE).
 
 _IMMUTABLE = "public, max-age=31536000, immutable"
+
+# Upper bound on the series length a single request may ask us to build.
+# `values` is materialised in memory, so an unbounded (end-start)/scale was an
+# allocate-until-OOM lever: scale=0.001 over a multi-day window asks for
+# hundreds of millions of buckets.
+MAX_MOTION_POINTS = 20_000
 
 
 def _etag_for(body: dict[str, Any]) -> str:
@@ -55,51 +63,44 @@ def _etagged(request: Request, body: dict[str, Any]) -> Response:
         return Response(status_code=304, headers={"ETag": etag})
     return JSONResponse(content=body, headers={"ETag": etag})
 
-# Per-session cookie-validation cache for /v1 auth (§3.2): validating against
-# Frigate on every request would add real latency, so a cookie that validated
-# once is trusted for this long. Keyed on the raw cookie header value.
-_AUTH_CACHE_TTL_S = 60.0
-_auth_cache: dict[str, float] = {}  # cookie value -> expiry (monotonic-ish, uses time.time())
-
-
-async def _require_frigate_auth(request: Request) -> None:
-    """Validate the client's Frigate session cookie, caching a pass for ~60s.
-
-    Implements docs spec §3.2 finding 5 (option (a)): `/v1` must never be less
-    protected than `/api`, which the proxy already requires a Frigate session
-    for. Costs the client nothing -- Elsinore already sends its Frigate cookie
-    on every request.
-    """
-    settings = request.app.state.settings
-    cookie = request.headers.get("cookie", "")
-    if not cookie:
-        raise HTTPException(status_code=401, detail="frigate session required")
-
-    now = time.time()
-    expiry = _auth_cache.get(cookie)
-    if expiry is not None and expiry > now:
-        return
-
-    upstream = f"{settings.frigate.proxy_base_url.rstrip('/')}/api/version"
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(upstream, headers={"cookie": cookie})
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=502, detail=f"{_ERR_UPSTREAM_UNAVAILABLE}: {exc}"
-        ) from exc
-
-    if resp.status_code == 401:
-        raise HTTPException(status_code=401, detail="frigate session invalid")
-    if resp.status_code >= 400:
-        raise HTTPException(status_code=502, detail=_ERR_UPSTREAM_UNAVAILABLE)
-
-    _auth_cache[cookie] = now + _AUTH_CACHE_TTL_S
-
 
 def _known_cameras(conn: Any) -> set[str]:
     rows = conn.execute("SELECT DISTINCT camera FROM recordings").fetchall()
     return {row["camera"] for row in rows}
+
+
+def _bad_range(message: str) -> HTTPException:
+    return HTTPException(status_code=400, detail={"error": _ERR_BAD_RANGE, "message": message})
+
+
+def _require_window(start: float, end: float) -> None:
+    if not (end > start):
+        raise _bad_range("end must be > start")
+
+
+def _require_series(start: float, end: float, scale: float) -> None:
+    """Reject a window/scale pair whose series we refuse to materialise."""
+    _require_window(start, end)
+    if scale <= 0:
+        raise _bad_range("scale must be > 0")
+    if (end - start) / scale > MAX_MOTION_POINTS:
+        raise _bad_range(
+            f"requested range needs more than {MAX_MOTION_POINTS} points at scale={scale}; "
+            "widen scale or narrow the window"
+        )
+
+
+def _require_known_camera(settings: Any, camera: str) -> None:
+    conn = db.open_frigate_ro(settings.frigate.db_path)
+    try:
+        known = _known_cameras(conn)
+    finally:
+        conn.close()
+    if camera not in known:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
+        )
 
 
 @router.get("/capabilities")
@@ -141,8 +142,8 @@ async def capabilities(request: Request) -> dict[str, Any]:
 async def coverage(camera: str, start: float, end: float, request: Request) -> Any:
     """Recording coverage (§4.4) -- what Frigate actually recorded, read live
     from `frigate.db` so it never drifts from reality."""
-    await _require_frigate_auth(request)
     settings = request.app.state.settings
+    _require_window(start, end)
 
     conn = db.open_frigate_ro(settings.frigate.db_path)
     try:
@@ -177,12 +178,9 @@ async def scrub_coverage(camera: str, start: float, end: float, request: Request
     comparing the queried range against `retention_days` (both already in the
     response) -- no separate flag needed, per spec.
     """
-    await _require_frigate_auth(request)
     settings = request.app.state.settings
-    if end <= start:
-        raise HTTPException(
-            status_code=400, detail={"error": _ERR_BAD_RANGE, "message": "end must be > start"}
-        )
+    _require_window(start, end)
+    _require_known_camera(settings, camera)
 
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:
@@ -203,12 +201,9 @@ async def scrub_coverage(camera: str, start: float, end: float, request: Request
 async def scrub_sheets(camera: str, start: float, end: float, request: Request) -> Any:
     """Sheet index for a window (§4.3) -- content-addressed, immutable URLs
     keyed by (start, interval, count)."""
-    await _require_frigate_auth(request)
     settings = request.app.state.settings
-    if end <= start:
-        raise HTTPException(
-            status_code=400, detail={"error": _ERR_BAD_RANGE, "message": "end must be > start"}
-        )
+    _require_window(start, end)
+    _require_known_camera(settings, camera)
 
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:
@@ -218,7 +213,15 @@ async def scrub_sheets(camera: str, start: float, end: float, request: Request) 
 
     sheets = [
         {
-            "url": grid.sheet_url(camera, r["start_ts"], r["interval_s"], r["count"]),
+            # Extension comes from the row's own on-disk path so the advertised
+            # URL matches the bytes actually stored (jpeg vs webp).
+            "url": grid.sheet_url(
+                camera,
+                r["start_ts"],
+                r["interval_s"],
+                r["count"],
+                ext=Path(r["path"]).suffix,
+            ),
             "start": r["start_ts"],
             "interval": r["interval_s"],
             "cols": r["cols"],
@@ -238,7 +241,6 @@ async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
     -- every version of a still-filling sheet is its own immutable object, so
     the header is unconditional (no freshness reasoning exists anywhere in
     this path)."""
-    await _require_frigate_auth(request)
     settings = request.app.state.settings
     try:
         start, interval, count = grid.parse_sheet_spec(spec)
@@ -269,12 +271,19 @@ async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
 
 
 async def _fetch_and_aggregate_motion(
-    settings: Any, camera: str, start: float, end: float, scale: float
+    request: Request, camera: str, start: float, end: float, scale: float
 ) -> list[float]:
+    settings = request.app.state.settings
     fetch_scale = safe_fetch_scale(scale)
     try:
-        with FrigateClient(settings.frigate.base_url) as fc:
-            raw = fc.activity_motion(camera, start, end, fetch_scale)
+        raw = await async_activity_motion(
+            get_async_client(request.app),
+            settings.frigate.base_url,
+            camera,
+            start,
+            end,
+            fetch_scale,
+        )
     except FrigateAPIError:
         raw = []
 
@@ -294,13 +303,8 @@ async def motion(camera: str, start: float, end: float, scale: float, request: R
     `[start, end)`, zero-filled where there is genuinely no data. Fixes
     Frigate's two measured cliffs (all-zero wide scale, short-window
     truncation) by fetching at a safe scale and aggregating ourselves."""
-    await _require_frigate_auth(request)
-    settings = request.app.state.settings
-    if end <= start:
-        raise HTTPException(
-            status_code=400, detail={"error": _ERR_BAD_RANGE, "message": "end must be > start"}
-        )
-    values = await _fetch_and_aggregate_motion(settings, camera, start, end, scale)
+    _require_series(start, end, scale)
+    values = await _fetch_and_aggregate_motion(request, camera, start, end, scale)
     return {"start": start, "interval": scale, "values": values}
 
 
@@ -340,12 +344,8 @@ async def reel(
 ) -> Any:
     """One call per reel window (§4.5) -- collapses coverage + scrub buckets +
     motion + events into one response with one cache lifetime."""
-    await _require_frigate_auth(request)
     settings = request.app.state.settings
-    if end <= start:
-        raise HTTPException(
-            status_code=400, detail={"error": _ERR_BAD_RANGE, "message": "end must be > start"}
-        )
+    _require_series(start, end, motion_scale)
 
     conn = db.open_frigate_ro(settings.frigate.db_path)
     try:
@@ -373,7 +373,7 @@ async def reel(
         }
         for r in bucket_rows
     ]
-    motion_values = await _fetch_and_aggregate_motion(settings, camera, start, end, motion_scale)
+    motion_values = await _fetch_and_aggregate_motion(request, camera, start, end, motion_scale)
 
     body = {
         "queried": [start, end],
@@ -392,7 +392,6 @@ async def highlights(camera: str, request: Request, before: float, limit: int = 
     """Ranked index of interesting moments (§4.7), precomputed from `event`
     rows -- `reason` is a Frigate object label (person/car/package/...), the
     same vocabulary the client already maps to lanes."""
-    await _require_frigate_auth(request)
     settings = request.app.state.settings
     limit = max(1, min(limit, 100))
 

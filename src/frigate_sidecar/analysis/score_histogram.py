@@ -28,6 +28,13 @@ SCORE_BINS = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.01]
 
 
 def bucket(score: float) -> str:
+    """Label the 0.05-wide bin `score` falls in.
+
+    Anything under the lowest bin edge gets its own label rather than being
+    reported as `[0.45,0.50)`, which claimed a floor the score never had.
+    """
+    if score < SCORE_BINS[0]:
+        return f"<{SCORE_BINS[0]:.2f}"
     for hi in SCORE_BINS:
         if score < hi:
             return f"[{hi-0.05:.2f},{hi:.2f})"

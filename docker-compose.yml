@@ -9,12 +9,30 @@ services:
     # frigate.base_url to a name resolvable inside the container.
     network_mode: host
     volumes:
-      # Frigate inputs (read-only)
+      # Frigate inputs (read-only).
       - /opt/frigate/config.yml:/opt/frigate/config.yml:ro
-      - /opt/frigate/database/frigate.db:/opt/frigate/database/frigate.db:ro
-      # Sidecar runtime data (read-write)
+      # Mount the DB's DIRECTORY, not the file: Frigate runs SQLite in WAL mode,
+      # so frigate.db-wal and frigate.db-shm are part of the database. Binding
+      # frigate.db alone hides every committed-but-not-checkpointed write, and a
+      # read-only WAL open can fail outright for want of the -shm.
+      - /opt/frigate/database:/opt/frigate/database:ro
+      # Recordings, read-only -- the scrub generator's only input. Without this
+      # every segment lookup misses and generation silently produces nothing.
+      # Note `frigate.recordings_path` names the path that REPLACES
+      # `frigate.media_path` in `recordings.path`, not the recordings tree root
+      # (the `recordings/` segment already comes from the DB value).
+      - /mnt/frigate-storage/recordings:/mnt/frigate-storage/recordings:ro
+      # Sidecar runtime data (read-write): the sidecar DB and, when
+      # scrub.enabled, the sprite-sheet cache. Keep this on a different
+      # filesystem from the recordings mount above (spec §8.3).
       - /opt/frigate-sidecar/data:/data
       # Configuration
       - ./config/sidecar.yml:/etc/frigate-sidecar/sidecar.yml:ro
     environment:
       FRIGATE_SIDECAR_CONFIG: /etc/frigate-sidecar/sidecar.yml
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

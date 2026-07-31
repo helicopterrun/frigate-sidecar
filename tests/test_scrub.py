@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from frigate_sidecar import db
+from frigate_sidecar import auth, db
 from frigate_sidecar.config import FrigateSection, ScrubSection, Settings, SidecarSection
 from frigate_sidecar.routes import scrub as scrub_routes
 from frigate_sidecar.scrub import grid
@@ -53,10 +53,12 @@ CREATE TABLE event (
 
 
 def _skip_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _noop(request: object) -> None:
+    """Bypass the central Frigate-session gate (frigate_sidecar.auth)."""
+
+    async def _noop(app: object, cookie: str) -> None:
         return None
 
-    monkeypatch.setattr(scrub_routes, "_require_frigate_auth", _noop)
+    monkeypatch.setattr(auth, "validate_frigate_session", _noop)
 
 
 @pytest.fixture
@@ -126,10 +128,7 @@ def test_coverage_requires_auth(client: TestClient) -> None:
 
 
 def test_coverage_unknown_camera(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _skip_auth(request: object) -> None:
-        return None
-
-    monkeypatch.setattr(scrub_routes, "_require_frigate_auth", _skip_auth)
+    _skip_auth(monkeypatch)
     r = client.get(
         "/v1/coverage/not-a-camera",
         params={"start": 0, "end": time.time()},
@@ -142,10 +141,7 @@ def test_coverage_unknown_camera(client: TestClient, monkeypatch: pytest.MonkeyP
 def test_coverage_merges_intervals_and_splits_authoritative_from_latest(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def _skip_auth(request: object) -> None:
-        return None
-
-    monkeypatch.setattr(scrub_routes, "_require_frigate_auth", _skip_auth)
+    _skip_auth(monkeypatch)
 
     now = time.time()
     r = client.get(
@@ -171,10 +167,7 @@ def test_authoritative_through_survives_camera_outage(
     frozen, but authoritative_through keeps advancing at wall-clock rate --
     their divergence is the outage signal (docs spec §4.4 finding 4)."""
 
-    async def _skip_auth(request: object) -> None:
-        return None
-
-    monkeypatch.setattr(scrub_routes, "_require_frigate_auth", _skip_auth)
+    _skip_auth(monkeypatch)
 
     now = time.time()
     r1 = client.get(
@@ -411,3 +404,161 @@ def test_coverage_etag_304(client: TestClient, monkeypatch: pytest.MonkeyPatch) 
         headers={"cookie": "session=fake", "if-none-match": etag},
     )
     assert r2.status_code == 304
+
+
+def test_motion_rejects_an_unbounded_series(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`values` is materialised, so (end-start)/scale is an allocation lever.
+
+    Before this bound, scale=0.001 over a multi-day window asked for hundreds
+    of millions of buckets and the process died allocating them.
+    """
+    _skip_auth(monkeypatch)
+    now = time.time()
+    r = client.get(
+        "/v1/motion/doorbell",
+        params={"start": 0, "end": now, "scale": 0.001},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "bad_range"
+
+
+@pytest.mark.parametrize("scale", [0, -5])
+def test_motion_rejects_non_positive_scale(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, scale: float
+) -> None:
+    """These used to raise ValueError out of aggregate_motion -> a 500."""
+    _skip_auth(monkeypatch)
+    now = time.time()
+    r = client.get(
+        "/v1/motion/doorbell",
+        params={"start": now - 100, "end": now, "scale": scale},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "bad_range"
+
+
+def test_reel_rejects_an_unbounded_series(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _skip_auth(monkeypatch)
+    now = time.time()
+    r = client.get(
+        "/v1/reel/doorbell",
+        params={"start": 0, "end": now, "motion_scale": 0.5},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "bad_range"
+
+
+def test_coverage_rejects_inverted_range(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/v1/coverage was the one window endpoint that didn't check this."""
+    _skip_auth(monkeypatch)
+    now = time.time()
+    r = client.get(
+        "/v1/coverage/doorbell",
+        params={"start": now, "end": now - 100},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "bad_range"
+
+
+@pytest.mark.parametrize("path", ["coverage", "sheets"])
+def test_scrub_endpoints_report_an_unknown_camera(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """These returned an empty result for a camera that doesn't exist, while
+    /v1/coverage, /v1/reel and /v1/highlights all 404 `camera_unknown`."""
+    _skip_auth(monkeypatch)
+    now = time.time()
+    r = client.get(
+        f"/v1/scrub/not-a-camera/{path}",
+        params={"start": now - 100, "end": now},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"]["error"] == "camera_unknown"
+
+
+def test_sheet_index_advertises_the_stored_extension(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With scrub.format=webp the sheet on disk is a .webp; the advertised URL
+    (and hence the served content-type) has to match it."""
+    _skip_auth(monkeypatch)
+    cache_dir = client.app.state.settings.scrub.cache_dir  # type: ignore[attr-defined]
+    start = 1_785_380_400.0
+    rel = grid.sheet_rel_path("doorbell", 1.0, start, 24, ".webp")
+    out = cache_dir / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (10, 10)).save(out)
+
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        db.upsert_scrub_sheet(
+            conn, camera="doorbell", start_ts=start, interval_s=1.0, cols=12, rows=8,
+            cell_w=320, cell_h=180, count=24, path=rel, complete=False,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get(
+        "/v1/scrub/doorbell/sheets",
+        params={"start": start, "end": start + 200},
+        headers={"cookie": "session=fake"},
+    )
+    url = r.json()["sheets"][0]["url"]
+    assert url == "/v1/scrub/doorbell/sheet/1785380400-1.0-24.webp"
+
+    img = client.get(url, headers={"cookie": "session=fake"})
+    assert img.status_code == 200
+    assert img.headers["content-type"] == "image/webp"
+
+
+@pytest.mark.parametrize(
+    ("segments", "expect_sleep"),
+    [(5, True), (120, False)],
+)
+def test_generation_loop_skips_the_idle_wait_while_catching_up(
+    monkeypatch: pytest.MonkeyPatch, segments: int, expect_sleep: bool
+) -> None:
+    """A cold start has days of history behind it; sleeping the full interval
+    after a cycle that used its whole budget leaves most of the wall-clock idle.
+    The live edge only ever needs a handful of segments, so steady state is
+    unaffected."""
+    import asyncio
+
+    from frigate_sidecar import server
+
+    settings = Settings(scrub=ScrubSection(generate_interval_s=60.0, max_segments_per_cycle=120))
+    app = type("_App", (), {"state": type("_S", (), {"settings": settings})})()
+
+    sleeps: list[float] = []
+    cycles = 0
+
+    async def _fake_cycle(_settings: object, *, now: float) -> list[dict[str, object]]:
+        nonlocal cycles
+        cycles += 1
+        if cycles > 2:
+            raise asyncio.CancelledError
+        return [{"camera": "doorbell", "segments": segments}]
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("frigate_sidecar.scrub.generator.generate_cycle", _fake_cycle)
+    monkeypatch.setattr(server.asyncio, "sleep", _fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(server._scrub_generation_loop(app))  # type: ignore[arg-type]
+
+    assert sleeps, "loop should always yield"
+    assert (sleeps[0] == 60.0) is expect_sleep

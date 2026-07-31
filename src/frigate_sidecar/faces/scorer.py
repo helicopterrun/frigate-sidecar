@@ -42,8 +42,8 @@ class FacesUnavailable(RuntimeError):
 
 def _require_cv2() -> tuple[Any, Any]:
     try:
-        import cv2  # type: ignore[import-not-found]
-        import numpy as np  # type: ignore[import-not-found]
+        import cv2
+        import numpy as np
     except ImportError as exc:
         raise FacesUnavailable(
             'cv2 / numpy not installed. Install with `pip install "frigate-sidecar[faces]"`.'
@@ -172,6 +172,9 @@ def scan(settings: Settings) -> dict[str, int]:
         # Frigate down: we can still score + record, just can't promote this run.
         pass
 
+    # One client for the whole scan: a promote-heavy run used to build (and
+    # tear down) a fresh connection pool per crop.
+    promote_client = FrigateClient(settings.frigate.base_url) if face.auto_promote else None
     conn = open_sidecar(settings.sidecar.db_path)
     try:
         existing = {
@@ -205,10 +208,9 @@ def scan(settings: Settings) -> dict[str, int]:
 
             decision = "pending"
             decided_at: str | None = None
-            if eligible and face.auto_promote and lib is not None:
+            if eligible and promote_client is not None and lib is not None:
                 try:
-                    with FrigateClient(settings.frigate.base_url) as fc:
-                        fc.train_face(lib, fn)
+                    promote_client.train_face(lib, fn)
                     decision = "auto_promoted"
                     decided_at = _now()
                     lib_counts[lib] = lib_counts.get(lib, 0) + 1
@@ -246,6 +248,8 @@ def scan(settings: Settings) -> dict[str, int]:
         conn.commit()
     finally:
         conn.close()
+        if promote_client is not None:
+            promote_client.close()
     return summary
 
 
