@@ -228,6 +228,10 @@ def aged_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
             # segment 2 into the recent window.
             aged_after_h=5.0 / 3600.0,
             retention_days=4, sheet_cols=4, sheet_rows=3,
+            # This fixture fakes a 30s GOP to force the full-decode path, which
+            # is exactly what cadence-matching declines to do; keep the two
+            # configured tiers so the thinning machinery is what's under test.
+            match_keyframe_cadence=False,
         ),
     )
 
@@ -998,3 +1002,142 @@ def test_backfill_stops_at_its_wall_clock_budget(
     assert not backfilled, "a spent time budget must skip backfill entirely"
     # The live edge still ran for every camera -- it is never the thing skipped.
     assert all(r["segments"] > 0 for r in results)
+
+
+# ----- Cadence matching: don't full-decode what the source can't provide -----
+
+
+def _settings_with_gop(tmp_path: Path, **scrub_kw: object) -> Settings:
+    return Settings(
+        frigate=FrigateSection(config_path=tmp_path / "cfg.yml", db_path=tmp_path / "f.db"),
+        sidecar=SidecarSection(db_path=tmp_path / "s.db"),
+        scrub=ScrubSection(
+            recent_interval_s=1.0, aged_interval_s=5.0, aged_after_h=24.0,
+            retention_days=4, **scrub_kw,  # type: ignore[arg-type]
+        ),
+    )
+
+
+def test_a_fine_gop_keeps_both_configured_tiers(tmp_path: Path) -> None:
+    """The Dahua cameras here emit a keyframe a second, so 1 fps is free."""
+    now = 1_800_000_000.0
+    plan = generator.tier_plan(_settings_with_gop(tmp_path), now, gop_s=1.0)
+    assert [round(p[0], 2) for p in plan] == [1.0, 5.0]
+    assert plan[0][2] == now  # recent tier runs to the live edge
+
+
+def test_a_coarse_gop_generates_at_the_keyframe_cadence(tmp_path: Path) -> None:
+    """UniFi Protect emits one every 5s and exposes no way to change it.
+
+    Forcing 1 fps against that means decoding every frame -- ~5x the cost -- to
+    synthesise stills the encoder never made distinct. On the reference
+    deployment three such cameras were ~70% of the generator's total work.
+    """
+    now = 1_800_000_000.0
+    plan = generator.tier_plan(_settings_with_gop(tmp_path), now, gop_s=5.0)
+    # Recent and aged would describe the same cadence, so they collapse into one
+    # tier covering the whole retention window.
+    assert len(plan) == 1
+    interval, start, end = plan[0]
+    assert interval == 5.0
+    assert end == now
+    assert now - start == pytest.approx(4 * 86400)
+
+
+def test_a_moderately_coarse_gop_still_thins(tmp_path: Path) -> None:
+    now = 1_800_000_000.0
+    plan = generator.tier_plan(_settings_with_gop(tmp_path), now, gop_s=2.0)
+    assert [p[0] for p in plan] == [2.0, 5.0]
+
+
+def test_cadence_matching_can_be_turned_off(tmp_path: Path) -> None:
+    """Off means force the configured interval and pay the decode."""
+    now = 1_800_000_000.0
+    plan = generator.tier_plan(
+        _settings_with_gop(tmp_path, match_keyframe_cadence=False), now, gop_s=5.0
+    )
+    assert [p[0] for p in plan] == [1.0, 5.0]
+
+
+def test_a_gop_within_tolerance_is_not_treated_as_coarser(tmp_path: Path) -> None:
+    """1.2s against a 1.0s target is inside _GOP_TOLERANCE: keyframe extraction
+    already lands close enough, and cell assignment's drift check catches the
+    rest."""
+    now = 1_800_000_000.0
+    plan = generator.tier_plan(_settings_with_gop(tmp_path), now, gop_s=1.2)
+    assert plan[0][0] == 1.0
+
+
+def test_unknown_gop_falls_back_to_the_configured_interval(tmp_path: Path) -> None:
+    now = 1_800_000_000.0
+    plan = generator.tier_plan(_settings_with_gop(tmp_path), now, gop_s=None)
+    assert [p[0] for p in plan] == [1.0, 5.0]
+
+
+def test_coarse_gop_camera_uses_the_cheap_extraction_path(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: a 5s-GOP camera must never reach extract_fps."""
+    env = long_history_env.model_copy(
+        update={
+            "scrub": long_history_env.scrub.model_copy(
+                update={"recent_interval_s": 1.0, "aged_interval_s": 5.0, "aged_after_h": 24.0}
+            )
+        }
+    )
+
+    async def _coarse_gop(seg_path: Path, **kw: object) -> float:
+        return 5.0
+
+    async def _boom(*a: object, **k: object) -> list[Path]:
+        raise AssertionError("full decode used for a source that can't cheaply provide it")
+
+    monkeypatch.setattr(ffmpeg_io, "probe_gop_seconds", _coarse_gop)
+    monkeypatch.setattr(ffmpeg_io, "extract_fps", _boom)
+    monkeypatch.setattr(
+        ffmpeg_io, "extract_keyframes_with_pts",
+        _fake_extract(lambda seg: [0.0, 5.0]),  # one keyframe every 5s
+    )
+
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        result = asyncio.run(
+            generator.generate_live_edge(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_000.0 + 86400.0, gop_cache=generator.GopCache(),
+                sem=asyncio.Semaphore(3),
+            )
+        )
+        buckets = db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+    finally:
+        conn.close()
+
+    assert result["new_frames"] > 0
+    assert {b["interval_s"] for b in buckets} == {5.0}
+
+
+@pytest.mark.parametrize(
+    ("measured", "expected"),
+    [(4.995056, 5.0), (5.001, 5.0), (5.0, 5.0), (2.24, 2.0), (3.3, 3.5), (30.02, 30.0)],
+)
+def test_derived_interval_is_snapped_to_a_stable_grid(
+    tmp_path: Path, measured: float, expected: float
+) -> None:
+    """A measured GOP is a median of observed spacings, so it arrives as
+    4.995056 rather than 5.0 -- and the interval is part of every bucket key,
+    sheet filename and cache directory name. Left raw, that noise lands in the
+    URLs and a slightly different measurement later strands everything
+    generated under the previous value as its own tier."""
+    settings = _settings_with_gop(tmp_path)
+    plan = generator.tier_plan(settings, 1_800_000_000.0, gop_s=measured)
+    assert plan[0][0] == expected
+
+
+def test_small_measurement_noise_does_not_create_a_new_tier(tmp_path: Path) -> None:
+    settings = _settings_with_gop(tmp_path)
+    now = 1_800_000_000.0
+    intervals = {
+        generator.tier_plan(settings, now, gop_s=g)[0][0]
+        for g in (4.98, 4.995056, 5.0, 5.02, 5.11)
+    }
+    assert intervals == {5.0}, f"same source resolved to several tiers: {intervals}"

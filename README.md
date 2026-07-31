@@ -194,6 +194,17 @@ Two settings sections back the new features:
   `:8971`), used only by the reverse proxy for app traffic. Kept separate from
   `frigate.base_url` (unauthenticated, used for the sidecar's own
   server-to-server calls) — do not point both at the same port.
+- `scrub.match_keyframe_cadence` (default on) — generate a camera at its own
+  keyframe cadence when that is coarser than `recent_interval_s`. A source whose
+  GOP is longer than the target interval can only reach that interval by
+  decoding every frame, at roughly 5× the cost of keyframe extraction, to
+  synthesise stills the encoder never made distinct. On the reference deployment
+  the three UniFi Protect cameras (5s GOP, against 1s on the seven Dahua ones)
+  were ~70% of the generator's total work while being 30% of the fleet; matching
+  their cadence cut cycle time from ~500s to ~150s. The interval travels per
+  bucket in `interval`, so a camera generating at 5s is contract-compatible — it
+  simply yields a still every 5s while scrubbing. Turn it off to force the
+  configured interval everywhere and pay the decode.
 - `frigate.recordings_path` — the host-side path that **replaces**
   `frigate.media_path` in `recordings.path`. Rows read
   `<media_path>/recordings/<date>/...`, so the `recordings/` segment comes from
