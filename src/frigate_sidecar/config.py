@@ -157,14 +157,28 @@ class ScrubSection(BaseModel):
     # sampled serially (cell assignment is order-dependent), so today this only
     # matters if a CLI backfill runs alongside the in-process generator.
     ffmpeg_concurrency: int = 3
-    # Work budget per camera per tier per cycle. On a cold start there is no
-    # resume point, so a tier's window is the whole retention horizon: without a
-    # cap the very first cycle tries to sample every segment in it (days of
-    # ffmpeg on a multi-camera deployment) before the loop comes up for air.
-    # 120 x 10s segments = 20 min of footage per camera per cycle, well above
-    # the ~6 segments/cycle the live edge actually produces, so this only ever
-    # bites while catching up.
-    max_segments_per_cycle: int = 120
+    # Backfill allowance for a whole cycle, split across cameras. Without any
+    # cap the first cycle on a cold cache tries to sample the whole retention
+    # horizon -- days of ffmpeg -- before the loop comes up for air.
+    backfill_segments_per_cycle: int = 120
+    # Wall-clock ceiling on the backfill phase. The segment count alone can't
+    # bound the cycle, because how long a segment takes depends on the box; and
+    # an over-long cycle delays the next live-edge pass, which is what let the
+    # edge slip behind in the first place. Holding the edge for ten cameras at
+    # 1 fps already costs most of a core, so backfill takes genuine leftovers
+    # and no more.
+    backfill_time_budget_s: float = 20.0
+    # Cap on the live-edge pass, per camera per cycle. Sized to cover the whole
+    # lookback in one pass (900s / 10s segments), so a camera reaches `now` in a
+    # single cycle rather than converging over several: a fixed small cap loses
+    # ground whenever the cycle takes longer than the footage it generated, which
+    # is exactly what happens once backfill shares the cycle.
+    live_edge_segments: int = 90
+    # How far back the live-edge pass will resume from. A cache that is further
+    # behind than this jumps forward to the edge and leaves the gap for
+    # backfill: crawling up from a day ago meant nothing recent was ever
+    # generated, which is the one window clients actually scrub.
+    live_edge_lookback_s: float = 900.0
 
     @field_validator("format")
     @classmethod

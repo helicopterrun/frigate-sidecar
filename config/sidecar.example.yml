@@ -102,14 +102,16 @@ scrub:
   # sampled serially (cell assignment is order-dependent), so this only bites
   # when a CLI backfill runs alongside the in-process generator.
   ffmpeg_concurrency: 3
-  # Work budget per camera per tier per cycle. A cold start has no resume point,
-  # so the tier window is the whole retention horizon -- uncapped, the first
-  # cycle tries to sample every segment in it (days of ffmpeg across a
-  # multi-camera deployment) in one go. 120 x 10s segments = 20 min of footage
-  # per camera per cycle, far above the ~6 segments/cycle the live edge
-  # produces, so it only bites while catching up. Raise it to backfill faster,
-  # or narrow `cameras` above.
-  max_segments_per_cycle: 120
+  # The live edge is generated first, for every camera, out of its own budget
+  # (§5.4) -- the reel opens at `now`, so that is where sprites have to exist.
+  # Only what's left goes to backfill, which fills in behind it.
+  live_edge_segments: 30       # per camera per cycle; the edge needs ~6
+  live_edge_lookback_s: 900.0  # a staler cache jumps to the edge, gap behind
+  # Backfill allowance for the WHOLE cycle, split across cameras. Bounding the
+  # cycle rather than each camera keeps the next live-edge pass punctual; an
+  # over-long cycle makes the edge slip again. Raise to backfill faster at the
+  # cost of a longer cycle, or narrow `cameras` above.
+  backfill_segments_per_cycle: 120
 
 # Transparent reverse proxy to Frigate's authenticated origin, giving the app
 # one base URL. See docs/scrub-cache-and-proxy-spec.md §6.
