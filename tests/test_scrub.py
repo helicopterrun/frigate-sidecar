@@ -521,3 +521,44 @@ def test_sheet_index_advertises_the_stored_extension(
     img = client.get(url, headers={"cookie": "session=fake"})
     assert img.status_code == 200
     assert img.headers["content-type"] == "image/webp"
+
+
+@pytest.mark.parametrize(
+    ("segments", "expect_sleep"),
+    [(5, True), (120, False)],
+)
+def test_generation_loop_skips_the_idle_wait_while_catching_up(
+    monkeypatch: pytest.MonkeyPatch, segments: int, expect_sleep: bool
+) -> None:
+    """A cold start has days of history behind it; sleeping the full interval
+    after a cycle that used its whole budget leaves most of the wall-clock idle.
+    The live edge only ever needs a handful of segments, so steady state is
+    unaffected."""
+    import asyncio
+
+    from frigate_sidecar import server
+
+    settings = Settings(scrub=ScrubSection(generate_interval_s=60.0, max_segments_per_cycle=120))
+    app = type("_App", (), {"state": type("_S", (), {"settings": settings})})()
+
+    sleeps: list[float] = []
+    cycles = 0
+
+    async def _fake_cycle(_settings: object, *, now: float) -> list[dict[str, object]]:
+        nonlocal cycles
+        cycles += 1
+        if cycles > 2:
+            raise asyncio.CancelledError
+        return [{"camera": "doorbell", "segments": segments}]
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("frigate_sidecar.scrub.generator.generate_cycle", _fake_cycle)
+    monkeypatch.setattr(server.asyncio, "sleep", _fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(server._scrub_generation_loop(app))  # type: ignore[arg-type]
+
+    assert sleeps, "loop should always yield"
+    assert (sleeps[0] == 60.0) is expect_sleep

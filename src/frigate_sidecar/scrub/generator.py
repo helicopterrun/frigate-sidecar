@@ -107,9 +107,15 @@ async def _sample_segment(
                 seg_path, work_dir, cell_w=cell_w, cell_h=cell_h
             )
             n = min(len(pts), len(jpgs))
-            return [
+            frames = [
                 grid.Frame(timestamp=seg_start + pts[i], path=str(jpgs[i])) for i in range(n)
             ]
+            # Keyframes are only guaranteed to be no *sparser* than the GOP, so
+            # a tier whose interval is several GOPs wide gets several frames per
+            # cell. Thin them to the target cadence here rather than handing
+            # colliding frames to cell assignment, which can only respond by
+            # splitting the bucket.
+            return grid.decimate_to_grid(frames, interval_s)
         jpgs = await ffmpeg_io.extract_fps(
             seg_path, work_dir, interval_s, cell_w=cell_w, cell_h=cell_h
         )
@@ -324,9 +330,40 @@ async def _generate_tier(
     ).fetchone()
     bucket_start = open_bucket["start_ts"] if open_bucket else None
     bucket_generated_through = open_bucket["generated_through"] if open_bucket else since
+    # Grid slot of the newest frame actually stored, or None when nothing has
+    # been generated for this tier yet. Distinct from `bucket_generated_through`,
+    # which falls back to the window edge -- a moment no frame sits behind, and
+    # so not a slot anything should be excluded for.
+    last_slot: int | None = (
+        round(open_bucket["generated_through"] / interval_s) if open_bucket else None
+    )
 
     new_frames = 0
     missing_segments = 0
+    # Sheets touched this cycle, with their declared cell count. Publishing is
+    # deferred to sheet completion or the end of the cycle: every distinct count
+    # is its own immutable object (§4.3), so publishing once per *segment* wrote
+    # a full sheet image for every couple of cells -- ~30x the bytes of the sheet
+    # it was building, all of it superseded and all of it kept until retention.
+    pending_sheets: dict[float, int] = {}
+    dirty_sheets: set[float] = set()
+
+    async def _flush_sheet(sheet_start: float, count: int) -> None:
+        complete = count >= cells_per_sheet
+        rel = await asyncio.to_thread(
+            _publish_sheet_version,
+            scrub.cache_dir, camera, interval_s, sheet_start,
+            count, cols, rows, cell_w, cell_h, scrub.format,
+        )
+        db.upsert_scrub_sheet(
+            sidecar_conn, camera=camera, start_ts=sheet_start, interval_s=interval_s,
+            cols=cols, rows=rows, cell_w=cell_w, cell_h=cell_h,
+            count=count, path=rel, complete=complete,
+        )
+        sidecar_conn.commit()
+        if complete:
+            _drop_cells_dir(scrub.cache_dir, camera, interval_s, sheet_start)
+
     for row in rows_:
         seg_path = map_recording_path(
             row["path"], settings.frigate.media_path, settings.frigate.recordings_path
@@ -349,10 +386,15 @@ async def _generate_tier(
             except ffmpeg_io.FfmpegError as exc:
                 logger.warning("scrub: sampling failed for %s: %s", seg_path, exc)
                 continue
+            # Skip anything already represented: compare *grid slots*, not raw
+            # timestamps. Each segment is decimated independently, so a slot
+            # straddling a segment boundary gets a candidate from both sides,
+            # and handing both to cell assignment forces a bucket split at
+            # every boundary.
             frames = [
                 f
                 for f in frames
-                if f.timestamp > bucket_generated_through - interval_s
+                if (last_slot is None or round(f.timestamp / interval_s) > last_slot)
                 and window_start <= f.timestamp < window_end
             ]
             if not frames:
@@ -392,36 +434,32 @@ async def _generate_tier(
                         by_sheet.setdefault(sheet_idx_start, []).append(local)
 
                     for sheet_start, cell_list in by_sheet.items():
-                        existing = sidecar_conn.execute(
-                            "SELECT COALESCE(MAX(count),0) AS c FROM scrub_sheets "
-                            "WHERE camera=? AND interval_s=? AND start_ts=?",
-                            (camera, interval_s, sheet_start),
-                        ).fetchone()
-                        cur_count = int(existing["c"]) if existing else 0
-                        if cur_count >= cells_per_sheet:
+                        if sheet_start not in pending_sheets:
+                            existing = sidecar_conn.execute(
+                                "SELECT COALESCE(MAX(count),0) AS c FROM scrub_sheets "
+                                "WHERE camera=? AND interval_s=? AND start_ts=?",
+                                (camera, interval_s, sheet_start),
+                            ).fetchone()
+                            pending_sheets[sheet_start] = int(existing["c"]) if existing else 0
+                        if pending_sheets[sheet_start] >= cells_per_sheet:
                             # Already sealed: its cell store is gone, so
                             # re-tiling would publish a blank sheet over it.
                             continue
                         _persist_cells(scrub.cache_dir, camera, interval_s, sheet_start, cell_list)
                         new_count = min(
-                            cells_per_sheet, max(cur_count, max(a.idx for a in cell_list) + 1)
+                            cells_per_sheet,
+                            max(pending_sheets[sheet_start], max(a.idx for a in cell_list) + 1),
                         )
-                        complete = new_count >= cells_per_sheet
-                        rel = await asyncio.to_thread(
-                            _publish_sheet_version,
-                            scrub.cache_dir, camera, interval_s, sheet_start,
-                            new_count, cols, rows, cell_w, cell_h, scrub.format,
-                        )
-                        db.upsert_scrub_sheet(
-                            sidecar_conn, camera=camera, start_ts=sheet_start,
-                            interval_s=interval_s, cols=cols, rows=rows,
-                            cell_w=cell_w, cell_h=cell_h,
-                            count=new_count, path=rel, complete=complete,
-                        )
-                        if complete:
-                            _drop_cells_dir(scrub.cache_dir, camera, interval_s, sheet_start)
+                        pending_sheets[sheet_start] = new_count
+                        dirty_sheets.add(sheet_start)
+                        if new_count >= cells_per_sheet:
+                            # Final version of this sheet: nothing more can be
+                            # added, so publish now and let the cells go.
+                            await _flush_sheet(sheet_start, new_count)
+                            dirty_sheets.discard(sheet_start)
 
                     bucket_generated_through = max(a.timestamp for a in result.accepted)
+                    last_slot = round(bucket_generated_through / interval_s)
                     db.upsert_scrub_bucket(
                         sidecar_conn, camera=camera, start_ts=bucket_start,
                         end_ts=bucket_generated_through + interval_s, interval_s=interval_s,
@@ -443,6 +481,10 @@ async def _generate_tier(
                     pending = result.remaining
                 else:
                     pending = []
+
+    # One version per still-filling sheet per cycle, not per segment.
+    for sheet_start in sorted(dirty_sheets):
+        await _flush_sheet(sheet_start, pending_sheets[sheet_start])
 
     if missing_segments:
         logger.warning(

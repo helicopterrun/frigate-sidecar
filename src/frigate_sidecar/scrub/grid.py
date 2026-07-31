@@ -120,6 +120,32 @@ class AssignResult:
     remaining: list[Frame]
 
 
+def decimate_to_grid(frames: list[Frame], interval: float) -> list[Frame]:
+    """Keep at most one frame per `interval`-wide slot, nearest to the slot.
+
+    Keyframe-only decode gives whatever cadence the encoder chose, which is a
+    *lower* bound on density, not a match: on this deployment Frigate emits a
+    keyframe every ~1s, so the aged tier's 5s grid received five frames per
+    cell. `assign_cells` then (correctly) refused to overwrite a cell and split
+    the bucket -- on essentially every frame, so each bucket held one cell and
+    each sheet was a full 96-cell image with a single frame in it.
+
+    Slots are anchored to the absolute epoch grid (multiples of `interval`)
+    rather than to the first frame, so every segment and every bucket agrees on
+    where the grid points are and no drift accumulates across a long run.
+    """
+    if interval <= 0:
+        raise ValueError("interval must be positive")
+    best: dict[int, Frame] = {}
+    for frame in frames:
+        k = round(frame.timestamp / interval)
+        target = k * interval
+        current = best.get(k)
+        if current is None or abs(frame.timestamp - target) < abs(current.timestamp - target):
+            best[k] = frame
+    return [best[k] for k in sorted(best)]
+
+
 def assign_cells(
     frames: list[Frame],
     bucket_start: float,

@@ -181,3 +181,66 @@ def test_sheet_filename_carries_the_format_extension() -> None:
     )
     # Round-trips through the parser the route uses.
     assert grid.parse_sheet_spec("1785380400-1.0-96.webp") == (1785380400.0, 1.0, 96)
+
+
+def test_decimate_thins_dense_keyframes_to_the_target_cadence() -> None:
+    """Keyframe decode gives the encoder's cadence, not the tier's: with a 1s
+    GOP and a 5s aged tier, five frames arrived per cell. assign_cells could
+    only answer by splitting, so every bucket held one cell and every sheet was
+    a 96-cell image containing a single frame."""
+    interval = 5.0
+    frames = [grid.Frame(timestamp=1000.0 + i, path=f"f{i}.jpg") for i in range(11)]
+    kept = grid.decimate_to_grid(frames, interval)
+
+    assert [f.timestamp for f in kept] == [1000.0, 1005.0, 1010.0]
+    # And the thinned series now assigns to contiguous cells without splitting.
+    result = grid.assign_cells(kept, kept[0].timestamp, interval)
+    assert result.split_at is None
+    assert [a.idx for a in result.accepted] == [0, 1, 2]
+
+
+def test_decimate_picks_the_frame_nearest_each_grid_point() -> None:
+    interval = 5.0
+    frames = [
+        grid.Frame(timestamp=1000.0, path="a.jpg"),
+        grid.Frame(timestamp=1004.0, path="b.jpg"),  # 1s from the 1005 grid point
+        grid.Frame(timestamp=1006.0, path="c.jpg"),  # also 1s -- first wins
+        grid.Frame(timestamp=1010.2, path="d.jpg"),
+    ]
+    kept = grid.decimate_to_grid(frames, interval)
+    assert [f.path for f in kept] == ["a.jpg", "b.jpg", "d.jpg"]
+
+
+def test_decimate_is_a_no_op_when_frames_are_already_at_cadence() -> None:
+    interval = 1.0
+    frames = [grid.Frame(timestamp=1000.0 + i, path=f"f{i}.jpg") for i in range(10)]
+    assert grid.decimate_to_grid(frames, interval) == frames
+
+
+def test_decimate_keeps_sparse_frames_untouched() -> None:
+    """A gap must survive decimation so the bucket still splits on it."""
+    interval = 1.0
+    frames = [
+        grid.Frame(timestamp=1000.0, path="a.jpg"),
+        grid.Frame(timestamp=1001.0, path="b.jpg"),
+        grid.Frame(timestamp=1030.0, path="c.jpg"),
+    ]
+    assert grid.decimate_to_grid(frames, interval) == frames
+
+
+def test_decimate_uses_an_absolute_grid_so_segments_agree() -> None:
+    """Anchoring on each segment's own first frame would let the achieved
+    cadence drift away from the grid over a long run. Every kept frame stays
+    within interval/2 of its slot, whichever segment produced it."""
+    interval = 5.0
+    seg_a = [grid.Frame(timestamp=1000.0 + i, path=f"a{i}.jpg") for i in range(10)]
+    seg_b = [grid.Frame(timestamp=1010.0 + i, path=f"b{i}.jpg") for i in range(10)]
+    kept = grid.decimate_to_grid(seg_a, interval) + grid.decimate_to_grid(seg_b, interval)
+    for f in kept:
+        assert abs(f.timestamp - round(f.timestamp / interval) * interval) <= interval / 2
+
+    # A segment boundary can still put two frames in one slot (each segment is
+    # decimated on its own); the generator drops the repeat by slot -- see
+    # test_scrub_generator.test_aged_tier_fills_whole_sheets.
+    slots = [round(f.timestamp / interval) for f in kept]
+    assert sorted(slots) == slots

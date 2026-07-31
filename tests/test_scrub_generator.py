@@ -566,3 +566,114 @@ def test_cycle_work_is_budgeted(env: Settings, monkeypatch: pytest.MonkeyPatch) 
         joined.close()
 
     assert result["segments"] == 3, "one cycle must stop at the budget, not drain the window"
+
+
+def test_dense_keyframes_fill_whole_sheets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduces what a 5s tier did against Frigate's ~1s GOP on live footage.
+
+    Keyframe decode returns the encoder's cadence, so five frames arrived per
+    5s cell. Cell assignment could only refuse to overwrite and split, so every
+    bucket held one cell and every sheet was a 96-cell image with one frame in
+    it -- a 96x disk amplification that covered 4 minutes of footage in 236
+    sheets before it was caught.
+    """
+    frigate_db = tmp_path / "frigate.db"
+    conn = sqlite3.connect(frigate_db)
+    conn.executescript(RECORDINGS_SCHEMA)
+    base = 1_800_000_000.0
+    for i in range(12):  # 12 contiguous 10s segments = 2 minutes
+        conn.execute(
+            "INSERT INTO recordings VALUES (?, 'doorbell', ?, ?, ?, 10.0, 5.0)",
+            (f"s{i}", f"/media/frigate/{i}.mp4", base + i * 10, base + (i + 1) * 10),
+        )
+    conn.commit()
+    conn.close()
+
+    recordings_root = tmp_path / "recordings"
+    recordings_root.mkdir()
+    for i in range(12):
+        (recordings_root / f"{i}.mp4").write_bytes(b"fake")
+
+    settings = Settings(
+        frigate=FrigateSection(
+            base_url="http://frigate.test:5000", config_path=tmp_path / "cfg.yml",
+            db_path=frigate_db, media_path=Path("/media/frigate"),
+            recordings_path=recordings_root,
+        ),
+        sidecar=SidecarSection(db_path=tmp_path / "sidecar.db", bind_port=5001),
+        scrub=ScrubSection(
+            enabled=True, cameras=["doorbell"], cache_dir=tmp_path / "scrub",
+            recent_interval_s=5.0, aged_after_h=9999.0,  # one tier, 5s cadence
+            sheet_cols=4, sheet_rows=3,  # 12-cell sheets = 60s of footage each
+        ),
+    )
+
+    async def _fake_probe_gop(seg_path: Path, **kw: object) -> float:
+        return 1.0  # Frigate's measured GOP: well under the 5s target
+
+    async def _fake_probe_pts(seg_path: Path, **kw: object) -> list[float]:
+        return [float(i) for i in range(10)]  # a keyframe every second
+
+    async def _fake_extract_keyframes(seg_path: Path, out_dir: Path, **kw: object) -> list[Path]:
+        paths = []
+        for i in range(10):
+            p = out_dir / f"{i:06d}.jpg"
+            _make_jpg(p)
+            paths.append(p)
+        return paths
+
+    monkeypatch.setattr(ffmpeg_io, "probe_gop_seconds", _fake_probe_gop)
+    monkeypatch.setattr(ffmpeg_io, "probe_keyframe_pts", _fake_probe_pts)
+    monkeypatch.setattr(ffmpeg_io, "extract_keyframes", _fake_extract_keyframes)
+
+    joined = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_camera(
+                settings, "doorbell", frigate_conn=joined, sidecar_conn=joined,
+                now=base + 120, gop_cache=generator.GopCache(), sem=asyncio.Semaphore(3),
+            )
+        )
+        buckets = db.list_scrub_buckets(joined, "doorbell", 0, 1_900_000_000)
+        sheets = db.list_scrub_sheets(joined, "doorbell", 0, 1_900_000_000)
+    finally:
+        joined.close()
+
+    # 2 minutes at 5s is ~25 grid points: two full 12-cell sheets and the start
+    # of a third -- all in ONE unbroken bucket, not one bucket per frame.
+    assert len(buckets) == 1, f"cadence mismatch split the bucket {len(buckets)} ways"
+    counts = [s["count"] for s in sorted(sheets, key=lambda r: r["start_ts"])]
+    assert counts[:-1] == [12] * (len(sheets) - 1), f"sheets left unfilled: {counts}"
+    assert sum(counts) >= 24, f"expected ~25 frames over 2 minutes at 5s, got {sum(counts)}"
+    # And the frames really are 5s apart across the whole run.
+    span = buckets[0]["end_ts"] - buckets[0]["start_ts"]
+    assert span == pytest.approx(120.0, abs=5.0)
+
+
+def test_a_filling_sheet_is_published_once_per_cycle(env: Settings) -> None:
+    """Every distinct count is its own immutable object (§4.3), so publishing
+    per *segment* wrote a whole sheet image for each handful of cells -- tens of
+    megabytes of superseded versions per 600 KB sheet, all kept until retention.
+    """
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_camera(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, gop_cache=generator.GopCache(),
+                sem=asyncio.Semaphore(3),
+            )
+        )
+        rows = conn.execute(
+            "SELECT start_ts, COUNT(*) versions FROM scrub_sheets GROUP BY start_ts"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # Two 10s segments, 12-cell sheets: the first sheet seals inside the cycle,
+    # the second is still filling. Each is written exactly once.
+    assert [r["versions"] for r in rows] == [1, 1], "a sheet was republished mid-cycle"
+    on_disk = sorted(p.name for p in (env.scrub.cache_dir / "doorbell" / "1").glob("*.jpg"))
+    assert len(on_disk) == 2, f"superseded sheet images left on disk: {on_disk}"

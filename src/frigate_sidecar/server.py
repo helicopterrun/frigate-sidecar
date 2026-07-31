@@ -55,10 +55,17 @@ async def _scrub_generation_loop(app: FastAPI) -> None:
 
     settings: Settings = app.state.settings
     interval = settings.scrub.generate_interval_s
+    budget = settings.scrub.max_segments_per_cycle
     next_prune = time.time() + settings.scrub.prune_interval_s
     while True:
+        caught_up = True
         try:
-            await generate_cycle(settings, now=time.time())
+            results = await generate_cycle(settings, now=time.time())
+            # A camera that used its whole per-cycle budget still has history
+            # behind it. Sleeping the full interval anyway makes a cold backfill
+            # spend most of its wall-clock idle; the live edge only ever needs a
+            # handful of segments, so this changes nothing in steady state.
+            caught_up = not any(r.get("segments", 0) >= budget for r in results)
         except Exception:
             logger.exception("scrub: generation cycle failed")
         if time.time() >= next_prune:
@@ -69,7 +76,10 @@ async def _scrub_generation_loop(app: FastAPI) -> None:
                     logger.info("scrub: retention prune %s", result)
             except Exception:
                 logger.exception("scrub: retention prune failed")
-        await asyncio.sleep(interval)
+        if caught_up:
+            await asyncio.sleep(interval)
+        else:
+            await asyncio.sleep(0)  # yield, then keep catching up
 
 
 def _cache_on_separate_filesystem(cache_dir: Path, recordings_path: Path) -> bool:
