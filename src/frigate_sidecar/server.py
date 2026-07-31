@@ -55,17 +55,16 @@ async def _scrub_generation_loop(app: FastAPI) -> None:
 
     settings: Settings = app.state.settings
     interval = settings.scrub.generate_interval_s
-    budget = settings.scrub.max_segments_per_cycle
     next_prune = time.time() + settings.scrub.prune_interval_s
     while True:
         caught_up = True
         try:
             results = await generate_cycle(settings, now=time.time())
-            # A camera that used its whole per-cycle budget still has history
+            # A camera that spent its whole backfill share still has history
             # behind it. Sleeping the full interval anyway makes a cold backfill
             # spend most of its wall-clock idle; the live edge only ever needs a
             # handful of segments, so this changes nothing in steady state.
-            caught_up = not any(r.get("segments", 0) >= budget for r in results)
+            caught_up = not any(r.get("backfilled") for r in results)
         except Exception:
             logger.exception("scrub: generation cycle failed")
         if time.time() >= next_prune:
@@ -204,6 +203,19 @@ def run() -> None:
     import uvicorn
 
     settings = load_settings()
+    # uvicorn's log_level only configures uvicorn's own loggers; the root logger
+    # keeps its WARNING default, so everything the sidecar itself logs below
+    # that -- the per-cycle scrub telemetry in particular -- was written and
+    # then dropped. The watchdog entry point has always done this; the server
+    # never did.
+    logging.basicConfig(
+        level=settings.log_level.upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    # httpx logs a line per request at INFO. Every proxied request goes through
+    # it, so at this cadence that is thousands of lines an hour burying anything
+    # the sidecar has to say (the watchdog quiets it for the same reason).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     uvicorn.run(
         create_app(settings),
         host=settings.sidecar.bind_host,

@@ -79,3 +79,71 @@ def test_percentile_basics() -> None:
     assert db.percentile([1.0, 2.0, 3.0, 4.0, 5.0], 0) == 1.0
     assert db.percentile([1.0, 2.0, 3.0, 4.0, 5.0], 100) == 5.0
     assert db.percentile([1.0, 2.0, 3.0, 4.0, 5.0], 50) == 3.0
+
+
+def test_recording_coverage_merges_across_segment_seams(tmp_path: Path) -> None:
+    """§4.4 promises merged intervals, not raw segments.
+
+    Consecutive Frigate segments don't abut exactly -- measured live, 2052 of
+    2063 seams on `street` were under 0.1s (median 3.3ms) -- so an
+    exact-adjacency join never fired and six hours came back as 2064 intervals
+    describing what ~15 do. Real discontinuities are over a second.
+    """
+    frigate_db = tmp_path / "frigate.db"
+    conn = sqlite3.connect(frigate_db)
+    conn.executescript(
+        "CREATE TABLE recordings (id TEXT PRIMARY KEY, camera TEXT, path TEXT, "
+        "start_time REAL, end_time REAL);"
+    )
+    base = 1_800_000_000.0
+    rows = []
+    t = base
+    for i in range(60):
+        rows.append((f"s{i}", "street", "/x.mp4", t, t + 10.0))
+        # Millisecond seam, as real segments have.
+        t += 10.0033
+    # One genuine outage: a 5 minute hole.
+    t += 300.0
+    for i in range(60, 90):
+        rows.append((f"s{i}", "street", "/x.mp4", t, t + 10.0))
+        t += 10.0033
+    conn.executemany("INSERT INTO recordings VALUES (?, ?, ?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+
+    ro = db.open_frigate_ro(frigate_db)
+    try:
+        result = db.recording_coverage(ro, "street", base, t + 10, now=t + 20)
+    finally:
+        ro.close()
+
+    recorded = result["recorded"]
+    assert len(recorded) == 2, f"expected 2 intervals around the outage, got {len(recorded)}"
+    assert recorded[1][0] - recorded[0][1] > 250, "the real outage must survive the merge"
+
+
+def test_recording_coverage_keeps_gaps_above_the_tolerance(tmp_path: Path) -> None:
+    frigate_db = tmp_path / "frigate.db"
+    conn = sqlite3.connect(frigate_db)
+    conn.executescript(
+        "CREATE TABLE recordings (id TEXT PRIMARY KEY, camera TEXT, path TEXT, "
+        "start_time REAL, end_time REAL);"
+    )
+    base = 1_800_000_000.0
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, ?, ?, ?, ?)",
+        [
+            ("a", "street", "/x.mp4", base, base + 10.0),
+            # 0.5s: above the 0.25s tolerance, so a distinct interval.
+            ("b", "street", "/x.mp4", base + 10.5, base + 20.0),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    ro = db.open_frigate_ro(frigate_db)
+    try:
+        result = db.recording_coverage(ro, "street", base, base + 30, now=base + 30)
+    finally:
+        ro.close()
+    assert len(result["recorded"]) == 2

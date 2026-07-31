@@ -168,6 +168,16 @@ def open_joined(
 # silent, unlike `latest_segment_end` (= MAX(end_time)), which freezes on outage.
 DEFAULT_PUBLISH_LAG_S = 6.2
 
+# Gap below which two recorded intervals are one interval. Consecutive Frigate
+# segments don't abut exactly -- measured live on `street`, 2052 of 2063 seams
+# are under 0.1s with a median of 3.3ms, while genuine discontinuities are over
+# 1s. An exact-adjacency join therefore never fired and §4.4's "merged
+# intervals, not raw segments" shipped as raw segments: 2064 intervals over six
+# hours where ~15 describe the same coverage. 0.25s sits an order of magnitude
+# above the seams, an order below the real gaps, and well below the finest row
+# a client draws.
+DEFAULT_MERGE_TOLERANCE_S = 0.25
+
 
 def recording_coverage(
     conn: sqlite3.Connection,
@@ -177,6 +187,7 @@ def recording_coverage(
     *,
     now: float,
     publish_lag_s: float = DEFAULT_PUBLISH_LAG_S,
+    merge_tolerance_s: float = DEFAULT_MERGE_TOLERANCE_S,
 ) -> dict[str, Any]:
     """Merged recorded intervals for `camera` in [start, end), plus the two
     distinct "how far can I trust this" fields (docs spec §4.4).
@@ -199,7 +210,10 @@ def recording_coverage(
         seg_end = min(row["end_time"], end)
         if seg_end <= seg_start:
             continue
-        if merged and seg_start <= merged[-1][1]:
+        # Tolerance, not exact adjacency: segment boundaries are milliseconds
+        # apart, so `seg_start <= merged[-1][1]` essentially never fired and
+        # every segment came back as its own interval.
+        if merged and seg_start <= merged[-1][1] + merge_tolerance_s:
             merged[-1][1] = max(merged[-1][1], seg_end)
         else:
             merged.append([seg_start, seg_end])

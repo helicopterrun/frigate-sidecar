@@ -5,6 +5,13 @@ exposes event history, face crops and writes with side effects on Frigate, so
 it must not be reachable without the same session Frigate itself requires. The
 proxy catch-all must stay ungated (Frigate authenticates it, and its own 401
 has to reach the client).
+
+Auditing this against a live deployment is not a matter of reading status
+codes: an unmatched path falls through to Frigate, which answers almost
+anything with `200 text/html` (its SPA shell). `/analysis` and `/analysis/faces`
+both return 200 unauthenticated for exactly that reason and are not leaks. The
+question is always whether the *body* is sidecar content, so check for a
+sidecar marker rather than concluding from the status alone.
 """
 
 from __future__ import annotations
@@ -176,3 +183,41 @@ def test_session_cache_is_bounded() -> None:
     for i in range(50):
         auth._remember(app, f"key{i}", 1e12, max_entries=10)
     assert len(app.state.auth_cache) <= 10
+
+
+def test_websocket_scopes_reach_the_gate(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+    upstream_calls: list[httpx.Request],
+) -> None:
+    """No sidecar-owned WebSocket route exists yet, so this only pins the
+    behaviour: upgrades are evaluated by the gate rather than skipped whole, so
+    the first owned WS route isn't unauthenticated by default."""
+    from starlette.routing import Match, WebSocketRoute
+
+    from frigate_sidecar.auth import FrigateAuthMiddleware
+
+    async def _noop(websocket: object) -> None:  # pragma: no cover - never called
+        return None
+
+    owned = WebSocketRoute("/v1/live", endpoint=_noop)
+    middleware = FrigateAuthMiddleware(None, owned_routes=[owned])
+    scope = {"type": "websocket", "path": "/v1/live", "headers": []}
+    assert middleware._owns(scope) is True
+
+    # And a proxied path is still not ours, so it falls through to Frigate.
+    assert middleware._owns({"type": "websocket", "path": "/ws", "headers": []}) is False
+    assert owned.matches({"type": "websocket", "path": "/ws"})[0] is Match.NONE
+
+
+def test_capabilities_always_carries_version(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+    upstream_calls: list[httpx.Request],
+) -> None:
+    """Client contract: Frigate answers /v1/capabilities with its SPA shell on
+    both its own ports, so a client can't tell a real capability document from
+    the shell by status code. `version` decoding out of the JSON body is what
+    distinguishes them -- it must not be dropped or renamed."""
+    client = _build(frigate_db_path, sidecar_db_path, tmp_path, _ok_handler(upstream_calls))
+    body = client.get("/v1/capabilities").json()
+    assert isinstance(body.get("version"), str) and body["version"]
+    assert "scrub_cache" in body and "proxy" in body

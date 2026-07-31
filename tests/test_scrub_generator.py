@@ -34,6 +34,24 @@ def _make_jpg(path: Path) -> None:
     Image.new("RGB", (32, 18), color=(10, 20, 30)).save(path)
 
 
+def _fake_extract(pts_for: object) -> object:
+    """Stand-in for ffmpeg_io.extract_keyframes_with_pts.
+
+    Extraction and timestamps come from one process now, so the fake returns
+    the (pts, path) pairs it would have produced rather than two separate lists.
+    """
+
+    async def _extract(seg_path: Path, out_dir: Path, **kw: object) -> list[tuple[float, Path]]:
+        out = []
+        for i, ts in enumerate(pts_for(seg_path)):  # type: ignore[operator]
+            p = out_dir / f"{i:06d}.jpg"
+            _make_jpg(p)
+            out.append((float(ts), p))
+        return out
+
+    return _extract
+
+
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     frigate_db = tmp_path / "frigate.db"
@@ -75,20 +93,11 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     async def _fake_probe_gop(seg_path: Path, **kw: object) -> float:
         return 1.0
 
-    async def _fake_probe_pts(seg_path: Path, **kw: object) -> list[float]:
-        return [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
-
-    async def _fake_extract_keyframes(seg_path: Path, out_dir: Path, **kw: object) -> list[Path]:
-        paths = []
-        for i in range(10):
-            p = out_dir / f"{i:06d}.jpg"
-            _make_jpg(p)
-            paths.append(p)
-        return paths
-
     monkeypatch.setattr(ffmpeg_io, "probe_gop_seconds", _fake_probe_gop)
-    monkeypatch.setattr(ffmpeg_io, "probe_keyframe_pts", _fake_probe_pts)
-    monkeypatch.setattr(ffmpeg_io, "extract_keyframes", _fake_extract_keyframes)
+    monkeypatch.setattr(
+        ffmpeg_io, "extract_keyframes_with_pts",
+        _fake_extract(lambda seg: [float(i) for i in range(10)]),
+    )
 
     return settings
 
@@ -141,16 +150,16 @@ def test_scrub_generate_gap_splits_bucket(env: Settings, monkeypatch: pytest.Mon
     """A large jump between segments (simulated recording gap) must split the
     bucket rather than fudge the interval (spec §5.2, §11)."""
 
-    async def _fake_probe_pts_with_gap(seg_path: Path, **kw: object) -> list[float]:
+    def _pts_with_gap(seg_path: Path) -> list[float]:
         # Segment 2's keyframes look like they start way later than the grid
         # would predict -- simulate by returning offsets that, combined with
         # segment.start_time, produce an >interval*1.5 jump from the prior
         # segment's last accepted frame.
         if "2.mp4" in str(seg_path):
             return [40.0, 41.0]  # segment 2 starts at base+10, so ts = base+50, base+51
-        return [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+        return [float(i) for i in range(10)]
 
-    monkeypatch.setattr(ffmpeg_io, "probe_keyframe_pts", _fake_probe_pts_with_gap)
+    monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _fake_extract(_pts_with_gap))
 
     conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
     try:
@@ -477,16 +486,16 @@ def test_extraction_uses_the_configured_cell_size(
 
     async def _record_extract(
         seg_path: Path, out_dir: Path, *, cell_w: int = 320, cell_h: int = 180, **kw: object
-    ) -> list[Path]:
+    ) -> list[tuple[float, Path]]:
         seen.append((cell_w, cell_h))
-        paths = []
+        out = []
         for i in range(10):
             p = out_dir / f"{i:06d}.jpg"
             _make_jpg(p)
-            paths.append(p)
-        return paths
+            out.append((float(i), p))
+        return out
 
-    monkeypatch.setattr(ffmpeg_io, "extract_keyframes", _record_extract)
+    monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _record_extract)
     big = env.model_copy(
         update={"scrub": env.scrub.model_copy(update={"cell_w": 480, "cell_h": 270})}
     )
@@ -550,14 +559,11 @@ def test_cycle_work_is_budgeted(env: Settings, monkeypatch: pytest.MonkeyPatch) 
     conn.commit()
     conn.close()
 
-    budgeted = env.model_copy(
-        update={"scrub": env.scrub.model_copy(update={"max_segments_per_cycle": 3})}
-    )
-    joined = db.open_joined(budgeted.frigate.db_path, budgeted.sidecar.db_path)
+    joined = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
     try:
         result = asyncio.run(
-            generator.generate_camera(
-                budgeted, "doorbell", frigate_conn=joined, sidecar_conn=joined,
+            generator.generate_backfill(
+                env, "doorbell", budget=3, frigate_conn=joined, sidecar_conn=joined,
                 now=base + 200, gop_cache=generator.GopCache(),
                 sem=asyncio.Semaphore(3),
             )
@@ -565,7 +571,8 @@ def test_cycle_work_is_budgeted(env: Settings, monkeypatch: pytest.MonkeyPatch) 
     finally:
         joined.close()
 
-    assert result["segments"] == 3, "one cycle must stop at the budget, not drain the window"
+    assert result["segments"] == 3, "one pass must stop at the budget, not drain the window"
+    assert result["backfilled"] is True, "spending the whole share means history remains"
 
 
 def test_dense_keyframes_fill_whole_sheets(
@@ -613,20 +620,11 @@ def test_dense_keyframes_fill_whole_sheets(
     async def _fake_probe_gop(seg_path: Path, **kw: object) -> float:
         return 1.0  # Frigate's measured GOP: well under the 5s target
 
-    async def _fake_probe_pts(seg_path: Path, **kw: object) -> list[float]:
-        return [float(i) for i in range(10)]  # a keyframe every second
-
-    async def _fake_extract_keyframes(seg_path: Path, out_dir: Path, **kw: object) -> list[Path]:
-        paths = []
-        for i in range(10):
-            p = out_dir / f"{i:06d}.jpg"
-            _make_jpg(p)
-            paths.append(p)
-        return paths
-
     monkeypatch.setattr(ffmpeg_io, "probe_gop_seconds", _fake_probe_gop)
-    monkeypatch.setattr(ffmpeg_io, "probe_keyframe_pts", _fake_probe_pts)
-    monkeypatch.setattr(ffmpeg_io, "extract_keyframes", _fake_extract_keyframes)
+    monkeypatch.setattr(
+        ffmpeg_io, "extract_keyframes_with_pts",
+        _fake_extract(lambda seg: [float(i) for i in range(10)]),
+    )
 
     joined = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
     try:
@@ -677,3 +675,326 @@ def test_a_filling_sheet_is_published_once_per_cycle(env: Settings) -> None:
     assert [r["versions"] for r in rows] == [1, 1], "a sheet was republished mid-cycle"
     on_disk = sorted(p.name for p in (env.scrub.cache_dir / "doorbell" / "1").glob("*.jpg"))
     assert len(on_disk) == 2, f"superseded sheet images left on disk: {on_disk}"
+
+
+# ----- Cycle scheduling: live edge first, backfill behind it (§5.4) -----
+
+
+@pytest.fixture
+def long_history_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
+    """24h of contiguous 10s segments and a cold cache -- the shape a real
+    deployment starts in."""
+    frigate_db = tmp_path / "frigate.db"
+    conn = sqlite3.connect(frigate_db)
+    conn.executescript(RECORDINGS_SCHEMA)
+    base = 1_800_000_000.0
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, 'doorbell', ?, ?, ?, 10.0, 5.0)",
+        [
+            (f"s{i}", "/media/frigate/x.mp4", base + i * 10, base + (i + 1) * 10)
+            for i in range(8640)  # 24h
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    recordings_root = tmp_path / "recordings"
+    recordings_root.mkdir()
+    (recordings_root / "x.mp4").write_bytes(b"fake")
+
+    settings = Settings(
+        frigate=FrigateSection(
+            base_url="http://frigate.test:5000", config_path=tmp_path / "cfg.yml",
+            db_path=frigate_db, media_path=Path("/media/frigate"),
+            recordings_path=recordings_root,
+        ),
+        sidecar=SidecarSection(db_path=tmp_path / "sidecar.db", bind_port=5001),
+        scrub=ScrubSection(
+            enabled=True, cameras=["doorbell"], cache_dir=tmp_path / "scrub",
+            recent_interval_s=1.0, aged_after_h=48.0,  # everything is "recent"
+            sheet_cols=4, sheet_rows=3,
+            backfill_segments_per_cycle=12, live_edge_segments=6,
+            live_edge_lookback_s=300.0,
+        ),
+    )
+
+    async def _fake_probe_gop(seg_path: Path, **kw: object) -> float:
+        return 1.0
+
+    monkeypatch.setattr(ffmpeg_io, "probe_gop_seconds", _fake_probe_gop)
+    monkeypatch.setattr(
+        ffmpeg_io, "extract_keyframes_with_pts",
+        _fake_extract(lambda seg: [float(i) for i in range(10)]),
+    )
+    return settings
+
+
+def test_first_cycle_on_a_cold_cache_reaches_the_live_edge(long_history_env: Settings) -> None:
+    """The reel opens at the live edge, so that is where sprites have to exist.
+
+    Resuming each tier from MAX(generated_through) meant a cold cache started a
+    day back and advanced 20 min of footage per cycle -- slower than wall clock
+    across ten cameras -- so `generated_through` stayed ~24h behind and the
+    client's "is this generated?" check answered no for everything recent.
+    """
+    env = long_history_env
+    now = 1_800_000_000.0 + 86400.0
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_camera(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now, gop_cache=generator.GopCache(), sem=asyncio.Semaphore(3),
+            )
+        )
+        through = db.latest_generated_through(conn, "doorbell", 1.0)
+    finally:
+        conn.close()
+
+    assert through is not None
+    lag = now - through
+    assert lag <= env.scrub.live_edge_lookback_s, (
+        f"live edge is {lag / 3600:.1f}h behind after the very first cycle"
+    )
+
+
+def test_backfill_fills_in_behind_the_live_edge(long_history_env: Settings) -> None:
+    """Coverage should grow backwards from now, contiguously -- a user scrubbing
+    an hour ago is served before one scrubbing three days ago (§5.4)."""
+    env = long_history_env
+    now = 1_800_000_000.0 + 86400.0
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        for cycle in range(4):
+            asyncio.run(
+                generator.generate_camera(
+                    env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                    now=now + cycle * 60, gop_cache=generator.GopCache(),
+                    sem=asyncio.Semaphore(3),
+                )
+            )
+        buckets = db.list_scrub_buckets(conn, "doorbell", 0, now + 1000)
+    finally:
+        conn.close()
+
+    covered_start = min(b["start_ts"] for b in buckets)
+    covered_end = max(b["end_ts"] for b in buckets)
+    # Still pinned to the edge...
+    assert now - covered_end <= env.scrub.live_edge_lookback_s
+    # ...and reaching further back than the live-edge pass alone ever would.
+    assert now - covered_start > env.scrub.live_edge_lookback_s, (
+        "backfill made no progress behind the live edge"
+    )
+
+
+def test_uncovered_spans_finds_holes_between_buckets(tmp_path: Path) -> None:
+    conn = db.open_sidecar(tmp_path / "sidecar.db")
+    try:
+        for start, end in ((100.0, 200.0), (400.0, 500.0)):
+            db.upsert_scrub_bucket(
+                conn, camera="c", start_ts=start, end_ts=end, interval_s=1.0,
+                width=1, height=1, generated_through=end, complete=True,
+            )
+        conn.commit()
+        spans = generator.uncovered_spans(conn, "c", 1.0, 0.0, 700.0)
+    finally:
+        conn.close()
+    assert spans == [(0.0, 100.0), (200.0, 400.0), (500.0, 700.0)]
+
+
+def test_uncovered_spans_ignores_sub_interval_seams(tmp_path: Path) -> None:
+    """A hole narrower than one interval can't hold a frame, so chasing it
+    would make backfill spin on a seam forever."""
+    conn = db.open_sidecar(tmp_path / "sidecar.db")
+    try:
+        for start, end in ((100.0, 200.0), (200.5, 300.0)):
+            db.upsert_scrub_bucket(
+                conn, camera="c", start_ts=start, end_ts=end, interval_s=1.0,
+                width=1, height=1, generated_through=end, complete=True,
+            )
+        conn.commit()
+        spans = generator.uncovered_spans(conn, "c", 1.0, 100.0, 300.0)
+    finally:
+        conn.close()
+    assert spans == []
+
+
+def test_a_hole_with_no_recordings_does_not_stall_backfill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Camera offline, or motion-only retention: a span with nothing behind it
+    yields nothing forever, and must not block the spans older than it."""
+    base = 1_800_000_000.0
+    frigate_db = tmp_path / "frigate.db"
+    conn = sqlite3.connect(frigate_db)
+    conn.executescript(RECORDINGS_SCHEMA)
+    # Recordings only in the OLDER half; the newer half is a permanent hole.
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, 'doorbell', ?, ?, ?, 10.0, 5.0)",
+        [
+            (f"s{i}", "/media/frigate/x.mp4", base + i * 10, base + (i + 1) * 10)
+            for i in range(30)  # base .. base+300 only
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    recordings_root = tmp_path / "recordings"
+    recordings_root.mkdir()
+    (recordings_root / "x.mp4").write_bytes(b"fake")
+
+    settings = Settings(
+        frigate=FrigateSection(
+            base_url="http://frigate.test:5000", config_path=tmp_path / "cfg.yml",
+            db_path=frigate_db, media_path=Path("/media/frigate"),
+            recordings_path=recordings_root,
+        ),
+        sidecar=SidecarSection(db_path=tmp_path / "sidecar.db", bind_port=5001),
+        scrub=ScrubSection(
+            enabled=True, cameras=["doorbell"], cache_dir=tmp_path / "scrub",
+            recent_interval_s=1.0, aged_after_h=48.0, sheet_cols=4, sheet_rows=3,
+            backfill_segments_per_cycle=12, live_edge_segments=2, live_edge_lookback_s=60.0,
+        ),
+    )
+
+    async def _fake_probe_gop(seg_path: Path, **kw: object) -> float:
+        return 1.0
+
+    monkeypatch.setattr(ffmpeg_io, "probe_gop_seconds", _fake_probe_gop)
+    monkeypatch.setattr(
+        ffmpeg_io, "extract_keyframes_with_pts",
+        _fake_extract(lambda seg: [float(i) for i in range(10)]),
+    )
+
+    now = base + 1200.0  # 15 min of empty wall clock after the last recording
+    joined = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
+    try:
+        result = asyncio.run(
+            generator.generate_camera(
+                settings, "doorbell", frigate_conn=joined, sidecar_conn=joined,
+                now=now, gop_cache=generator.GopCache(), sem=asyncio.Semaphore(3),
+            )
+        )
+    finally:
+        joined.close()
+
+    # The live-edge window is empty, but the cycle still reached past it into the
+    # span that does have recordings.
+    assert result["new_frames"] > 0, "backfill stalled on a hole with no recordings"
+
+
+def test_every_camera_gets_its_live_edge_before_any_backfill(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Running live-edge-then-backfill per camera meant the last camera in the
+    list waited out every earlier camera's history before its edge was touched
+    -- minutes of staleness that scales with camera count."""
+    env = long_history_env
+    conn = sqlite3.connect(env.frigate.db_path)
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, 'garden', ?, ?, ?, 10.0, 5.0)",
+        [
+            (f"g{i}", "/media/frigate/x.mp4", 1_800_000_000.0 + i * 10,
+             1_800_000_000.0 + (i + 1) * 10)
+            for i in range(8640)
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    order: list[str] = []
+    real_live = generator.generate_live_edge
+    real_backfill = generator.generate_backfill
+
+    async def _tracked_live(settings: object, camera: str, **kw: object) -> dict[str, object]:
+        order.append(f"live:{camera}")
+        return await real_live(settings, camera, **kw)  # type: ignore[arg-type]
+
+    async def _tracked_backfill(settings: object, camera: str, **kw: object) -> dict[str, object]:
+        order.append(f"backfill:{camera}")
+        return await real_backfill(settings, camera, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(generator, "generate_live_edge", _tracked_live)
+    monkeypatch.setattr(generator, "generate_backfill", _tracked_backfill)
+
+    env = env.model_copy(update={"scrub": env.scrub.model_copy(update={"cameras": []})})
+    asyncio.run(generator.generate_cycle(env, now=1_800_000_000.0 + 86400.0))
+
+    live_phase = [step for step in order if step.startswith("live:")]
+    first_backfill = next(i for i, step in enumerate(order) if step.startswith("backfill:"))
+    assert len(live_phase) == 2, f"both cameras should get a live-edge pass: {order}"
+    assert first_backfill == len(live_phase), (
+        f"backfill started before every camera's edge was serviced: {order}"
+    )
+
+
+def test_backfill_budget_is_shared_across_cameras(long_history_env: Settings) -> None:
+    """The cycle's wall clock has to stay bounded regardless of camera count --
+    an over-long cycle makes the next live-edge pass late, and the edge slips."""
+    env = long_history_env
+    conn = sqlite3.connect(env.frigate.db_path)
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, 'garden', ?, ?, ?, 10.0, 5.0)",
+        [
+            (f"g{i}", "/media/frigate/x.mp4", 1_800_000_000.0 + i * 10,
+             1_800_000_000.0 + (i + 1) * 10)
+            for i in range(8640)
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    env = env.model_copy(
+        update={
+            "scrub": env.scrub.model_copy(
+                update={"cameras": [], "backfill_segments_per_cycle": 8, "live_edge_segments": 2}
+            )
+        }
+    )
+    results = asyncio.run(generator.generate_cycle(env, now=1_800_000_000.0 + 86400.0))
+
+    assert {r["camera"] for r in results} == {"doorbell", "garden"}
+    # 8 shared across 2 cameras = 4 each, plus each camera's own 2-segment edge.
+    for r in results:
+        assert r["segments"] <= 4 + 2, f"{r['camera']} overran its share: {r}"
+
+
+def test_backfill_stops_at_its_wall_clock_budget(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Segment count alone can't bound a cycle -- how long a segment takes
+    depends on the box. An over-long cycle delays the next live-edge pass,
+    which is what let the edge slip behind to begin with."""
+    env = long_history_env
+    conn = sqlite3.connect(env.frigate.db_path)
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, 'garden', ?, ?, ?, 10.0, 5.0)",
+        [
+            (f"g{i}", "/media/frigate/x.mp4", 1_800_000_000.0 + i * 10,
+             1_800_000_000.0 + (i + 1) * 10)
+            for i in range(8640)
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    env = env.model_copy(
+        update={
+            "scrub": env.scrub.model_copy(
+                update={"cameras": [], "backfill_time_budget_s": 0.0, "live_edge_segments": 2}
+            )
+        }
+    )
+    backfilled: list[str] = []
+    real_backfill = generator.generate_backfill
+
+    async def _tracked(settings: object, camera: str, **kw: object) -> dict[str, object]:
+        backfilled.append(camera)
+        return await real_backfill(settings, camera, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(generator, "generate_backfill", _tracked)
+    results = asyncio.run(generator.generate_cycle(env, now=1_800_000_000.0 + 86400.0))
+
+    assert not backfilled, "a spent time budget must skip backfill entirely"
+    # The live edge still ran for every camera -- it is never the thing skipped.
+    assert all(r["segments"] > 0 for r in results)

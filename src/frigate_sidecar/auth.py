@@ -134,7 +134,12 @@ class FrigateAuthMiddleware:
         return False
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
+        # WebSocket scopes are gated too. No sidecar-owned WS route exists today
+        # -- `_owns` matches none of them, so every upgrade falls through to the
+        # proxy and Frigate authenticates it -- but skipping the whole scope
+        # type meant the first one added would have been unauthenticated by
+        # default, with nothing in the code saying so.
+        if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
 
@@ -159,6 +164,11 @@ class FrigateAuthMiddleware:
         try:
             await validate_frigate_session(app, cookie)
         except HTTPException as exc:
+            if scope["type"] == "websocket":
+                # Reject before the handshake completes; 1008 is "policy
+                # violation", which is what a client sees for an auth failure.
+                await send({"type": "websocket.close", "code": 1008})
+                return
             body = {
                 "error": ERR_UNAUTHORIZED if exc.status_code == 401 else ERR_UPSTREAM_UNAVAILABLE,
                 "message": str(exc.detail),

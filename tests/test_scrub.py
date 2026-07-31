@@ -524,11 +524,11 @@ def test_sheet_index_advertises_the_stored_extension(
 
 
 @pytest.mark.parametrize(
-    ("segments", "expect_sleep"),
-    [(5, True), (120, False)],
+    ("backfilled", "expect_sleep"),
+    [(False, True), (True, False)],
 )
 def test_generation_loop_skips_the_idle_wait_while_catching_up(
-    monkeypatch: pytest.MonkeyPatch, segments: int, expect_sleep: bool
+    monkeypatch: pytest.MonkeyPatch, backfilled: bool, expect_sleep: bool
 ) -> None:
     """A cold start has days of history behind it; sleeping the full interval
     after a cycle that used its whole budget leaves most of the wall-clock idle.
@@ -538,7 +538,7 @@ def test_generation_loop_skips_the_idle_wait_while_catching_up(
 
     from frigate_sidecar import server
 
-    settings = Settings(scrub=ScrubSection(generate_interval_s=60.0, max_segments_per_cycle=120))
+    settings = Settings(scrub=ScrubSection(generate_interval_s=60.0))
     app = type("_App", (), {"state": type("_S", (), {"settings": settings})})()
 
     sleeps: list[float] = []
@@ -549,7 +549,7 @@ def test_generation_loop_skips_the_idle_wait_while_catching_up(
         cycles += 1
         if cycles > 2:
             raise asyncio.CancelledError
-        return [{"camera": "doorbell", "segments": segments}]
+        return [{"camera": "doorbell", "segments": 12, "backfilled": backfilled}]
 
     async def _fake_sleep(seconds: float) -> None:
         sleeps.append(seconds)

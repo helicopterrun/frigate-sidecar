@@ -102,13 +102,12 @@ async def _sample_segment(
     """
     async with sem:
         if gop_s <= interval_s * _GOP_TOLERANCE:
-            pts = await ffmpeg_io.probe_keyframe_pts(seg_path)
-            jpgs = await ffmpeg_io.extract_keyframes(
+            extracted = await ffmpeg_io.extract_keyframes_with_pts(
                 seg_path, work_dir, cell_w=cell_w, cell_h=cell_h
             )
-            n = min(len(pts), len(jpgs))
             frames = [
-                grid.Frame(timestamp=seg_start + pts[i], path=str(jpgs[i])) for i in range(n)
+                grid.Frame(timestamp=seg_start + pts, path=str(path))
+                for pts, path in extracted
             ]
             # Keyframes are only guaranteed to be no *sparser* than the GOP, so
             # a tier whose interval is several GOPs wide gets several frames per
@@ -282,24 +281,29 @@ async def _generate_tier(
     interval_s: float,
     window_start: float,
     window_end: float,
+    since: float,
+    budget: int,
     frigate_conn: sqlite3.Connection,
     sidecar_conn: sqlite3.Connection,
     gop_cache: GopCache,
     sem: asyncio.Semaphore,
 ) -> dict[str, Any]:
-    """Extend one thinning tier's (interval_s's) buckets toward `window_end`,
-    never emitting frames outside `[window_start, window_end)` (§4.2
-    non-overlap, §5.5 thinning tiers)."""
+    """Sample `[since, window_end)` for one thinning tier, never emitting frames
+    outside `[window_start, window_end)` (§4.2 non-overlap, §5.5 thinning tiers).
+
+    `since` is the caller's, not derived from MAX(generated_through) here: the
+    scheduler runs this against the live edge and against holes behind it in the
+    same cycle, and those passes have entirely different resume points.
+    """
     scrub = settings.scrub
     cols, rows = scrub.sheet_cols, scrub.sheet_rows
     cell_w, cell_h = scrub.cell_w, scrub.cell_h
     cells_per_sheet = cols * rows
 
-    if window_end <= window_start:
+    if window_end <= window_start or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
 
-    generated_through = db.latest_generated_through(sidecar_conn, camera, interval_s)
-    since = max(generated_through or window_start, window_start)
+    since = min(max(since, window_start), window_end)
 
     # Oldest-first and budgeted: a cold start has no resume point, so `since` is
     # the far edge of the retention window and this query would otherwise return
@@ -307,7 +311,7 @@ async def _generate_tier(
     rows_ = frigate_conn.execute(
         "SELECT path, start_time, end_time FROM recordings "
         "WHERE camera = ? AND end_time > ? AND start_time < ? ORDER BY start_time LIMIT ?",
-        (camera, since, window_end, max(1, scrub.max_segments_per_cycle)),
+        (camera, since, window_end, max(1, budget)),
     ).fetchall()
     if not rows_:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -322,11 +326,14 @@ async def _generate_tier(
             gop_cache.seconds[camera] = interval_s  # assume best case; drift check will catch it
     gop_s = gop_cache.seconds[camera]
 
-    # Current open bucket: resume the newest incomplete one, or start fresh.
+    # Resume an open bucket only if it actually ends where this pass begins.
+    # With live-edge and backfill passes interleaved, the newest incomplete
+    # bucket is usually the live one; attaching an older backfill pass to it
+    # would seal it at the wrong end and hand cell assignment negative indices.
     open_bucket = sidecar_conn.execute(
         "SELECT * FROM scrub_buckets WHERE camera = ? AND interval_s = ? AND complete = 0 "
-        "ORDER BY start_ts DESC LIMIT 1",
-        (camera, interval_s),
+        "AND generated_through BETWEEN ? AND ? ORDER BY start_ts DESC LIMIT 1",
+        (camera, interval_s, since - interval_s * 1.5, since + interval_s * 1.5),
     ).fetchone()
     bucket_start = open_bucket["start_ts"] if open_bucket else None
     bucket_generated_through = open_bucket["generated_through"] if open_bucket else since
@@ -495,6 +502,95 @@ async def _generate_tier(
     return {"camera": camera, "segments": len(rows_), "new_frames": new_frames}
 
 
+#: How many holes a single cycle will look at before giving up. A span with no
+#: recordings behind it (camera offline, motion-only retention) yields nothing
+#: and must not stall every older span behind it forever.
+_MAX_HOLES_PER_CYCLE = 50
+
+
+def uncovered_spans(
+    sidecar_conn: sqlite3.Connection,
+    camera: str,
+    interval_s: float,
+    window_start: float,
+    window_end: float,
+) -> list[tuple[float, float]]:
+    """Spans of `[window_start, window_end)` with no bucket behind them.
+
+    Holes narrower than one interval are ignored -- they can't hold a frame.
+    """
+    rows = sidecar_conn.execute(
+        "SELECT start_ts, end_ts FROM scrub_buckets "
+        "WHERE camera = ? AND interval_s = ? AND end_ts > ? AND start_ts < ? ORDER BY start_ts",
+        (camera, interval_s, window_start, window_end),
+    ).fetchall()
+    spans: list[tuple[float, float]] = []
+    cursor = window_start
+    for row in rows:
+        if row["start_ts"] > cursor + interval_s:
+            spans.append((cursor, min(row["start_ts"], window_end)))
+        cursor = max(cursor, row["end_ts"])
+        if cursor >= window_end:
+            break
+    if cursor < window_end - interval_s:
+        spans.append((cursor, window_end))
+    return spans
+
+
+async def _backfill_tier(
+    settings: Settings,
+    camera: str,
+    *,
+    interval_s: float,
+    window_start: float,
+    window_end: float,
+    budget: int,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    gop_cache: GopCache,
+    sem: asyncio.Semaphore,
+) -> dict[str, int]:
+    """Fill holes in one tier, newest first, each from its newest end.
+
+    §5.4's "backfill fills in behind the live edge": coverage should grow
+    backwards from now, contiguously, so a user scrubbing an hour ago is served
+    before one scrubbing three days ago. Generation within a hole still runs
+    forward (cells accumulate forward), so each pass starts at the oldest of the
+    hole's newest `budget` segments and the hole shrinks from the right.
+
+    That start point comes from the recordings table rather than from arithmetic
+    on the hole's width: a hole's newest end is frequently dead air (camera
+    offline, motion-only retention past the continuous window), and a pass
+    aimed there samples nothing and leaves the hole exactly as it found it.
+    """
+    segments = 0
+    frames = 0
+    spans = uncovered_spans(sidecar_conn, camera, interval_s, window_start, window_end)
+    for hole_start, hole_end in list(reversed(spans))[:_MAX_HOLES_PER_CYCLE]:
+        if budget <= 0:
+            break
+        newest = frigate_conn.execute(
+            "SELECT start_time FROM recordings "
+            "WHERE camera = ? AND end_time > ? AND start_time < ? "
+            "ORDER BY start_time DESC LIMIT 1 OFFSET ?",
+            (camera, hole_start, hole_end, budget - 1),
+        ).fetchone()
+        result = await _generate_tier(
+            settings, camera,
+            interval_s=interval_s,
+            window_start=hole_start, window_end=hole_end,
+            # Fewer segments in the hole than the budget -> take it whole.
+            since=newest["start_time"] if newest else hole_start,
+            budget=budget,
+            frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
+            gop_cache=gop_cache, sem=sem,
+        )
+        segments += result["segments"]
+        frames += result["new_frames"]
+        budget -= result["segments"]
+    return {"segments": segments, "new_frames": frames}
+
+
 async def generate_camera(
     settings: Settings,
     camera: str,
@@ -505,8 +601,8 @@ async def generate_camera(
     gop_cache: GopCache,
     sem: asyncio.Semaphore,
 ) -> dict[str, Any]:
-    """Extend `camera`'s scrub cache toward `now` by one generation cycle
-    (§5.4), across both thinning tiers (§5.5).
+    """Advance `camera`'s scrub cache by one generation cycle (§5.4), across
+    both thinning tiers (§5.5).
 
     Spans within `aged_after_h` of `now` are generated at the recent tier's
     `recent_interval_s`; older spans (down to `retention_days`) at the
@@ -516,6 +612,16 @@ async def generate_camera(
     span, and a segment straddling the boundary is naturally split between
     the two tier passes below (each pass only accepts frames inside its own
     `[window_start, window_end)`).
+
+    **The live edge is serviced first, out of its own budget.** Walking each
+    tier forward from the far edge of its window -- which is what "resume from
+    MAX(generated_through)" amounts to on a cold cache -- meant the recent tier
+    started 24h back and advanced 20 min of footage per cycle while a cycle cost
+    ~36 min of wall clock across ten cameras. It lost ground continuously and
+    never reached now, so `generated_through` sat a day in the past and the
+    client's "is this generated?" check answered no for the one window people
+    actually scrub. Holding the edge costs ~6 segments per camera per minute;
+    everything left over goes to backfill, which fills in behind it.
     """
     scrub = settings.scrub
     retention_cutoff = now - scrub.retention_days * 86400
@@ -529,31 +635,120 @@ async def generate_camera(
         sidecar_conn, scrub.cache_dir, camera, scrub.recent_interval_s, effective_boundary
     )
 
-    total_segments = 0
-    total_new_frames = 0
+    live = await generate_live_edge(
+        settings, camera, frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
+        now=now, gop_cache=gop_cache, sem=sem,
+    )
+    back = await generate_backfill(
+        settings, camera, budget=scrub.backfill_segments_per_cycle,
+        frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
+        now=now, gop_cache=gop_cache, sem=sem,
+    )
+    return {
+        "camera": camera,
+        "segments": live["segments"] + back["segments"],
+        "new_frames": live["new_frames"] + back["new_frames"],
+        "backfilled": back["backfilled"],
+    }
 
-    if effective_boundary > retention_cutoff:
-        aged_result = await _generate_tier(
-            settings, camera,
-            interval_s=scrub.aged_interval_s,
-            window_start=retention_cutoff, window_end=effective_boundary,
-            frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-            gop_cache=gop_cache, sem=sem,
-        )
-        total_segments += aged_result["segments"]
-        total_new_frames += aged_result["new_frames"]
 
-    recent_result = await _generate_tier(
+async def generate_live_edge(
+    settings: Settings,
+    camera: str,
+    *,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    now: float,
+    gop_cache: GopCache,
+    sem: asyncio.Semaphore,
+) -> dict[str, Any]:
+    """Hold `camera`'s recent tier against wall clock. Cheap and always first.
+
+    The reel opens at the live edge, so that is where sprites have to exist:
+    `generated_through` sitting in the past means a client's "is this
+    generated?" check answers no for the one window people actually scrub.
+    """
+    scrub = settings.scrub
+    retention_cutoff = now - scrub.retention_days * 86400
+    effective_boundary = max(now - scrub.aged_after_h * 3600, retention_cutoff)
+
+    _retire_stale_recent_buckets(
+        sidecar_conn, scrub.cache_dir, camera, scrub.recent_interval_s, effective_boundary
+    )
+
+    # Resume from where the recent tier actually reaches, but
+    #    never crawl up from further back than `live_edge_lookback_s` -- a
+    #    stale cache jumps to the edge and lets backfill close the gap behind
+    #    it, rather than making every recent scrub wait for a day of history.
+    recent_through = db.latest_generated_through(
+        sidecar_conn, camera, scrub.recent_interval_s
+    )
+    live_since = max(effective_boundary, now - scrub.live_edge_lookback_s)
+    if recent_through is not None and recent_through > live_since:
+        live_since = recent_through
+    result = await _generate_tier(
         settings, camera,
         interval_s=scrub.recent_interval_s,
         window_start=effective_boundary, window_end=now,
+        since=live_since,
+        budget=max(1, scrub.live_edge_segments),
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         gop_cache=gop_cache, sem=sem,
     )
-    total_segments += recent_result["segments"]
-    total_new_frames += recent_result["new_frames"]
+    return {"camera": camera, **result}
 
-    return {"camera": camera, "segments": total_segments, "new_frames": total_new_frames}
+
+async def generate_backfill(
+    settings: Settings,
+    camera: str,
+    *,
+    budget: int,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    now: float,
+    gop_cache: GopCache,
+    sem: asyncio.Semaphore,
+) -> dict[str, Any]:
+    """Fill history behind the live edge with whatever budget is left.
+
+    Recent tier first -- it is what someone scrubbing the last day sees -- then
+    the coarser aged tier.
+    """
+    scrub = settings.scrub
+    retention_cutoff = now - scrub.retention_days * 86400
+    effective_boundary = max(now - scrub.aged_after_h * 3600, retention_cutoff)
+
+    segments = 0
+    frames = 0
+    remaining = budget
+    for interval_s, w_start, w_end in (
+        (scrub.recent_interval_s, effective_boundary, now),
+        (scrub.aged_interval_s, retention_cutoff, effective_boundary),
+    ):
+        if remaining <= 0:
+            break
+        if w_end <= w_start:
+            continue
+        result = await _backfill_tier(
+            settings, camera,
+            interval_s=interval_s,
+            window_start=w_start, window_end=w_end,
+            budget=remaining,
+            frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
+            gop_cache=gop_cache, sem=sem,
+        )
+        segments += result["segments"]
+        frames += result["new_frames"]
+        remaining -= result["segments"]
+
+    return {
+        "camera": camera,
+        "segments": segments,
+        "new_frames": frames,
+        # Used its whole share: there is more history behind this camera, so the
+        # loop shouldn't sit idle for a full interval before the next cycle.
+        "backfilled": budget > 0 and remaining <= 0,
+    }
 
 
 async def generate_cycle(settings: Settings, *, now: float | None = None) -> list[dict[str, Any]]:
@@ -561,6 +756,7 @@ async def generate_cycle(settings: Settings, *, now: float | None = None) -> lis
     import time as _time
 
     now = now if now is not None else _time.time()
+    started = _time.monotonic()
     scrub = settings.scrub
     sem = asyncio.Semaphore(scrub.ffmpeg_concurrency)
     gop_cache = GopCache()
@@ -570,18 +766,88 @@ async def generate_cycle(settings: Settings, *, now: float | None = None) -> lis
         cameras = scrub.cameras or [
             r["camera"] for r in conn.execute("SELECT DISTINCT camera FROM recordings").fetchall()
         ]
-        results = []
+        if not cameras:
+            return []
+
+        totals: dict[str, dict[str, Any]] = {
+            c: {"camera": c, "segments": 0, "new_frames": 0, "backfilled": False}
+            for c in cameras
+        }
+
+        def _merge(camera: str, result: dict[str, Any]) -> None:
+            totals[camera]["segments"] += result.get("segments", 0)
+            totals[camera]["new_frames"] += result.get("new_frames", 0)
+            totals[camera]["backfilled"] |= result.get("backfilled", False)
+
+        # Pass 1: every camera's live edge, before any camera's history. Doing
+        # both per camera meant the last camera in the list waited out every
+        # earlier camera's backfill before its edge was touched at all.
         for camera in cameras:
             try:
-                r = await generate_camera(
+                _merge(camera, await generate_live_edge(
                     settings, camera, frigate_conn=conn, sidecar_conn=conn,
                     now=now, gop_cache=gop_cache, sem=sem,
-                )
+                ))
             except Exception:
-                logger.exception("scrub: generation failed for camera %s", camera)
-                r = {"camera": camera, "error": True}
-            results.append(r)
-        return results
+                logger.exception("scrub: live edge failed for camera %s", camera)
+                totals[camera]["error"] = True
+
+        # Pass 2: backfill on genuine leftovers. Bounded by wall clock as well
+        # as segment count -- how long a segment takes depends on the box, and
+        # an over-long cycle delays the next live-edge pass, which is what let
+        # the edge slip behind in the first place.
+        share = max(1, scrub.backfill_segments_per_cycle // len(cameras))
+        deadline = _time.monotonic() + scrub.backfill_time_budget_s
+        for camera in cameras:
+            if _time.monotonic() >= deadline:
+                break
+            try:
+                _merge(camera, await generate_backfill(
+                    settings, camera, budget=share, frigate_conn=conn, sidecar_conn=conn,
+                    now=now, gop_cache=gop_cache, sem=sem,
+                ))
+            except Exception:
+                logger.exception("scrub: backfill failed for camera %s", camera)
+                totals[camera]["error"] = True
+
+        # One line per cycle. Whether the edge is being held is otherwise only
+        # visible by querying the DB and inferring it from timestamps, and the
+        # cycle's own duration is the floor on how stale the edge can get: a
+        # camera is only touched once per cycle.
+        elapsed = _time.monotonic() - started
+        live_total = sum(r["segments"] for r in totals.values())
+        # Worst across cameras of each camera's *newest* bucket. Taking the max
+        # over every row instead measures the oldest backfill bucket in the
+        # table, which has nothing to do with whether the edge is being held.
+        lag_row = conn.execute(
+            "SELECT MIN(newest) AS furthest FROM ("
+            "  SELECT camera, MAX(generated_through) AS newest FROM scrub_buckets"
+            "  WHERE interval_s = ? GROUP BY camera"
+            ")",
+            (scrub.recent_interval_s,),
+        ).fetchone()
+        # Against wall clock at log time, not the cycle's own `now`: a camera
+        # serviced at the start of a 500s cycle is 500s stale by the end, and
+        # measuring from `now` would report it as current.
+        worst_lag = (
+            _time.time() - lag_row["furthest"]
+            if lag_row and lag_row["furthest"] is not None
+            else float("nan")
+        )
+        logger.info(
+            "scrub: cycle %.0fs, %d cameras, %d segments, %d frames; worst live-edge lag %.0fs",
+            elapsed, len(cameras), live_total,
+            sum(r["new_frames"] for r in totals.values()), worst_lag,
+        )
+        if worst_lag > elapsed * 3 and elapsed > 0:
+            logger.warning(
+                "scrub: live edge is %.0fs behind after a %.0fs cycle -- generation is not "
+                "keeping up. Narrow scrub.cameras, or raise scrub.recent_interval_s to at "
+                "least the cameras' GOP so keyframe extraction is used instead of a full "
+                "decode (see the cycle cost in this log).",
+                worst_lag, elapsed,
+            )
+        return list(totals.values())
     finally:
         conn.close()
 
