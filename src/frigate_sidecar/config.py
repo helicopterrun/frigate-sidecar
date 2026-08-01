@@ -218,6 +218,62 @@ class ProxySection(BaseModel):
     )
 
 
+class PushSection(BaseModel):
+    """Push notifications (docs/push-notifications.md).
+
+    Off by default -- push is the last capability tier to light up, never a
+    dependency of any other one (spec's "optional always" non-negotiable). The
+    sidecar is the only APNs-facing piece; devices register against it the same
+    way they authenticate against everything else (§1: reuse the sidecar's
+    existing Frigate-session auth, no second credential).
+    """
+
+    enabled: bool = False
+    # "mock" logs what would be sent and always succeeds -- the only transport
+    # available without real APNs credentials, and the default so a fresh
+    # deployment doesn't accidentally try to reach a relay that isn't there.
+    # "relay" posts the minimal {device_token, environment, handle, server_id,
+    # severity} payload to `relay_base_url` (spec §4).
+    transport: str = "mock"
+    # Short opaque id of *this* sidecar instance, carried in the APNs payload
+    # so a device with more than one server registered can route the NSE's
+    # handle-redeem fetch to the right base URL (spec §2). Generated at
+    # startup if left blank -- see push/engine.py.
+    server_id: str = ""
+
+    # -- MQTT (event source, spec's "Architecture at a glance") --
+    mqtt_host: str = "localhost"
+    mqtt_port: int = 1883
+    mqtt_username: str | None = None
+    mqtt_password: str | None = None
+    mqtt_client_id: str = "frigate-sidecar-push"
+    mqtt_topic_reviews: str = "frigate/reviews"
+    mqtt_topic_available: str = "frigate/available"
+    # Reconnect backoff (spec §5, "MQTT broker unreachable from the sidecar").
+    reconnect_backoff_s: float = 2.0
+    reconnect_backoff_max_s: float = 60.0
+    # After this long without any broker traffic, treat Frigate as possibly
+    # offline and back-fill the gap on reconnect/resume (spec's stale/live
+    # model, §12.6, reused verbatim) rather than silently dropping alerts.
+    offline_silence_s: float = 60.0
+    backfill_lookback_s: float = 60.0
+
+    # -- Relay transport (spec §4) --
+    relay_base_url: str = "https://push-relay.example.invalid"
+    relay_timeout_s: float = 10.0
+
+    # -- Handle redemption (spec §3 step 2) --
+    handle_ttl_s: float = 3600.0
+
+    @field_validator("transport")
+    @classmethod
+    def _known_transport(cls, v: str) -> str:
+        t = v.strip().lower()
+        if t not in ("mock", "relay"):
+            raise ValueError(f"push.transport must be 'mock' or 'relay', got {v!r}")
+        return t
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="FRIGATE_SIDECAR_",
@@ -231,6 +287,7 @@ class Settings(BaseSettings):
     watchdog: WatchdogSection = Field(default_factory=WatchdogSection)
     scrub: ScrubSection = Field(default_factory=ScrubSection)
     proxy: ProxySection = Field(default_factory=ProxySection)
+    push: PushSection = Field(default_factory=PushSection)
     log_level: str = "INFO"
 
     @model_validator(mode="after")

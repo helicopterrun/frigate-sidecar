@@ -97,6 +97,40 @@ CREATE TABLE IF NOT EXISTS scrub_sheets (
     PRIMARY KEY (camera, start_ts, interval_s, count)
 );
 CREATE INDEX IF NOT EXISTS idx_scrub_sheet_cam ON scrub_sheets(camera, start_ts);
+
+-- Push notifications (docs/push-notifications.md). One row per physical
+-- device, keyed on the APNs token itself so a re-registering device (app
+-- relaunch, entitlement refresh) overwrites its own filter state via an
+-- idempotent PUT rather than accumulating duplicate rows that would double
+-- -fire alerts. `device_id` is a stable, derived-from-token local handle
+-- returned to the client for logging/unregistration -- there is no Elsinore
+-- account for it to attach to.
+CREATE TABLE IF NOT EXISTS push_devices (
+    apns_token   TEXT PRIMARY KEY,
+    device_id    TEXT NOT NULL,
+    bundle_id    TEXT NOT NULL,
+    environment  TEXT NOT NULL CHECK(environment IN ('sandbox','prod')),
+    app_version  TEXT NOT NULL DEFAULT '',
+    cameras      TEXT NOT NULL DEFAULT '[]',   -- JSON list; [] = all cameras
+    labels       TEXT NOT NULL DEFAULT '[]',   -- JSON list; [] = all labels
+    min_severity TEXT NOT NULL DEFAULT 'alert' CHECK(min_severity IN ('alert','detection')),
+    registered_at TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+-- Opaque, sidecar-minted, short-lived handles standing in for
+-- {camera, event_id} in the APNs payload -- the NSE and app redeem the
+-- handle, never see a raw Frigate event id (which embeds a wall-clock
+-- timestamp) over the wire. Expired rows are pruned lazily on redeem.
+CREATE TABLE IF NOT EXISTS push_handles (
+    handle       TEXT PRIMARY KEY,
+    camera       TEXT NOT NULL,
+    event_id     TEXT NOT NULL,
+    review_id    TEXT NOT NULL,
+    created_at   REAL NOT NULL,
+    expires_at   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_handle_expiry ON push_handles(expires_at);
 """
 
 

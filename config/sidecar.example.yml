@@ -134,4 +134,38 @@ proxy:
   enabled: true
   pass_request_headers: [range, authorization, cookie]
 
+# Push notifications (docs/push-notifications.md). Off by default -- push is
+# the last capability tier to light up, never a dependency of any other one.
+push:
+  enabled: false
+  # "mock" logs what would be sent and always succeeds -- the only transport
+  # usable without real APNs credentials, and the safe default. "relay" posts
+  # the minimal, content-free payload to relay_base_url below.
+  transport: mock
+  # Short opaque id of this sidecar instance, sent in the push payload so a
+  # device with more than one server registered can route the NSE's handle
+  # fetch correctly. Leave blank to auto-generate one at startup.
+  server_id: ""
+  mqtt_host: frigate.lan
+  mqtt_port: 1883
+  mqtt_username: null
+  mqtt_password: null
+  mqtt_topic_reviews: frigate/reviews
+  mqtt_topic_available: frigate/available
+  reconnect_backoff_s: 2.0
+  reconnect_backoff_max_s: 60.0
+  # After this long without any broker traffic, treat Frigate as possibly
+  # offline; on reconnect, back-fill the gap from /api/events before
+  # resuming live pushes rather than silently dropping an alert.
+  offline_silence_s: 60.0
+  backfill_lookback_s: 60.0
+  # Only used when transport: relay. The relay holds the one real APNs .p8
+  # key and never receives camera names, labels, or snapshots -- only
+  # {device_token, environment, handle, server_id, severity}.
+  relay_base_url: https://push-relay.example.invalid
+  relay_timeout_s: 10.0
+  # How long a minted handle (opaque camera/event-id reference for the NSE's
+  # handle-redemption fetch) stays valid.
+  handle_ttl_s: 3600.0
+
 log_level: INFO

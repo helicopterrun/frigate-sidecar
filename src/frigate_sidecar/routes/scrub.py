@@ -135,7 +135,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
             "generated": generated,
         },
         "proxy": {"enabled": settings.proxy.enabled},
-        "push": {"enabled": False},
+        "push": {"enabled": settings.push.enabled, "transport": settings.push.transport},
     }
 
 
