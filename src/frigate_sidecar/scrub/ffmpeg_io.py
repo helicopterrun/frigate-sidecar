@@ -35,6 +35,22 @@ class FfmpegInterrupted(FfmpegError):
     """
 
 
+async def _spawn(*argv: str, **kwargs: object) -> asyncio.subprocess.Process:
+    """`create_subprocess_exec` with a missing binary reported as FfmpegError.
+
+    Without this, a host with no ffmpeg/ffprobe on PATH raises FileNotFoundError
+    out of every helper here -- past the `except FfmpegError` guards the callers
+    use for every other failure -- and takes down whole generation cycles
+    instead of degrading to "this camera couldn't be measured". Startup already
+    warns about the missing binary (`_check_scrub_inputs`); it shouldn't also
+    fail in an unrecognisable shape.
+    """
+    try:
+        return await asyncio.create_subprocess_exec(*argv, **kwargs)  # type: ignore[arg-type]
+    except OSError as exc:
+        raise FfmpegError(f"could not run {argv[0]}: {exc}") from exc
+
+
 def _interrupted(returncode: int | None, stderr_tail: str) -> bool:
     # Negative: killed by a signal directly. 255 with nothing to say: ffmpeg's
     # own exit code when it stops on a received signal.
@@ -54,7 +70,7 @@ async def probe_display_aspect(
     getting this wrong for an anamorphic source would reintroduce exactly the
     squeeze this is meant to remove.
     """
-    proc = await asyncio.create_subprocess_exec(
+    proc = await _spawn(
         _FFPROBE, "-v", "error", "-select_streams", "v",
         "-show_entries", "stream=width,height,sample_aspect_ratio",
         "-of", "csv=p=0", str(segment_path),
@@ -120,7 +136,7 @@ async def probe_gop_seconds(segment_path: Path, *, timeout_s: float = _PROBE_TIM
 
 
 async def _probe_duration(segment_path: Path, *, timeout_s: float) -> float:
-    proc = await asyncio.create_subprocess_exec(
+    proc = await _spawn(
         _FFPROBE, "-v", "error", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", str(segment_path),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
@@ -149,7 +165,7 @@ _PTS_ENTRIES = ("pts_time", "pkt_pts_time")
 async def _probe_frame_entry(
     segment_path: Path, entry: str, *, timeout_s: float
 ) -> list[float]:
-    proc = await asyncio.create_subprocess_exec(
+    proc = await _spawn(
         _FFPROBE, "-v", "error", "-select_streams", "v",
         "-skip_frame", "nokey",
         "-show_entries", f"frame={entry}",
@@ -206,7 +222,7 @@ async def extract_keyframes_with_pts(
     line and the Nth file on disk describe the same frame by construction --
     the two-process version assumed that across separate decodes.
     """
-    proc = await asyncio.create_subprocess_exec(
+    proc = await _spawn(
         _FFMPEG, "-nostdin", "-loglevel", "info",
         "-skip_frame", "nokey", "-vsync", "0", "-i", str(segment_path),
         "-vf", f"scale={cell_w}:{cell_h},showinfo", "-q:v", "8", "-f", "image2",
@@ -239,7 +255,7 @@ async def extract_keyframes(
     """Keyframe-only decode -- cheap, uniform when GOP ~= target interval
     (§5.2). Frame N on disk corresponds to keyframe pts N from
     `probe_keyframe_pts` (same underlying decode order)."""
-    proc = await asyncio.create_subprocess_exec(
+    proc = await _spawn(
         _FFMPEG, "-nostdin", "-loglevel", "error",
         "-skip_frame", "nokey", "-vsync", "0", "-i", str(segment_path),
         "-vf", f"scale={cell_w}:{cell_h}", "-q:v", "8", "-f", "image2",
@@ -274,7 +290,7 @@ async def extract_fps(
     timeout_s: float = _EXTRACT_TIMEOUT_S, cell_w: int = 320, cell_h: int = 180,
 ) -> list[Path]:
     """Full-decode `fps=1/N` fallback for a coarser GOP (§5.2)."""
-    proc = await asyncio.create_subprocess_exec(
+    proc = await _spawn(
         _FFMPEG, "-nostdin", "-loglevel", "error", "-i", str(segment_path),
         "-vf", f"fps=1/{interval_s},scale={cell_w}:{cell_h}", "-q:v", "8", "-f", "image2",
         str(out_dir / "%06d.jpg"),

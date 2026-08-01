@@ -1086,13 +1086,13 @@ def test_coarse_gop_camera_uses_the_cheap_extraction_path(
         }
     )
 
-    async def _coarse_gop(seg_path: Path, **kw: object) -> float:
-        return 5.0
+    async def _coarse_gop(seg_path: Path, **kw: object) -> list[float]:
+        return [5.0, 5.0]
 
     async def _boom(*a: object, **k: object) -> list[Path]:
         raise AssertionError("full decode used for a source that can't cheaply provide it")
 
-    monkeypatch.setattr(ffmpeg_io, "probe_gop_seconds", _coarse_gop)
+    monkeypatch.setattr(ffmpeg_io, "probe_keyframe_deltas", _coarse_gop)
     monkeypatch.setattr(ffmpeg_io, "extract_fps", _boom)
     monkeypatch.setattr(
         ffmpeg_io, "extract_keyframes_with_pts",
@@ -1232,6 +1232,34 @@ def test_unmeasurable_aspect_falls_back_to_the_configured_cell(
     )
     conn.close()
     assert got == (320, 180)
+
+
+def test_a_missing_ffprobe_degrades_instead_of_exploding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ffprobe on PATH raises FileNotFoundError, not FfmpegError, so it flew
+    past every `except FfmpegError` guard and failed whole cycles rather than
+    the one measurement it actually prevents."""
+    conn, root = _conn_with_segment(tmp_path)
+    settings = _aspect_settings(tmp_path).model_copy(
+        update={
+            "frigate": FrigateSection(
+                config_path=tmp_path / "cfg.yml", db_path=tmp_path / "f.db",
+                media_path=Path("/media/frigate"), recordings_path=root,
+            )
+        }
+    )
+    monkeypatch.setattr(ffmpeg_io, "_FFPROBE", str(tmp_path / "no-such-ffprobe"))
+    profile = generator.SourceProfile()
+    try:
+        assert asyncio.run(
+            generator.camera_cell_size(settings, "cam", frigate_conn=conn, profile=profile)
+        ) == (320, 180)
+        assert asyncio.run(
+            generator.camera_gop_seconds(settings, "cam", frigate_conn=conn, profile=profile)
+        ) is None
+    finally:
+        conn.close()
 
 
 def test_aspect_preservation_can_be_turned_off(
