@@ -194,6 +194,14 @@ Two settings sections back the new features:
   `:8971`), used only by the reverse proxy for app traffic. Kept separate from
   `frigate.base_url` (unauthenticated, used for the sidecar's own
   server-to-server calls) — do not point both at the same port.
+- `scrub.preserve_source_aspect` (default on) — derive each camera's cell height
+  from its own display aspect ratio rather than scaling every source into a
+  fixed `cell_w × cell_h`. A 4:3 camera rendered into a 16:9 cell comes out
+  anamorphically squeezed and nothing downstream can undo it; two of the ten
+  cameras on the reference deployment are 1600×1200. The dimensions travel per
+  sheet in the `cell_w`/`cell_h` metadata, so a client reading those renders each
+  camera correctly. `cell_h` becomes the fallback for sources whose shape can't
+  be measured.
 - `scrub.match_keyframe_cadence` (default on) — generate a camera at its own
   keyframe cadence when that is coarser than `recent_interval_s`. A source whose
   GOP is longer than the target interval can only reach that interval by

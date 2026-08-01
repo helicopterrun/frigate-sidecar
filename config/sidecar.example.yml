@@ -95,7 +95,13 @@ scrub:
   # motion-only and too fragmentary to sample at a uniform interval.
   retention_days: 4
   cell_w: 320
+  # Fallback height only. With preserve_source_aspect on (the default), each
+  # camera's cell height is derived from its own display aspect ratio instead:
+  # a 4:3 camera scaled into a 16:9 cell comes out anamorphically squeezed, and
+  # nothing downstream can undo it because the pixels are already wrong. The
+  # resulting dimensions travel per sheet in the cell_w/cell_h metadata.
   cell_h: 180
+  preserve_source_aspect: true
   sheet_cols: 12
   sheet_rows: 8
   # "jpeg" | "webp". JPEG measured smaller than WebP on real camera content

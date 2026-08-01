@@ -550,7 +550,7 @@ def test_generation_loop_skips_the_idle_wait_while_catching_up(
     sleeps: list[float] = []
     cycles = 0
 
-    async def _fake_cycle(_settings: object, *, now: float) -> list[dict[str, object]]:
+    async def _fake_cycle(_settings: object, **kw: object) -> list[dict[str, object]]:
         nonlocal cycles
         cycles += 1
         if cycles > 2:

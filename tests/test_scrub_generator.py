@@ -115,7 +115,7 @@ def test_scrub_generate_writes_sheet_with_declared_count_and_verified_cadence(
         result = asyncio.run(
             generator.generate_camera(
                 env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_030.0, gop_cache=generator.GopCache(),
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
                 sem=asyncio.Semaphore(3),
             )
         )
@@ -166,7 +166,7 @@ def test_scrub_generate_gap_splits_bucket(env: Settings, monkeypatch: pytest.Mon
         asyncio.run(
             generator.generate_camera(
                 env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_060.0, gop_cache=generator.GopCache(),
+                now=1_800_000_060.0, profile=generator.SourceProfile(),
                 sem=asyncio.Semaphore(3),
             )
         )
@@ -264,7 +264,7 @@ def test_scrub_generate_aged_tier_uses_coarser_interval(aged_env: Settings) -> N
         result = asyncio.run(
             generator.generate_camera(
                 aged_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=now, gop_cache=generator.GopCache(), sem=asyncio.Semaphore(3),
+                now=now, profile=generator.SourceProfile(), sem=asyncio.Semaphore(3),
             )
         )
         buckets = db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
@@ -296,7 +296,7 @@ def test_scrub_generate_tiers_do_not_overlap(aged_env: Settings) -> None:
         asyncio.run(
             generator.generate_camera(
                 aged_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=now, gop_cache=generator.GopCache(), sem=asyncio.Semaphore(3),
+                now=now, profile=generator.SourceProfile(), sem=asyncio.Semaphore(3),
             )
         )
         buckets = db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
@@ -323,7 +323,7 @@ def test_scrub_generate_recent_bucket_retired_once_superseded_by_aged(
         asyncio.run(
             generator.generate_camera(
                 aged_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=now1, gop_cache=generator.GopCache(), sem=asyncio.Semaphore(3),
+                now=now1, profile=generator.SourceProfile(), sem=asyncio.Semaphore(3),
             )
         )
         recent_after_1 = db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
@@ -342,7 +342,7 @@ def test_scrub_generate_recent_bucket_retired_once_superseded_by_aged(
         asyncio.run(
             generator.generate_camera(
                 aged_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=now2, gop_cache=generator.GopCache(), sem=asyncio.Semaphore(3),
+                now=now2, profile=generator.SourceProfile(), sem=asyncio.Semaphore(3),
             )
         )
         buckets_after_2 = db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
@@ -369,7 +369,7 @@ def test_generation_leaves_no_scratch_behind(env: Settings) -> None:
         asyncio.run(
             generator.generate_camera(
                 env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_030.0, gop_cache=generator.GopCache(),
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
                 sem=asyncio.Semaphore(3),
             )
         )
@@ -390,7 +390,7 @@ def test_completed_sheet_drops_its_cell_store(env: Settings) -> None:
         asyncio.run(
             generator.generate_camera(
                 env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_030.0, gop_cache=generator.GopCache(),
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
                 sem=asyncio.Semaphore(3),
             )
         )
@@ -420,7 +420,7 @@ def test_prune_removes_sheets_and_their_cell_stores(env: Settings) -> None:
         asyncio.run(
             generator.generate_camera(
                 env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_030.0, gop_cache=generator.GopCache(),
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
                 sem=asyncio.Semaphore(3),
             )
         )
@@ -446,7 +446,7 @@ def test_sheet_row_count_matches_its_filename(env: Settings) -> None:
         asyncio.run(
             generator.generate_camera(
                 env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_030.0, gop_cache=generator.GopCache(),
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
                 sem=asyncio.Semaphore(3),
             )
         )
@@ -466,7 +466,7 @@ def test_webp_format_writes_webp_sheets(env: Settings) -> None:
         asyncio.run(
             generator.generate_camera(
                 webp_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_030.0, gop_cache=generator.GopCache(),
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
                 sem=asyncio.Semaphore(3),
             )
         )
@@ -508,7 +508,7 @@ def test_extraction_uses_the_configured_cell_size(
         asyncio.run(
             generator.generate_camera(
                 big, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_030.0, gop_cache=generator.GopCache(),
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
                 sem=asyncio.Semaphore(3),
             )
         )
@@ -534,7 +534,7 @@ def test_each_sheet_gets_its_own_cell_store(env: Settings) -> None:
         asyncio.run(
             generator.generate_camera(
                 env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_030.0, gop_cache=generator.GopCache(),
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
                 sem=asyncio.Semaphore(3),
             )
         )
@@ -568,7 +568,7 @@ def test_cycle_work_is_budgeted(env: Settings, monkeypatch: pytest.MonkeyPatch) 
         result = asyncio.run(
             generator.generate_backfill(
                 env, "doorbell", budget=3, frigate_conn=joined, sidecar_conn=joined,
-                now=base + 200, gop_cache=generator.GopCache(),
+                now=base + 200, profile=generator.SourceProfile(),
                 sem=asyncio.Semaphore(3),
             )
         )
@@ -635,7 +635,7 @@ def test_dense_keyframes_fill_whole_sheets(
         asyncio.run(
             generator.generate_camera(
                 settings, "doorbell", frigate_conn=joined, sidecar_conn=joined,
-                now=base + 120, gop_cache=generator.GopCache(), sem=asyncio.Semaphore(3),
+                now=base + 120, profile=generator.SourceProfile(), sem=asyncio.Semaphore(3),
             )
         )
         buckets = db.list_scrub_buckets(joined, "doorbell", 0, 1_900_000_000)
@@ -664,7 +664,7 @@ def test_a_filling_sheet_is_published_once_per_cycle(env: Settings) -> None:
         asyncio.run(
             generator.generate_camera(
                 env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_030.0, gop_cache=generator.GopCache(),
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
                 sem=asyncio.Semaphore(3),
             )
         )
@@ -748,7 +748,7 @@ def test_first_cycle_on_a_cold_cache_reaches_the_live_edge(long_history_env: Set
         asyncio.run(
             generator.generate_camera(
                 env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=now, gop_cache=generator.GopCache(), sem=asyncio.Semaphore(3),
+                now=now, profile=generator.SourceProfile(), sem=asyncio.Semaphore(3),
             )
         )
         through = db.latest_generated_through(conn, "doorbell", 1.0)
@@ -773,7 +773,7 @@ def test_backfill_fills_in_behind_the_live_edge(long_history_env: Settings) -> N
             asyncio.run(
                 generator.generate_camera(
                     env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                    now=now + cycle * 60, gop_cache=generator.GopCache(),
+                    now=now + cycle * 60, profile=generator.SourceProfile(),
                     sem=asyncio.Semaphore(3),
                 )
             )
@@ -876,7 +876,7 @@ def test_a_hole_with_no_recordings_does_not_stall_backfill(
         result = asyncio.run(
             generator.generate_camera(
                 settings, "doorbell", frigate_conn=joined, sidecar_conn=joined,
-                now=now, gop_cache=generator.GopCache(), sem=asyncio.Semaphore(3),
+                now=now, profile=generator.SourceProfile(), sem=asyncio.Semaphore(3),
             )
         )
     finally:
@@ -1086,13 +1086,13 @@ def test_coarse_gop_camera_uses_the_cheap_extraction_path(
         }
     )
 
-    async def _coarse_gop(seg_path: Path, **kw: object) -> float:
-        return 5.0
+    async def _coarse_gop(seg_path: Path, **kw: object) -> list[float]:
+        return [5.0, 5.0]
 
     async def _boom(*a: object, **k: object) -> list[Path]:
         raise AssertionError("full decode used for a source that can't cheaply provide it")
 
-    monkeypatch.setattr(ffmpeg_io, "probe_gop_seconds", _coarse_gop)
+    monkeypatch.setattr(ffmpeg_io, "probe_keyframe_deltas", _coarse_gop)
     monkeypatch.setattr(ffmpeg_io, "extract_fps", _boom)
     monkeypatch.setattr(
         ffmpeg_io, "extract_keyframes_with_pts",
@@ -1104,7 +1104,7 @@ def test_coarse_gop_camera_uses_the_cheap_extraction_path(
         result = asyncio.run(
             generator.generate_live_edge(
                 env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_000.0 + 86400.0, gop_cache=generator.GopCache(),
+                now=1_800_000_000.0 + 86400.0, profile=generator.SourceProfile(),
                 sem=asyncio.Semaphore(3),
             )
         )
@@ -1141,3 +1141,253 @@ def test_small_measurement_noise_does_not_create_a_new_tier(tmp_path: Path) -> N
         for g in (4.98, 4.995056, 5.0, 5.02, 5.11)
     }
     assert intervals == {5.0}, f"same source resolved to several tiers: {intervals}"
+
+
+# ----- Cell geometry follows the source shape -----
+
+
+def _aspect_settings(tmp_path: Path, **scrub_kw: object) -> Settings:
+    return Settings(
+        frigate=FrigateSection(config_path=tmp_path / "cfg.yml", db_path=tmp_path / "f.db"),
+        sidecar=SidecarSection(db_path=tmp_path / "s.db"),
+        scrub=ScrubSection(cell_w=320, cell_h=180, **scrub_kw),  # type: ignore[arg-type]
+    )
+
+
+def _conn_with_segment(tmp_path: Path) -> tuple[sqlite3.Connection, Path]:
+    frigate_db = tmp_path / "f.db"
+    conn = sqlite3.connect(frigate_db)
+    conn.executescript(RECORDINGS_SCHEMA)
+    conn.execute(
+        "INSERT INTO recordings VALUES ('s1','cam','/media/frigate/1.mp4',0,10,10.0,5.0)"
+    )
+    conn.commit()
+    conn.row_factory = sqlite3.Row
+    root = tmp_path / "recordings"
+    root.mkdir(exist_ok=True)
+    (root / "1.mp4").write_bytes(b"fake")
+    return conn, root
+
+
+@pytest.mark.parametrize(
+    ("aspect", "expected_h", "shape"),
+    [
+        (16 / 9, 180, "16:9 -> unchanged"),
+        (4 / 3, 240, "4:3 -> taller cell, no squeeze"),
+        (1.0, 320, "square"),
+        (2560 / 1440, 180, "1440p 16:9"),
+        (1600 / 1200, 240, "the actual doorbell/package geometry"),
+    ],
+)
+def test_cell_height_follows_the_source_aspect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, aspect: float, expected_h: int, shape: str
+) -> None:
+    """Scaling every source into a fixed cell squeezes anything that isn't that
+    shape, and nothing downstream can undo it -- the pixels are already wrong."""
+    conn, root = _conn_with_segment(tmp_path)
+    settings = _aspect_settings(tmp_path).model_copy(
+        update={
+            "frigate": FrigateSection(
+                config_path=tmp_path / "cfg.yml", db_path=tmp_path / "f.db",
+                media_path=Path("/media/frigate"), recordings_path=root,
+            )
+        }
+    )
+
+    async def _fake_aspect(seg: Path, **kw: object) -> float:
+        return aspect
+
+    monkeypatch.setattr(ffmpeg_io, "probe_display_aspect", _fake_aspect)
+    got = asyncio.run(
+        generator.camera_cell_size(
+            settings, "cam", frigate_conn=conn, profile=generator.SourceProfile()
+        )
+    )
+    conn.close()
+    assert got == (320, expected_h), shape
+    assert got[1] % 2 == 0, "even dimensions keep the scaler on its fast path"
+
+
+def test_unmeasurable_aspect_falls_back_to_the_configured_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn, root = _conn_with_segment(tmp_path)
+    settings = _aspect_settings(tmp_path).model_copy(
+        update={
+            "frigate": FrigateSection(
+                config_path=tmp_path / "cfg.yml", db_path=tmp_path / "f.db",
+                media_path=Path("/media/frigate"), recordings_path=root,
+            )
+        }
+    )
+
+    async def _no_aspect(seg: Path, **kw: object) -> float | None:
+        return None
+
+    monkeypatch.setattr(ffmpeg_io, "probe_display_aspect", _no_aspect)
+    got = asyncio.run(
+        generator.camera_cell_size(
+            settings, "cam", frigate_conn=conn, profile=generator.SourceProfile()
+        )
+    )
+    conn.close()
+    assert got == (320, 180)
+
+
+def test_a_missing_ffprobe_degrades_instead_of_exploding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ffprobe on PATH raises FileNotFoundError, not FfmpegError, so it flew
+    past every `except FfmpegError` guard and failed whole cycles rather than
+    the one measurement it actually prevents."""
+    conn, root = _conn_with_segment(tmp_path)
+    settings = _aspect_settings(tmp_path).model_copy(
+        update={
+            "frigate": FrigateSection(
+                config_path=tmp_path / "cfg.yml", db_path=tmp_path / "f.db",
+                media_path=Path("/media/frigate"), recordings_path=root,
+            )
+        }
+    )
+    monkeypatch.setattr(ffmpeg_io, "_FFPROBE", str(tmp_path / "no-such-ffprobe"))
+    profile = generator.SourceProfile()
+    try:
+        assert asyncio.run(
+            generator.camera_cell_size(settings, "cam", frigate_conn=conn, profile=profile)
+        ) == (320, 180)
+        assert asyncio.run(
+            generator.camera_gop_seconds(settings, "cam", frigate_conn=conn, profile=profile)
+        ) is None
+    finally:
+        conn.close()
+
+
+def test_aspect_preservation_can_be_turned_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn, root = _conn_with_segment(tmp_path)
+    settings = _aspect_settings(tmp_path, preserve_source_aspect=False).model_copy(
+        update={
+            "frigate": FrigateSection(
+                config_path=tmp_path / "cfg.yml", db_path=tmp_path / "f.db",
+                media_path=Path("/media/frigate"), recordings_path=root,
+            )
+        }
+    )
+
+    async def _boom(seg: Path, **kw: object) -> float:
+        raise AssertionError("should not probe when preservation is off")
+
+    monkeypatch.setattr(ffmpeg_io, "probe_display_aspect", _boom)
+    got = asyncio.run(
+        generator.camera_cell_size(
+            settings, "cam", frigate_conn=conn, profile=generator.SourceProfile()
+        )
+    )
+    conn.close()
+    assert got == (320, 180)
+
+
+def test_the_aspect_is_measured_once_per_camera(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two ffprobe calls per camera per cycle is real money against an ~80s
+    cycle, and neither GOP nor shape changes without a reconfiguration."""
+    conn, root = _conn_with_segment(tmp_path)
+    settings = _aspect_settings(tmp_path).model_copy(
+        update={
+            "frigate": FrigateSection(
+                config_path=tmp_path / "cfg.yml", db_path=tmp_path / "f.db",
+                media_path=Path("/media/frigate"), recordings_path=root,
+            )
+        }
+    )
+    calls = 0
+
+    async def _counted(seg: Path, **kw: object) -> float:
+        nonlocal calls
+        calls += 1
+        return 4 / 3
+
+    monkeypatch.setattr(ffmpeg_io, "probe_display_aspect", _counted)
+    profile = generator.SourceProfile()
+    for _ in range(5):
+        asyncio.run(
+            generator.camera_cell_size(settings, "cam", frigate_conn=conn, profile=profile)
+        )
+    conn.close()
+    assert calls == 1
+
+
+def test_sheets_record_the_geometry_they_were_built_at(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client renders from the per-sheet cell_w/cell_h, so those have to
+    describe the cells actually stored."""
+    async def _four_three(seg: Path, **kw: object) -> float:
+        return 4 / 3
+
+    monkeypatch.setattr(ffmpeg_io, "probe_display_aspect", _four_three)
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_camera(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
+                sem=asyncio.Semaphore(3),
+            )
+        )
+        sheets = db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+        buckets = db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+    finally:
+        conn.close()
+
+    assert sheets and all((s["cell_w"], s["cell_h"]) == (320, 240) for s in sheets)
+    assert buckets and all((b["width"], b["height"]) == (320, 240) for b in buckets)
+
+
+def test_gop_is_pooled_across_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 10s segment holding a 5s GOP contains two keyframes, so on its own it
+    offers one spacing sample -- which reads 4.5 or 5.0 purely by where the
+    segment was cut. Measured live, one camera produced both from consecutive
+    segments, and since the interval keys every bucket, sheet and directory
+    that spawned a second tier for the same camera."""
+    frigate_db = tmp_path / "f.db"
+    conn = sqlite3.connect(frigate_db)
+    conn.executescript(RECORDINGS_SCHEMA)
+    root = tmp_path / "recordings"
+    root.mkdir()
+    for i in range(6):
+        conn.execute(
+            "INSERT INTO recordings VALUES (?, 'cam', ?, ?, ?, 10.0, 5.0)",
+            (f"s{i}", f"/media/frigate/{i}.mp4", i * 10, (i + 1) * 10),
+        )
+        (root / f"{i}.mp4").write_bytes(b"fake")
+    conn.commit()
+    conn.row_factory = sqlite3.Row
+
+    settings = Settings(
+        frigate=FrigateSection(
+            config_path=tmp_path / "cfg.yml", db_path=frigate_db,
+            media_path=Path("/media/frigate"), recordings_path=root,
+        ),
+        sidecar=SidecarSection(db_path=tmp_path / "s.db"),
+        scrub=ScrubSection(recent_interval_s=1.0, aged_interval_s=5.0),
+    )
+
+    # One outlier segment, the rest at the true spacing -- exactly the live shape.
+    async def _deltas(seg: Path, **kw: object) -> list[float]:
+        return [4.496] if seg.name == "5.mp4" else [4.995]
+
+    monkeypatch.setattr(ffmpeg_io, "probe_keyframe_deltas", _deltas)
+    gop = asyncio.run(
+        generator.camera_gop_seconds(
+            settings, "cam", frigate_conn=conn, profile=generator.SourceProfile()
+        )
+    )
+    conn.close()
+    assert gop == pytest.approx(4.995), "the outlier must not decide the cadence"
+    plan = generator.tier_plan(settings, 1_800_000_000.0, gop)
+    assert plan[0][0] == 5.0, "and it must land on one stable tier"

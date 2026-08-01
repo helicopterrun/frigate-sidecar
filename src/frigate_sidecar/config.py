@@ -156,7 +156,17 @@ class ScrubSection(BaseModel):
     aged_after_h: float = 24.0
     retention_days: int = 4
     cell_w: int = 320
+    # Fallback height, used only when the source's shape can't be measured or
+    # `preserve_source_aspect` is off. Otherwise the height is derived per
+    # camera from the source's display aspect ratio.
     cell_h: int = 180
+    # Derive each camera's cell height from its own aspect ratio instead of
+    # scaling every source into a fixed cell. A 4:3 camera rendered into a 16:9
+    # cell comes out anamorphically squeezed, and nothing downstream can undo it
+    # -- the pixels are already wrong. Two of the ten cameras here are 1600x1200.
+    # The resulting dimensions travel per sheet in the `cell_w`/`cell_h`
+    # metadata, so a client reading those renders each camera correctly.
+    preserve_source_aspect: bool = True
     sheet_cols: int = 12
     sheet_rows: int = 8
     format: str = "jpeg"  # "jpeg" | "webp" -- JPEG measured smaller on real
