@@ -19,6 +19,9 @@ from frigate_sidecar import __version__
 from frigate_sidecar.auth import FrigateAuthMiddleware
 from frigate_sidecar.config import Settings, load_settings
 from frigate_sidecar.frigate_api import FrigateClient
+from frigate_sidecar.push.engine import PushEngine
+from frigate_sidecar.push.mqtt import MqttReviewSubscriber
+from frigate_sidecar.push.transport import LogTransport, RelayTransport
 from frigate_sidecar.routes import analysis as analysis_routes
 from frigate_sidecar.routes import faces as faces_routes
 from frigate_sidecar.routes import fps_budget as fps_budget_routes
@@ -26,6 +29,7 @@ from frigate_sidecar.routes import health as health_routes
 from frigate_sidecar.routes import motion as motion_routes
 from frigate_sidecar.routes import placement as placement_routes
 from frigate_sidecar.routes import proxy as proxy_routes
+from frigate_sidecar.routes import push as push_routes
 from frigate_sidecar.routes import score_histogram as score_histogram_routes
 from frigate_sidecar.routes import scrub as scrub_routes
 from frigate_sidecar.routes import toybox as toybox_routes
@@ -119,6 +123,22 @@ def _check_scrub_inputs(settings: Settings) -> None:
             )
 
 
+def _build_push_transport(settings: Settings):  # noqa: ANN201 - Protocol return
+    """Mock/log transport by default -- the only one usable without real APNs
+    credentials (spec §4). "relay" posts to `push.relay_base_url`."""
+    if settings.push.transport == "relay":
+        return RelayTransport(settings.push.relay_base_url, timeout=settings.push.relay_timeout_s)
+    return LogTransport()
+
+
+async def _push_subscriber_loop(app: FastAPI) -> None:
+    subscriber: MqttReviewSubscriber = app.state.push_subscriber
+    try:
+        await subscriber.run_forever()
+    except Exception:
+        logger.exception("push: mqtt subscriber loop crashed")
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
@@ -150,14 +170,39 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
         else:
             task = asyncio.create_task(_scrub_generation_loop(app))
+
+    push_task: asyncio.Task[None] | None = None
+    if settings.push.enabled:
+        server_id = settings.push.server_id or f"s_{id(app):x}"
+        transport = _build_push_transport(settings)
+        app.state.push_transport = transport
+        engine = PushEngine(
+            db_path=str(settings.sidecar.db_path),
+            transport=transport,
+            server_id=server_id,
+            handle_ttl_s=settings.push.handle_ttl_s,
+        )
+        app.state.push_engine = engine
+        subscriber = MqttReviewSubscriber(
+            settings.push, engine, frigate_base_url=settings.frigate.base_url
+        )
+        app.state.push_subscriber = subscriber
+        push_task = asyncio.create_task(_push_subscriber_loop(app))
+
     try:
         yield
     finally:
-        for pending in (task, probe_task):
+        for pending in (task, probe_task, push_task):
             if pending is not None:
                 pending.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await pending
+        running_subscriber = getattr(app.state, "push_subscriber", None)
+        if running_subscriber is not None:
+            running_subscriber.stop()
+        transport = getattr(app.state, "push_transport", None)
+        if isinstance(transport, RelayTransport):
+            await transport.aclose()
         client = getattr(app.state, "http_client", None)
         if client is not None:
             await client.aclose()
@@ -187,6 +232,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(faces_routes.router)
     app.include_router(toybox_routes.router)
     app.include_router(scrub_routes.router)
+    app.include_router(push_routes.router)
 
     # Everything registered so far is the sidecar's own surface and requires a
     # Frigate session; the proxy catch-all below must not (Frigate does its own

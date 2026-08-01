@@ -18,6 +18,11 @@ It adds:
 - **Reverse proxy** to Frigate's authenticated origin, so a client can hold a
   single base URL — everything the sidecar doesn't handle itself streams
   through to Frigate unchanged, with `Range` and auth cookies passed through.
+- **Push notifications** (`/v1/push`) — subscribes to Frigate's `frigate/reviews`
+  MQTT topic, matches new alerts against each registered device's
+  camera/label/severity filters, and publishes through a pluggable transport
+  (a log-only mock for development, or a minimal relay-client transport — see
+  [`docs/push-notifications.md`](docs/push-notifications.md)). Off by default.
 
 Runs as a single Docker container next to Frigate, bind-mounting Frigate's
 `config.yml` and `frigate.db` read-only and writing its own SQLite DB.
@@ -112,6 +117,12 @@ Full contract, error vocabulary, and rationale: [`docs/scrub-cache-and-proxy-spe
 | `GET` | `/v1/highlights/{camera}?before=&limit=&order=&cluster_s=` | Recent tracked-object events (`reason` is a Frigate label: person/car/package/…) for jump-to-highlight UI. **Raw events, newest first, by default** — see below. |
 | `*` | `/{path:path}` (catch-all) | Transparent reverse proxy to Frigate's authenticated origin (`frigate.proxy_base_url`) — `/api/*`, `/vod/*`, `/live/*`, `/preview/*`, everything else. Forwards `Range`/`Authorization`/`Cookie`/`Accept-Encoding`, streams the body **raw** so `content-encoding` and `content-length` stay consistent, relays `content-range`/`etag`/`location`/`www-authenticate` (incl. 401) unchanged, emits each `Set-Cookie` separately, and passes the HTTP method through (not GET-only). Registered last, so `/v1/*`, `/static`, and `/healthz` always win first. |
 | `WS` | `/{path:path}` (catch-all) | WebSocket relay to the same origin — Frigate's `/ws` state feed and go2rtc's WebRTC signalling, so live view works through the single base URL. |
+| `PUT` | `/v1/push/devices/{apns_token}` | Register (or idempotently re-register) a device for push, with per-device `cameras`/`labels`/`min_severity` filters. Auth'd the same as everything else. |
+| `DELETE` | `/v1/push/devices/{apns_token}` | Unregister a device. Idempotent — always 200. |
+| `GET` | `/v1/push/handle/{handle}` | Resolve an opaque, short-lived push handle to `{camera, event_id, snapshot_url}` — called by the iOS Notification Service Extension, never by the relay. |
+
+See [`docs/push-notifications.md`](docs/push-notifications.md) for the full
+design (event source, payload shape, privacy model, and failure modes).
 
 Unknown paths under endpoints the sidecar owns (not the proxy catch-all) return
 JSON 404s, never HTML: `{"error": "<code>", "message": "..."}`.
@@ -223,6 +234,13 @@ Two settings sections back the new features:
   `recordings.path` row. Startup logs an error if the path doesn't resolve, and
   the generator warns when segment files don't map.
 - `sidecar.require_frigate_auth` — see [Auth](#auth) above. On by default.
+- `push.*` — off by default (`push.enabled: false`). `push.transport` is `mock`
+  (log-only, the default — no real APNs credentials exist yet) or `relay`
+  (posts the minimal `{device_token, environment, handle, server_id,
+  severity}` payload to `push.relay_base_url`, never a camera name or
+  snapshot). `push.mqtt_host`/`mqtt_port` point at the same broker Frigate
+  itself publishes `frigate/reviews` to. See
+  [`docs/push-notifications.md`](docs/push-notifications.md).
 
 ## Status
 
