@@ -27,9 +27,13 @@ restatement of the full spec — see that doc for the complete rationale
     the default (`push.transport: mock`) and what every test in this repo
     runs against, since no real APNs credentials exist yet.
   - `RelayTransport` — posts `{device_token, environment, handle, server_id,
-    severity, apns-collapse-id}` to `push.relay_base_url`. This is the wire
-    contract a relay should implement; it is never exercised here against
-    real Apple infrastructure, only a mock relay in tests.
+    severity, apns-collapse-id}` to `push.relay_base_url`. The deployed
+    relay implementing this contract is
+    [elsinore-push-relay](https://github.com/helicopterrun/elsinore-push-relay)
+    (a Cloudflare Worker holding the one team-bound APNs key), the default
+    `relay_base_url`. To go live: `push.enabled: true`,
+    `push.transport: relay`, and MQTT pointed at Frigate's broker. Tests
+    still run against a mock relay, never real Apple infrastructure.
 - **Handle redemption:** `GET /v1/push/handle/{handle}` resolves a
   sidecar-minted, short-lived opaque handle to `{camera, event_id,
   snapshot_url}` for the iOS NSE to fetch a thumbnail from. The mapping never

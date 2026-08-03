@@ -308,7 +308,11 @@ class PushSection(BaseModel):
     backfill_lookback_s: float = 60.0
 
     # -- Relay transport (spec §4) --
-    relay_base_url: str = "https://push-relay.example.invalid"
+    # The deployed shared relay (github.com/helicopterrun/elsinore-push-relay):
+    # holds the one team-bound APNs key and forwards content-free templated
+    # alerts. Overridable for forks running their own relay under their own
+    # bundle id/team.
+    relay_base_url: str = "https://elsinore-push-relay.helicopterrun.workers.dev"
     relay_timeout_s: float = 10.0
 
     # -- Handle redemption (spec §3 step 2) --
