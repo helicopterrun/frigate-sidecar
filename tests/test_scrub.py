@@ -247,6 +247,84 @@ def test_scrub_coverage_interval_contract_and_retention_distinction(
     assert queried_age_days > body2["retention_days"]  # client's "will never exist" check
 
 
+def test_scrub_coverage_excludes_coarse_tiers_to_avoid_double_reporting(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The coarse tiers (default `coarse_intervals_s=[10.0, 60.0]`) span the
+    whole retention window and deliberately overlap the recent/aged tiers in
+    time. `/v1/scrub/{camera}/coverage` must not report all of them for the
+    same span -- that would look like several times the actual coverage for
+    one instant -- so it keeps its pre-coarse-tier contract: one bucket per
+    covered instant, drawn only from the recent/aged tiers."""
+    _skip_auth(monkeypatch)
+    now = time.time()
+    _seed_bucket(sidecar_db_path, "doorbell", now - 100, now - 40, 1.0)
+    # Coarse-tier buckets covering the exact same span, at two coarser
+    # cadences -- these must be excluded from the response.
+    _seed_bucket(sidecar_db_path, "doorbell", now - 100, now - 40, 10.0)
+    _seed_bucket(sidecar_db_path, "doorbell", now - 100, now - 40, 60.0)
+
+    r = client.get(
+        "/v1/scrub/doorbell/coverage",
+        params={"start": now - 200, "end": now},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    intervals = {b["interval"] for b in body["buckets"]}
+    assert intervals == {1.0}, f"coarse-tier buckets leaked into coverage: {intervals}"
+    # generated_through must not be pulled ahead by a coarse-tier bucket that
+    # reaches further than the recent/aged tiers actually do.
+    assert body["generated_through"] == pytest.approx(now - 40)
+
+
+def test_scrub_sheets_interval_filter(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`?interval=` restricts the sheet index to one tier -- e.g. a client
+    building a whole-history scrubber wants only the coarse tier's sheets for
+    a window the recent/aged tiers also cover."""
+    _skip_auth(monkeypatch)
+    cache_dir = client.app.state.settings.scrub.cache_dir  # type: ignore[attr-defined]
+    start = 1_785_380_400.0
+
+    def _write_sheet(interval: float, count: int) -> str:
+        rel = grid.sheet_rel_path("doorbell", interval, start, count)
+        out = cache_dir / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (10, 10)).save(out)
+        return rel
+
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        for interval, count in ((1.0, 40), (60.0, 4)):
+            rel = _write_sheet(interval, count)
+            db.upsert_scrub_sheet(
+                conn, camera="doorbell", start_ts=start, interval_s=interval, cols=12, rows=8,
+                cell_w=320, cell_h=180, count=count, path=rel, complete=False,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    r_all = client.get(
+        "/v1/scrub/doorbell/sheets",
+        params={"start": start, "end": start + 200},
+        headers={"cookie": "session=fake"},
+    )
+    assert {s["interval"] for s in r_all.json()["sheets"]} == {1.0, 60.0}
+
+    r_coarse = client.get(
+        "/v1/scrub/doorbell/sheets",
+        params={"start": start, "end": start + 200, "interval": 60.0},
+        headers={"cookie": "session=fake"},
+    )
+    sheets = r_coarse.json()["sheets"]
+    assert len(sheets) == 1
+    assert sheets[0]["interval"] == 60.0
+    assert sheets[0]["count"] == 4
+
+
 def test_scrub_sheet_url_immutable_across_growing_count(
     client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -193,10 +193,35 @@ async def scrub_coverage(camera: str, start: float, end: float, request: Request
     _require_window(start, end)
     _require_known_camera(settings, camera)
 
+    # The coarse tiers (settings.scrub.coarse_intervals_s) deliberately
+    # overlap the recent/aged tiers in time (unlike recent-vs-aged, which
+    # never overlap), and each other. `list_scrub_buckets` and the unfiltered
+    # `generated_through` both scan every tier, so leaving coarse tiers in
+    # would double- (or triple-)report coverage for any span they also cover
+    # -- multiple bucket rows for one instant, and a `generated_through`
+    # pulled ahead by whichever tier happens to be further along. Excluded
+    # below so this response keeps its pre-coarse-tier contract (one bucket
+    # per covered instant) exactly.
+    coarse_set = set(settings.scrub.coarse_intervals_s)
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:
         bucket_rows = db.list_scrub_buckets(conn, camera, start, end)
-        generated_through = db.latest_generated_through(conn, camera) or 0.0
+        # Exclusion is computed against what the camera actually has, not the
+        # config alone: `match_keyframe_cadence` can raise the recent tier's
+        # effective interval past its configured value, all the way to
+        # *equalling* a configured coarse interval (a ~10 s GOP makes the
+        # recent tier exactly 10.0). In that case the interval is the
+        # camera's finest tier and IS its coverage — dropping it because the
+        # config also names 10.0 as coarse would blank coverage entirely.
+        finest = min((r["interval_s"] for r in bucket_rows), default=None)
+        exclude = sorted(iv for iv in coarse_set if iv != finest)
+        if exclude:
+            bucket_rows = [r for r in bucket_rows if r["interval_s"] not in exclude]
+            generated_through = (
+                db.latest_generated_through(conn, camera, exclude_intervals_s=exclude) or 0.0
+            )
+        else:
+            generated_through = db.latest_generated_through(conn, camera) or 0.0
     finally:
         conn.close()
 
@@ -209,16 +234,23 @@ async def scrub_coverage(camera: str, start: float, end: float, request: Request
 
 
 @router.get("/scrub/{camera}/sheets")
-async def scrub_sheets(camera: str, start: float, end: float, request: Request) -> Any:
+async def scrub_sheets(
+    camera: str, start: float, end: float, request: Request, interval: float | None = None
+) -> Any:
     """Sheet index for a window (§4.3) -- content-addressed, immutable URLs
-    keyed by (start, interval, count)."""
+    keyed by (start, interval, count).
+
+    `interval` is optional and restricts the response to that one tier (e.g.
+    the coarse tier, which overlaps recent/aged in time) -- omit it to get
+    every tier's sheets for the window, same as before this param existed.
+    """
     settings = request.app.state.settings
     _require_window(start, end)
     _require_known_camera(settings, camera)
 
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:
-        sheet_rows = db.list_scrub_sheets(conn, camera, start, end)
+        sheet_rows = db.list_scrub_sheets(conn, camera, start, end, interval=interval)
     finally:
         conn.close()
 
