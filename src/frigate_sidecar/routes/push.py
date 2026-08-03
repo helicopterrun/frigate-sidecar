@@ -20,6 +20,8 @@ router = APIRouter(prefix="/v1/push", tags=["push"])
 
 _ERR_HANDLE_NOT_FOUND = "handle_not_found"
 _ERR_DEVICE_NOT_FOUND = "device_not_found"
+_ERR_PUSH_DISABLED = "push_disabled"
+_ERR_TEST_SEND_FAILED = "test_send_failed"
 
 
 class DeviceRegistration(BaseModel):
@@ -80,6 +82,59 @@ async def unregister_device(
     finally:
         conn.close()
     return {"unregistered": True}
+
+
+@router.post("/devices/{apns_token}/test")
+async def test_push(
+    apns_token: Annotated[str, Path(min_length=1)], request: Request
+) -> dict[str, Any]:
+    """Send one test push to exactly this device (spec §1, "Test push").
+
+    `{"sent": true}` means APNs *accepted* the request -- there is no delivery
+    receipt, so it can never mean "displayed on the device".
+
+    404 is reserved for "token not registered": the released iOS client maps it
+    to "your server doesn't support test notifications yet", so no other
+    condition may borrow it. A rejected send is 502 and a server with push
+    switched off is 503, both carrying the standard error envelope.
+    """
+    settings = request.app.state.settings
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        device = store.get_device(conn, apns_token)
+    finally:
+        conn.close()
+    if device is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_DEVICE_NOT_FOUND, "message": "token not registered"},
+        )
+
+    # Registration writes to the DB whether or not push is enabled, so a
+    # registered token can exist on a server with no engine running. Say so
+    # rather than reporting a send that no transport ever attempted.
+    engine = getattr(request.app.state, "push_engine", None)
+    if engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": _ERR_PUSH_DISABLED,
+                "message": "push is not enabled on this server (push.enabled=false)",
+            },
+        )
+
+    result = await engine.send_test(device)
+    if not result.ok:
+        # Includes the 410/400 case, where the engine has already deleted the
+        # row per spec §5 -- the device is gone and the client should re-register.
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": _ERR_TEST_SEND_FAILED,
+                "message": result.error or "push transport rejected the send",
+            },
+        )
+    return {"sent": True}
 
 
 @router.get("/handle/{handle}")
