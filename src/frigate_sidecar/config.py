@@ -199,12 +199,13 @@ class ScrubSection(BaseModel):
     # 1 fps already costs most of a core, so backfill takes genuine leftovers
     # and no more.
     #
-    # 20s of a ~65s cycle held sustained backfill to ~0.5 segments/s on a box
-    # measured at ~2.2, which was not enough for history to converge before
-    # retention pruned the far end. The live-edge pass runs first and is
-    # unaffected; the cost of raising this is cycle length, and cycle length is
-    # the floor on live-edge lag.
-    backfill_time_budget_s: float = 35.0
+    # Cycle length is the floor on live-edge lag: a camera serviced at the start
+    # of a cycle is a full cycle stale by the end of it. Measured on this
+    # deployment, 35s here settled at a 100s cycle and ~105s lag -- over the 90s
+    # the client is told to expect. 22s settles inside it. That is not the old
+    # 20s in disguise: one decode now feeds every tier, so the same wall clock
+    # buys several times the coverage it used to.
+    backfill_time_budget_s: float = 22.0
     # Cap on the live-edge pass, per camera per cycle. Sized to cover the whole
     # lookback in one pass (900s / 10s segments), so a camera reaches `now` in a
     # single cycle rather than converging over several: a fixed small cap loses
