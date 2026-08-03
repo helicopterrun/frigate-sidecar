@@ -153,6 +153,15 @@ class ScrubSection(BaseModel):
     # every 5s rather than every second. Turn off to force the configured
     # interval everywhere and pay the decode.
     match_keyframe_cadence: bool = True
+    # Extra tiers, each overlapping the recent+aged tiers rather than replacing
+    # any of them: each covers the *entire* retention window at its own
+    # coarser cadence, so a client can render a whole-history scrubber without
+    # paying for retention_days worth of `aged_interval_s` sheets. An empty
+    # list disables this -- the default keeps a 10s tier (a reasonable
+    # "scrub a day back" cadence) and a 60s tier (a "scrub the whole
+    # retention window" cadence) on top of today's two-tier, non-overlapping
+    # recent/aged behaviour, which is otherwise unchanged.
+    coarse_intervals_s: list[float] = Field(default_factory=lambda: [10.0, 60.0])
     aged_after_h: float = 24.0
     retention_days: int = 4
     cell_w: int = 320
@@ -209,6 +218,40 @@ class ScrubSection(BaseModel):
         if fmt not in ("jpeg", "webp"):
             raise ValueError(f"scrub.format must be 'jpeg' or 'webp', got {v!r}")
         return fmt
+
+    @model_validator(mode="after")
+    def _check_coarse_intervals(self) -> ScrubSection:
+        """Every entry in `coarse_intervals_s` must be strictly coarser than
+        `aged_interval_s` (otherwise it isn't an extra tier, just a duplicate
+        of the aged one), distinct from every other entry (otherwise two
+        tiers would generate and serve identical buckets under the same
+        interval, silently clobbering each other), and land on the same
+        epoch-anchored grid every interval uses (`grid.decimate_to_grid`,
+        `grid.grid_point`): bucket/slot boundaries are `k * interval` from
+        absolute epoch zero, so an interval that isn't a whole multiple of
+        `aged_interval_s` puts that tier's grid points out of step with the
+        aged tier's at every boundary but the first.
+        """
+        seen: set[float] = set()
+        for coarse in self.coarse_intervals_s:
+            if coarse in seen:
+                raise ValueError(
+                    f"scrub.coarse_intervals_s must not repeat a value (got {coarse!r} twice)"
+                )
+            seen.add(coarse)
+            if coarse <= self.aged_interval_s:
+                raise ValueError(
+                    "scrub.coarse_intervals_s entries must each be > scrub.aged_interval_s "
+                    f"(got coarse={coarse!r}, aged={self.aged_interval_s!r})"
+                )
+            ratio = coarse / self.aged_interval_s
+            if abs(ratio - round(ratio)) > 1e-6:
+                raise ValueError(
+                    "scrub.coarse_intervals_s entries must each be a whole multiple of "
+                    f"scrub.aged_interval_s to land on its epoch grid "
+                    f"(got coarse={coarse!r}, aged={self.aged_interval_s!r})"
+                )
+        return self
 
 
 class ProxySection(BaseModel):

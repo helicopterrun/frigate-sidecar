@@ -736,6 +736,17 @@ def tier_plan(
     distinct. If that lands at or past `aged_interval_s` the two tiers would
     describe the same cadence, so they collapse into one covering the whole
     retention window; there is nothing left for thinning to save.
+
+    When `coarse_intervals_s` is non-empty, one further tier per entry is
+    appended *last* -- after whatever the recent/aged tiers resolved to -- each
+    spanning the full retention window (`retention_cutoff` to `now`). Unlike
+    the recent/aged pair these deliberately overlap them, and each other
+    (§4.2's non-overlap rule only ever applied between recent and aged);
+    nothing retires them as spans age, since none is superseded by another
+    tier the way recent is by aged. Appending them last keeps `plan[0]`/
+    `plan[1]` meaning what every existing caller (`generate_live_edge`'s
+    retirement boundary, `generate_camera`'s docstring) already assumes: the
+    live/recent tier first, the aged tier -- if any -- second.
     """
     scrub = settings.scrub
     retention_cutoff = now - scrub.retention_days * 86400
@@ -752,10 +763,22 @@ def tier_plan(
         recent = max(recent, round(gop_s * 2.0) / 2.0)
 
     if recent >= scrub.aged_interval_s:
-        return [(recent, retention_cutoff, now)]
-    plan = [(recent, boundary, now)]
-    if boundary > retention_cutoff:
-        plan.append((scrub.aged_interval_s, retention_cutoff, boundary))
+        plan = [(recent, retention_cutoff, now)]
+    else:
+        plan = [(recent, boundary, now)]
+        if boundary > retention_cutoff:
+            plan.append((scrub.aged_interval_s, retention_cutoff, boundary))
+
+    if now > retention_cutoff:
+        # Skip a coarse entry that collides with a tier already in the plan:
+        # `match_keyframe_cadence` can raise the effective recent interval to
+        # exactly a configured coarse value (a ~10 s GOP → recent 10.0), and
+        # emitting both would generate the same (interval, window) twice,
+        # each pass clobbering the other's bucket resume points.
+        existing = {entry[0] for entry in plan}
+        for coarse in scrub.coarse_intervals_s:
+            if coarse not in existing:
+                plan.append((coarse, retention_cutoff, now))
     return plan
 
 
@@ -842,9 +865,15 @@ async def generate_live_edge(
     )
     plan = tier_plan(settings, now, gop_s)
     interval_s, window_start, window_end = plan[0]
-    if len(plan) > 1:
-        # Only retire when a coarser tier actually exists to supersede this one;
-        # collapsed plans would otherwise delete their own buckets.
+    # Only retire when a coarser *aged* tier actually exists to supersede this
+    # one -- collapsed plans would otherwise delete their own buckets. The
+    # (always-overlapping, never-retiring) coarse tiers can also occupy
+    # `plan[1]` when recent/aged collapsed into one, so it's not enough to
+    # check `len(plan) > 1`; the second entry must actually be the aged tier,
+    # distinguishable from every coarse tier by interval (the two can never be
+    # equal -- each of `coarse_intervals_s` is validated to exceed
+    # `aged_interval_s`).
+    if len(plan) > 1 and plan[1][0] not in scrub.coarse_intervals_s:
         _retire_stale_recent_buckets(
             sidecar_conn, scrub.cache_dir, camera, interval_s, window_start
         )

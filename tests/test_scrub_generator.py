@@ -87,6 +87,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
         scrub=ScrubSection(
             enabled=True, cameras=["doorbell"], cache_dir=tmp_path / "scrub",
             recent_interval_s=1.0, sheet_cols=4, sheet_rows=3,  # 12-cell sheets for a fast test
+            coarse_intervals_s=[],  # unrelated to this test; keep the plan to one/two tiers
         ),
     )
 
@@ -232,6 +233,7 @@ def aged_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
             # is exactly what cadence-matching declines to do; keep the two
             # configured tiers so the thinning machinery is what's under test.
             match_keyframe_cadence=False,
+            coarse_intervals_s=[],  # unrelated to this test; keep the plan to two tiers
         ),
     )
 
@@ -358,6 +360,55 @@ def test_scrub_generate_recent_bucket_retired_once_superseded_by_aged(
     assert not any(p.exists() for p in sheet_paths_1)
 
 
+def test_coarse_tier_buckets_survive_recent_tier_retirement(aged_env: Settings) -> None:
+    """The coarse tiers overlap the recent tier in time on purpose, and unlike
+    the aged tier they never supersede it -- so retirement (which only ever
+    targets `recent_interval_s` rows, see `_retire_stale_recent_buckets`) must
+    leave coarse-tier rows alone even though the same cycle that retires the
+    stale recent bucket also touches the same time span at the coarse
+    cadence."""
+    env = aged_env.model_copy(
+        update={
+            "scrub": aged_env.scrub.model_copy(update={"coarse_intervals_s": [10.0, 60.0]})
+        }
+    )
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        now1 = 1_800_000_020.0 + (env.scrub.aged_after_h * 3600) - 1.0
+        asyncio.run(
+            generator.generate_camera(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now1, profile=generator.SourceProfile(), sem=asyncio.Semaphore(3),
+            )
+        )
+        coarse_after_1 = [
+            b
+            for b in db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+            if b["interval_s"] in (10.0, 60.0)
+        ]
+        assert coarse_after_1, "expected coarse-tier buckets after the first cycle"
+
+        now2 = now1 + (env.scrub.aged_after_h * 3600) + 10.0
+        asyncio.run(
+            generator.generate_camera(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now2, profile=generator.SourceProfile(), sem=asyncio.Semaphore(3),
+            )
+        )
+        buckets_after_2 = db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+    finally:
+        conn.close()
+
+    coarse_after_2 = [b for b in buckets_after_2 if b["interval_s"] in (10.0, 60.0)]
+    assert coarse_after_2, "coarse-tier buckets must survive the recent->aged retirement cycle"
+    # And the stale recent-tier bucket from earlier in the window is still gone.
+    boundary2 = now2 - env.scrub.aged_after_h * 3600
+    stale_recent = [
+        b for b in buckets_after_2 if b["interval_s"] == 1.0 and b["start_ts"] < boundary2
+    ]
+    assert not stale_recent
+
+
 def test_generation_leaves_no_scratch_behind(env: Settings) -> None:
     """Extraction used to stage frames in the system temp dir and leave every
     frame it didn't accept there -- about a segment's worth per cycle, forever,
@@ -436,6 +487,47 @@ def test_prune_removes_sheets_and_their_cell_stores(env: Settings) -> None:
     assert result["buckets_deleted"] > 0
     assert result["cell_dirs_deleted"] > 0
     assert not list((env.scrub.cache_dir / "doorbell").rglob("*.jpg"))
+
+
+def test_prune_uses_a_coarse_sheets_own_end_time_not_a_hardcoded_interval(
+    env: Settings,
+) -> None:
+    """A full 12x8 sheet at the 60s coarse cadence spans
+    12*8*60s = 5760s = 96 minutes. `delete_scrub_sheets_before` (the query
+    `prune` runs) computes each row's end as `start_ts + cols*rows*interval_s`
+    -- interval-generic, not hardcoded to `recent_interval_s`/`aged_interval_s`
+    -- so a 60s sheet must survive a cutoff that lands inside its 96-minute
+    span and be removed once the cutoff passes its actual end."""
+    conn = db.open_sidecar(env.sidecar.db_path)
+    start_ts = 1_800_000_000.0
+    span_s = 12 * 8 * 60.0
+    assert span_s == pytest.approx(96 * 60.0)
+    try:
+        db.upsert_scrub_sheet(
+            conn, camera="doorbell", start_ts=start_ts, interval_s=60.0, cols=12, rows=8,
+            cell_w=320, cell_h=180, count=96, path="doorbell/60/sheet.jpg", complete=True,
+        )
+        conn.commit()
+
+        # Cutoff inside the sheet's span: must not be pruned yet.
+        still_open = db.delete_scrub_sheets_before(None, start_ts + span_s - 1.0, conn)
+        conn.commit()
+        assert still_open == []
+        row = conn.execute(
+            "SELECT * FROM scrub_sheets WHERE camera = ? AND interval_s = 60.0", ("doorbell",)
+        ).fetchone()
+        assert row is not None
+
+        # Cutoff past the sheet's actual end (start + span): now it prunes.
+        removed = db.delete_scrub_sheets_before(None, start_ts + span_s + 1.0, conn)
+        conn.commit()
+        assert removed == ["doorbell/60/sheet.jpg"]
+        row = conn.execute(
+            "SELECT * FROM scrub_sheets WHERE camera = ? AND interval_s = 60.0", ("doorbell",)
+        ).fetchone()
+        assert row is None
+    finally:
+        conn.close()
 
 
 def test_sheet_row_count_matches_its_filename(env: Settings) -> None:
@@ -618,6 +710,7 @@ def test_dense_keyframes_fill_whole_sheets(
             enabled=True, cameras=["doorbell"], cache_dir=tmp_path / "scrub",
             recent_interval_s=5.0, aged_after_h=9999.0,  # one tier, 5s cadence
             sheet_cols=4, sheet_rows=3,  # 12-cell sheets = 60s of footage each
+            coarse_intervals_s=[],  # unrelated to this test; keep the plan to one tier
         ),
     )
 
@@ -719,6 +812,7 @@ def long_history_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Setting
             sheet_cols=4, sheet_rows=3,
             backfill_segments_per_cycle=12, live_edge_segments=6,
             live_edge_lookback_s=300.0,
+            coarse_intervals_s=[],  # unrelated to this test; keep the plan to one tier
         ),
     )
 
@@ -858,6 +952,7 @@ def test_a_hole_with_no_recordings_does_not_stall_backfill(
             enabled=True, cameras=["doorbell"], cache_dir=tmp_path / "scrub",
             recent_interval_s=1.0, aged_after_h=48.0, sheet_cols=4, sheet_rows=3,
             backfill_segments_per_cycle=12, live_edge_segments=2, live_edge_lookback_s=60.0,
+            coarse_intervals_s=[],  # unrelated to this test; keep the plan to one tier
         ),
     )
 
@@ -1008,13 +1103,16 @@ def test_backfill_stops_at_its_wall_clock_budget(
 
 
 def _settings_with_gop(tmp_path: Path, **scrub_kw: object) -> Settings:
+    defaults: dict[str, object] = {
+        "recent_interval_s": 1.0, "aged_interval_s": 5.0, "aged_after_h": 24.0,
+        "retention_days": 4,
+        "coarse_intervals_s": [],  # unrelated to most callers; opt in explicitly
+    }
+    defaults.update(scrub_kw)
     return Settings(
         frigate=FrigateSection(config_path=tmp_path / "cfg.yml", db_path=tmp_path / "f.db"),
         sidecar=SidecarSection(db_path=tmp_path / "s.db"),
-        scrub=ScrubSection(
-            recent_interval_s=1.0, aged_interval_s=5.0, aged_after_h=24.0,
-            retention_days=4, **scrub_kw,  # type: ignore[arg-type]
-        ),
+        scrub=ScrubSection(**defaults),  # type: ignore[arg-type]
     )
 
 
@@ -1141,6 +1239,56 @@ def test_small_measurement_noise_does_not_create_a_new_tier(tmp_path: Path) -> N
         for g in (4.98, 4.995056, 5.0, 5.02, 5.11)
     }
     assert intervals == {5.0}, f"same source resolved to several tiers: {intervals}"
+
+
+# ----- Coarse tiers: overlapping, whole-history cadences -----
+
+
+def test_coarse_intervals_append_two_full_window_overlapping_tiers(tmp_path: Path) -> None:
+    """10s and 60s tiers both cover the whole retention window, deliberately
+    overlapping the recent/aged tiers and each other -- unlike recent/aged,
+    which never overlap."""
+    now = 1_800_000_000.0
+    settings = _settings_with_gop(tmp_path, coarse_intervals_s=[10.0, 60.0])
+    plan = generator.tier_plan(settings, now, gop_s=1.0)
+    assert [p[0] for p in plan] == [1.0, 5.0, 10.0, 60.0]
+    retention_cutoff = now - settings.scrub.retention_days * 86400
+    for interval, start, end in plan[2:]:
+        assert (start, end) == (retention_cutoff, now), (
+            f"coarse tier {interval} did not span the full retention window"
+        )
+
+
+def test_empty_coarse_intervals_disables_the_extra_tiers(tmp_path: Path) -> None:
+    now = 1_800_000_000.0
+    settings = _settings_with_gop(tmp_path, coarse_intervals_s=[])
+    plan = generator.tier_plan(settings, now, gop_s=1.0)
+    assert [p[0] for p in plan] == [1.0, 5.0]
+
+
+def test_coarse_intervals_also_append_when_recent_and_aged_collapse(tmp_path: Path) -> None:
+    """A coarse-GOP camera still gets its extra tiers on top of the single
+    collapsed recent/aged tier."""
+    now = 1_800_000_000.0
+    settings = _settings_with_gop(tmp_path, coarse_intervals_s=[10.0, 60.0])
+    plan = generator.tier_plan(settings, now, gop_s=5.0)
+    assert [p[0] for p in plan] == [5.0, 10.0, 60.0]
+
+
+def test_a_coarse_interval_colliding_with_the_effective_recent_tier_is_skipped(
+    tmp_path: Path,
+) -> None:
+    """A ~10s GOP raises the effective recent interval to exactly 10.0 -- the
+    same value as the first coarse tier. Emitting both would generate the same
+    (interval, window) twice, each pass clobbering the other's bucket resume
+    points, so the colliding coarse entry is dropped and the surviving tier
+    plays both roles."""
+    now = 1_800_000_000.0
+    settings = _settings_with_gop(tmp_path, coarse_intervals_s=[10.0, 60.0])
+    plan = generator.tier_plan(settings, now, gop_s=10.0)
+    assert [p[0] for p in plan] == [10.0, 60.0]
+    retention_cutoff = now - settings.scrub.retention_days * 86400
+    assert plan[0][1:] == (retention_cutoff, now)
 
 
 # ----- Cell geometry follows the source shape -----

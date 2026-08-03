@@ -16,6 +16,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 SIDECAR_SCHEMA = """
@@ -377,7 +378,10 @@ def list_scrub_buckets(
 
 
 def latest_generated_through(
-    conn: sqlite3.Connection, camera: str, interval_s: float | None = None
+    conn: sqlite3.Connection,
+    camera: str,
+    interval_s: float | None = None,
+    exclude_intervals_s: Sequence[float] = (),
 ) -> float | None:
     """Newest `generated_through` across this camera's buckets.
 
@@ -385,8 +389,22 @@ def latest_generated_through(
     thinning tier (§5.5) tracks its own resume point independently, since a
     single camera can have both a recent- and an aged-tier bucket in flight
     at once.
+
+    `exclude_intervals_s` instead drops the named tiers and scans the rest.
+    Exclusion rather than inclusion, because the caller that needs this
+    (coverage, hiding the always-overlapping coarse tiers) cannot name the
+    tiers to *keep*: `match_keyframe_cadence` can bump the recent tier's
+    effective interval past its configured value, so the configured
+    recent/aged pair may name intervals no bucket actually has.
     """
-    if interval_s is None:
+    if interval_s is None and exclude_intervals_s:
+        placeholders = ",".join("?" for _ in exclude_intervals_s)
+        row = conn.execute(
+            "SELECT MAX(generated_through) AS g FROM scrub_buckets "
+            f"WHERE camera = ? AND interval_s NOT IN ({placeholders})",
+            (camera, *exclude_intervals_s),
+        ).fetchone()
+    elif interval_s is None:
         row = conn.execute(
             "SELECT MAX(generated_through) AS g FROM scrub_buckets WHERE camera = ?", (camera,)
         ).fetchone()
@@ -434,7 +452,7 @@ def upsert_scrub_sheet(
 
 
 def list_scrub_sheets(
-    conn: sqlite3.Connection, camera: str, start: float, end: float
+    conn: sqlite3.Connection, camera: str, start: float, end: float, interval: float | None = None
 ) -> list[dict[str, Any]]:
     """Latest published version of each sheet intersecting [start, end).
 
@@ -443,22 +461,41 @@ def list_scrub_sheets(
     current one per (camera, interval_s, start_ts) -- otherwise a client
     listing sheets would see multiple candidate URLs for the same instant
     with no way to tell which is current.
+
+    `interval`, when given, restricts to that one tier's sheets. Without it a
+    window covered by more than one tier (e.g. the coarse tier overlapping
+    recent/aged) returns sheets from all of them, which is the existing
+    contract for callers that don't care which cadence they get -- a client
+    that does (e.g. picking the coarse tier for a whole-history scrubber)
+    opts in explicitly.
     """
+    params: list[Any] = [camera, end, start]
+    sub_clause = ""
+    outer_clause = ""
+    if interval is not None:
+        sub_clause = "AND interval_s = ? "
+        outer_clause = "AND s.interval_s = ? "
+        params.append(interval)
+    params.append(camera)
+    if interval is not None:
+        params.append(interval)
     rows_ = conn.execute(
-        """
+        f"""
         SELECT s.* FROM scrub_sheets s
         JOIN (
             SELECT camera, interval_s, start_ts, MAX(count) AS max_count
             FROM scrub_sheets
             WHERE camera = ? AND start_ts < ? AND (start_ts + cols * rows * interval_s) > ?
+            {sub_clause}
             GROUP BY camera, interval_s, start_ts
         ) latest
         ON s.camera = latest.camera AND s.interval_s = latest.interval_s
            AND s.start_ts = latest.start_ts AND s.count = latest.max_count
         WHERE s.camera = ?
+        {outer_clause}
         ORDER BY s.start_ts
         """,
-        (camera, end, start, camera),
+        params,
     ).fetchall()
     return [dict(r) for r in rows_]
 
