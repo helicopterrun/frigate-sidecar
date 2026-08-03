@@ -111,3 +111,45 @@ async def test_relay_transport_connection_error():
     )
     assert result.ok is False
     assert result.unregistered is False
+
+
+async def test_log_transport_records_a_test_send() -> None:
+    transport = LogTransport()
+    result = await transport.send_test(_device(environment="prod"))
+    assert result.ok is True
+    record = transport.sent[-1]
+    assert record["test"] is True
+    assert record["environment"] == "prod", "environment routing is never bypassed"
+    # A test push carries no handle: there is nothing for the NSE to redeem.
+    assert "handle" not in record
+
+
+async def test_relay_transport_test_send_posts_only_token_and_environment() -> None:
+    """The test payload is a fixed literal alert with no `handle` and no
+    `mutable-content`, so it cannot go through /v1/relay/push -- that route
+    validates `handle` as required."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = __import__("json").loads(request.content)
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    relay = RelayTransport("https://relay.example.test", client=client)
+    result = await relay.send_test(_device(apns_token="tokXYZ", environment="prod"))
+
+    assert result.ok is True
+    assert captured["url"] == "https://relay.example.test/v1/relay/test"
+    assert captured["json"] == {"device_token": "tokXYZ", "environment": "prod"}
+
+
+async def test_relay_transport_test_send_410_marks_unregistered() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(410, text="Unregistered")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    relay = RelayTransport("https://relay.example.test", client=client)
+    result = await relay.send_test(_device())
+    assert result.ok is False
+    assert result.unregistered is True, "a dead token is dead however it was discovered"

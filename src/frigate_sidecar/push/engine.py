@@ -15,7 +15,7 @@ from typing import Any
 
 from frigate_sidecar.push import store
 from frigate_sidecar.push.decision import devices_for_event, parse_review_message
-from frigate_sidecar.push.transport import PushTransport
+from frigate_sidecar.push.transport import PushTransport, TransportResult
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +97,41 @@ class PushEngine:
                 )
 
         if to_prune:
-            conn = self._conn()
-            try:
-                for token in to_prune:
-                    store.delete_device(conn, token)
-                conn.commit()
-            finally:
-                conn.close()
+            self._prune(to_prune)
 
         return sent
+
+    def _prune(self, tokens: list[str]) -> None:
+        """Drop permanently-dead device rows (410/400, spec §5)."""
+        conn = self._conn()
+        try:
+            for token in tokens:
+                store.delete_device(conn, token)
+            conn.commit()
+        finally:
+            conn.close()
+
+    async def send_test(self, device: Any) -> TransportResult:
+        """One test push to `device`, bypassing its subscription filters.
+
+        Filters are deliberately not consulted: this verifies the APNs pipe, not
+        the subscription (spec §1), so a device subscribed to one camera still
+        gets its own test. Environment routing is *not* bypassed.
+
+        The 410/400 feedback cleanup is the same one a real send applies -- a
+        dead token discovered by pressing the test button is exactly as dead as
+        one discovered by a real alert, and leaving the row behind would mean
+        the next real alert rediscovers it.
+        """
+        result = await self.transport.send_test(device)
+        if result.unregistered:
+            logger.info(
+                "push: pruning device %s after test send (%s)",
+                device.device_id, result.error,
+            )
+            self._prune([device.apns_token])
+        elif not result.ok:
+            logger.warning(
+                "push: test send failed for device %s: %s", device.device_id, result.error
+            )
+        return result

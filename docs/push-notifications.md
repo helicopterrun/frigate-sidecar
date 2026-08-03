@@ -34,6 +34,36 @@ restatement of the full spec — see that doc for the complete rationale
     `relay_base_url`. To go live: `push.enabled: true`,
     `push.transport: relay`, and MQTT pointed at Frigate's broker. Tests
     still run against a mock relay, never real Apple infrastructure.
+
+  **`prod` vs `production`.** This sidecar's `/v1/push/devices` API, its DB
+  CHECK constraint and spec §1 all spell the production environment `prod`;
+  the relay's wire API spells it `production` and rejects anything else with
+  422. `RelayTransport` translates at that one boundary, so `prod` stays the
+  only spelling everywhere else here. Before that, every push to a
+  prod-registered device would have been rejected and no production device
+  could ever have been notified — invisible only while the mock transport is
+  in use.
+
+  **Test push needs a second relay route.** `send_test` posts
+  `{device_token, environment}` to `POST {relay_base_url}/v1/relay/test`:
+  `/v1/relay/push` validates `handle` as required and templates its text by
+  severity, so the test payload (fixed literal text, no `handle`, no
+  `mutable-content`) cannot go through it. Added in
+  [elsinore-push-relay#1](https://github.com/helicopterrun/elsinore-push-relay/pull/1)
+  — until that is merged and deployed, a test send returns 404 from the relay
+  and surfaces as `502 test_send_failed`, visibly broken rather than a silent
+  success.
+- **Test push:** `POST /v1/push/devices/{apns_token}/test` sends one fixed
+  alert (`"Test notification"` / `"Push notifications are working."`,
+  `sound: default`) to exactly that device, bypassing its camera/label/severity
+  filters but **not** its environment routing — the point is to prove the APNs
+  pipe, so a black-holed sandbox/prod mismatch must still fail here. `200
+  {"sent": true}` means APNs accepted the request; there is no delivery
+  receipt. `404` is reserved for "token not registered" (the released iOS
+  client maps it to "your server doesn't support test notifications yet", so
+  nothing else may borrow it); push switched off is `503 push_disabled` and a
+  rejected send is `502 test_send_failed`. A `410`/`400` deletes the device row
+  via the same §5 cleanup a real send applies.
 - **Handle redemption:** `GET /v1/push/handle/{handle}` resolves a
   sidecar-minted, short-lived opaque handle to `{camera, event_id,
   snapshot_url}` for the iOS NSE to fetch a thumbnail from. The mapping never

@@ -54,6 +54,22 @@ class PushTransport(Protocol):
         collapse_id: str,
     ) -> TransportResult: ...
 
+    async def send_test(self, device: Device) -> TransportResult:
+        """One fixed, self-contained test alert to a single device (spec §1).
+
+        Deliberately not `send()` with a throwaway handle: the spec's test push
+        carries **no** `handle` key and no `mutable-content`, because there is
+        nothing for the NSE to redeem -- it passes the payload through
+        unmodified and a tap just opens the app. Routing it through the normal
+        send path would hand the relay a handle that resolves to nothing.
+
+        Environment routing is *not* bypassed: the device row's sandbox/prod
+        value picks the APNs endpoint exactly as a real send would, so a
+        black-holed token fails here the same way it fails in production. That
+        is the entire point of the button.
+        """
+        ...
+
 
 class LogTransport:
     """Mock transport: logs what would be sent, always succeeds.
@@ -88,6 +104,23 @@ class LogTransport:
             "push (mock transport): device=%s environment=%s severity=%s handle=%s "
             "collapse_id=%s server_id=%s",
             device.device_id, device.environment, severity, handle, collapse_id, server_id,
+        )
+        return TransportResult(ok=True)
+
+    async def send_test(self, device: Device) -> TransportResult:
+        record: dict[str, object] = {
+            "device_id": device.device_id,
+            "environment": device.environment,
+            "test": True,
+        }
+        self.sent.append(record)
+        # Loud, because on a mock transport `{"sent": true}` is a statement
+        # about this process only -- nothing reaches a phone. Someone pressing
+        # the app's button and seeing success needs this line to exist.
+        logger.info(
+            "push (mock transport): TEST push for device=%s environment=%s -- "
+            "not delivered anywhere; set push.transport=relay for a real send",
+            device.device_id, device.environment,
         )
         return TransportResult(ok=True)
 
@@ -140,6 +173,34 @@ class RelayTransport:
         except httpx.HTTPError as exc:
             return TransportResult(ok=False, error=str(exc))
 
+        return self._result(resp)
+
+    async def send_test(self, device: Device) -> TransportResult:
+        """POST the test push to the relay's `/v1/relay/test`.
+
+        A separate endpoint rather than a flag on `/v1/relay/push`, because the
+        two payloads differ in kind: the normal one is templated by severity and
+        carries `handle` + `mutable-content` for the NSE, while this one is a
+        fixed literal alert with neither. `/v1/relay/push` validates `handle` as
+        required, so a test send cannot go through it at all.
+
+        NOTE: the relay must implement this route. As of elsinore-push-relay
+        HEAD it does not, so a test send against today's relay returns 404 here
+        and surfaces as `test_send_failed` -- not a silent success.
+        """
+        payload = {
+            "device_token": device.apns_token,
+            "environment": device.environment,
+        }
+        url = f"{self.base_url}/v1/relay/test"
+        try:
+            resp = await self._client.post(url, json=payload)
+        except httpx.HTTPError as exc:
+            return TransportResult(ok=False, error=str(exc))
+        return self._result(resp)
+
+    @staticmethod
+    def _result(resp: httpx.Response) -> TransportResult:
         if resp.status_code == 200:
             return TransportResult(ok=True)
         if resp.status_code in (410, 400):
