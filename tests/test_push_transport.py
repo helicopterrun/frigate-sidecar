@@ -141,7 +141,8 @@ async def test_relay_transport_test_send_posts_only_token_and_environment() -> N
 
     assert result.ok is True
     assert captured["url"] == "https://relay.example.test/v1/relay/test"
-    assert captured["json"] == {"device_token": "tokXYZ", "environment": "prod"}
+    # `prod` is translated to the relay's `production` spelling on the way out.
+    assert captured["json"] == {"device_token": "tokXYZ", "environment": "production"}
 
 
 async def test_relay_transport_test_send_410_marks_unregistered() -> None:
@@ -153,3 +154,27 @@ async def test_relay_transport_test_send_410_marks_unregistered() -> None:
     result = await relay.send_test(_device())
     assert result.ok is False
     assert result.unregistered is True, "a dead token is dead however it was discovered"
+
+
+async def test_relay_transport_translates_prod_to_production() -> None:
+    """The sidecar's API, DB constraint and spec §1 all say `prod`; the relay's
+    wire API says `production` and 422s anything else. Without translating at
+    this boundary, no production device could ever be notified."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(__import__("json").loads(request.content)["environment"])
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    relay = RelayTransport("https://relay.example.test", client=client)
+    await relay.send(
+        _device(environment="prod"),
+        handle="h_1", server_id="s1", severity="alert", collapse_id="r1",
+    )
+    await relay.send_test(_device(environment="prod"))
+    await relay.send_test(_device(environment="sandbox"))
+
+    assert seen == ["production", "production", "sandbox"], (
+        "both routes must translate, and sandbox must pass through untouched"
+    )

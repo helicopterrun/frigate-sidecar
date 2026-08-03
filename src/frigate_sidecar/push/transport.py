@@ -135,6 +135,15 @@ class RelayTransport:
     before forwarding to APNs.
     """
 
+    #: The sidecar's own API, its DB CHECK constraint and spec §1 all spell the
+    #: production environment `prod`; the relay's wire API spells it
+    #: `production` and rejects anything else with 422. Translating here, at the
+    #: one boundary between the two vocabularies, keeps `prod` the only spelling
+    #: anywhere else in this codebase. Without it every push to a prod-registered
+    #: device was rejected and no production device could ever be notified --
+    #: invisible so far only because deployments run the mock transport.
+    _RELAY_ENVIRONMENT = {"prod": "production", "sandbox": "sandbox"}
+
     def __init__(
         self,
         base_url: str,
@@ -145,6 +154,10 @@ class RelayTransport:
         self.base_url = base_url.rstrip("/")
         self._client = client or httpx.AsyncClient(timeout=timeout)
         self._owns_client = client is None
+
+    @classmethod
+    def _environment(cls, device: Device) -> str:
+        return cls._RELAY_ENVIRONMENT.get(device.environment, device.environment)
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -161,7 +174,7 @@ class RelayTransport:
     ) -> TransportResult:
         payload = {
             "device_token": device.apns_token,
-            "environment": device.environment,
+            "environment": self._environment(device),
             "handle": handle,
             "server_id": server_id,
             "severity": severity,
@@ -190,7 +203,7 @@ class RelayTransport:
         """
         payload = {
             "device_token": device.apns_token,
-            "environment": device.environment,
+            "environment": self._environment(device),
         }
         url = f"{self.base_url}/v1/relay/test"
         try:
