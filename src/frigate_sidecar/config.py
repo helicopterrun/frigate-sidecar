@@ -198,7 +198,13 @@ class ScrubSection(BaseModel):
     # edge slip behind in the first place. Holding the edge for ten cameras at
     # 1 fps already costs most of a core, so backfill takes genuine leftovers
     # and no more.
-    backfill_time_budget_s: float = 20.0
+    #
+    # 20s of a ~65s cycle held sustained backfill to ~0.5 segments/s on a box
+    # measured at ~2.2, which was not enough for history to converge before
+    # retention pruned the far end. The live-edge pass runs first and is
+    # unaffected; the cost of raising this is cycle length, and cycle length is
+    # the floor on live-edge lag.
+    backfill_time_budget_s: float = 35.0
     # Cap on the live-edge pass, per camera per cycle. Sized to cover the whole
     # lookback in one pass (900s / 10s segments), so a camera reaches `now` in a
     # single cycle rather than converging over several: a fixed small cap loses

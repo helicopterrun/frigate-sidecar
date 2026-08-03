@@ -12,7 +12,7 @@ used to escape it: extraction staged frames in the system temp dir and left
 every frame it didn't use behind, and the cell store was never swept at all --
 about a gigabyte a day per camera at 1 fps, on the filesystem §8.3 goes out of
 its way to keep free. Keeping the scratch inside `cache_dir` also guarantees
-the cell moves are same-filesystem renames; across a device boundary they
+the cell writes are same-filesystem hardlinks; across a device boundary they
 failed with EXDEV and were silently swallowed, leaving black sheets.
 """
 
@@ -25,6 +25,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,20 +49,28 @@ _CELLS_DIRNAME = ".cells"
 
 @dataclass
 class SourceProfile:
-    """What we've measured about each camera's stream: keyframe spacing and
-    display shape.
+    """Generator state that outlives a single cycle.
 
-    Probed once per camera per process rather than per segment or per cycle --
-    neither changes unless the camera is reconfigured, and re-probing every
-    cycle cost two ffprobe calls per camera against an ~80s cycle.
+    Mostly what we've measured about each camera's stream -- keyframe spacing
+    and display shape -- probed once per camera per process rather than per
+    segment or per cycle, since neither changes unless the camera is
+    reconfigured and re-probing every cycle cost two ffprobe calls per camera
+    against an ~80s cycle.
+
+    Also carries `backfill_cursor`, which is scheduler state rather than a
+    stream property: it is the camera the next cycle's backfill pass starts
+    from, and it lives here because this is already the object the generation
+    loop keeps between cycles.
     """
 
     gop_s: dict[str, float]
     aspect: dict[str, float]
+    backfill_cursor: int
 
     def __init__(self) -> None:
         self.gop_s = {}
         self.aspect = {}
+        self.backfill_cursor = 0
 
 
 def _cells_dir(cache_dir: Path, camera: str, interval_s: float, sheet_start: float) -> Path:
@@ -183,12 +192,21 @@ def _persist_cells(
         dst = cells / f"{a.idx:03d}.jpg"
         if dst.exists():
             continue
+        # Link rather than move: one decode now feeds several tiers, and two of
+        # them can pick the same frame for their respective grids. Moving it
+        # into the first tier's store left the second with a vanished source, a
+        # logged failure and a black cell. The scratch dir lives under
+        # `cache_dir` (`_work_root`), so this is a same-filesystem link and the
+        # caller's TemporaryDirectory still reclaims the original.
         try:
-            os.replace(a.path, dst)
-        except OSError as exc:
-            # Never silent: a failure here is a cell the sheet will render
-            # black, and it used to be swallowed whole.
-            logger.warning("scrub: could not store cell %s -> %s: %s", a.path, dst, exc)
+            os.link(a.path, dst)
+        except OSError:
+            try:
+                shutil.copyfile(a.path, dst)
+            except OSError as exc:
+                # Never silent: a failure here is a cell the sheet will render
+                # black, and it used to be swallowed whole.
+                logger.warning("scrub: could not store cell %s -> %s: %s", a.path, dst, exc)
 
 
 def _drop_cells_dir(cache_dir: Path, camera: str, interval_s: float, sheet_start: float) -> None:
@@ -281,6 +299,236 @@ def _retire_stale_recent_buckets(
         _drop_cells_dir(cache_dir, camera, recent_interval_s, r["start_ts"])
 
 
+class _TierWriter:
+    """Accumulates frames into one tier's buckets, sheets and cell store.
+
+    Split out of `_generate_tier` so a single decode can serve several tiers at
+    once. Every coarse interval is a whole multiple of `aged_interval_s`
+    (enforced by `ScrubSection._check_coarse_intervals`), so coarse grid points
+    are exact subsets of the aged tier's and one pass over a segment can feed
+    every tier that wants a frame from it.
+
+    Generating each tier from its own pass cost one segment-open per tier. On
+    this deployment that is ~345k opens per tier across the retention window --
+    Frigate's segments are 10s, so even a 60s tier had to open every one -- and
+    three tiers could not converge against a box that sustains ~2 segments/s.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        camera: str,
+        *,
+        interval_s: float,
+        window_start: float,
+        window_end: float,
+        cell_w: int,
+        cell_h: int,
+        sidecar_conn: sqlite3.Connection,
+    ) -> None:
+        self.settings = settings
+        self.camera = camera
+        self.interval_s = interval_s
+        self.window_start = window_start
+        self.window_end = window_end
+        self.cell_w = cell_w
+        self.cell_h = cell_h
+        self.conn = sidecar_conn
+        scrub = settings.scrub
+        self.cols, self.rows = scrub.sheet_cols, scrub.sheet_rows
+        self.cells_per_sheet = self.cols * self.rows
+        self.new_frames = 0
+        self._bucket_start: float | None = None
+        self._generated_through = 0.0
+        self._last_slot: int | None = None
+        # Sheets touched this cycle, with their declared cell count. Publishing
+        # is deferred to sheet completion or the end of the cycle: every distinct
+        # count is its own immutable object (§4.3), so publishing once per
+        # *segment* wrote a full sheet image for every couple of cells -- ~30x
+        # the bytes of the sheet it was building, all superseded and all kept
+        # until retention.
+        self._pending_sheets: dict[float, int] = {}
+        self._dirty_sheets: set[float] = set()
+
+    def resume(self, since: float) -> None:
+        """Attach to an open bucket only if it ends where this pass begins.
+
+        With live-edge and backfill passes interleaved, the newest incomplete
+        bucket is usually the live one; attaching an older backfill pass to it
+        would seal it at the wrong end and hand cell assignment negative
+        indices. Geometry is part of the match: a bucket recorded at one cell
+        size can't be continued at another, or its row would describe cells it
+        doesn't contain and re-tiling would stretch the ones already stored.
+        """
+        open_bucket = self.conn.execute(
+            "SELECT * FROM scrub_buckets WHERE camera = ? AND interval_s = ? AND complete = 0 "
+            "AND width = ? AND height = ? "
+            "AND generated_through BETWEEN ? AND ? ORDER BY start_ts DESC LIMIT 1",
+            (self.camera, self.interval_s, self.cell_w, self.cell_h,
+             since - self.interval_s * 1.5, since + self.interval_s * 1.5),
+        ).fetchone()
+        self._bucket_start = open_bucket["start_ts"] if open_bucket else None
+        self._generated_through = open_bucket["generated_through"] if open_bucket else since
+        # Grid slot of the newest frame actually stored, or None when nothing has
+        # been generated for this tier yet. Distinct from `_generated_through`,
+        # which falls back to the window edge -- a moment no frame sits behind,
+        # and so not a slot anything should be excluded for.
+        self._last_slot = (
+            round(open_bucket["generated_through"] / self.interval_s) if open_bucket else None
+        )
+
+    async def _flush_sheet(self, sheet_start: float, count: int) -> None:
+        scrub = self.settings.scrub
+        complete = count >= self.cells_per_sheet
+        rel = await asyncio.to_thread(
+            _publish_sheet_version,
+            scrub.cache_dir, self.camera, self.interval_s, sheet_start,
+            count, self.cols, self.rows, self.cell_w, self.cell_h, scrub.format,
+        )
+        db.upsert_scrub_sheet(
+            self.conn, camera=self.camera, start_ts=sheet_start, interval_s=self.interval_s,
+            cols=self.cols, rows=self.rows, cell_w=self.cell_w, cell_h=self.cell_h,
+            count=count, path=rel, complete=complete,
+        )
+        self.conn.commit()
+        if complete:
+            _drop_cells_dir(scrub.cache_dir, self.camera, self.interval_s, sheet_start)
+
+    async def feed(self, frames: list[grid.Frame]) -> None:
+        """Take whatever of `frames` belongs to this tier and store it.
+
+        The caller decodes at the finest interval in play, so a coarser tier
+        gets several candidates per slot and has to thin them here -- handing
+        colliding frames to `assign_cells` makes it split the bucket on every
+        frame.
+        """
+        scrub = self.settings.scrub
+        # Skip anything already represented: compare *grid slots*, not raw
+        # timestamps. Each segment is decimated independently, so a slot
+        # straddling a segment boundary gets a candidate from both sides, and
+        # handing both to cell assignment forces a bucket split at every
+        # boundary.
+        pending = [
+            f
+            for f in grid.decimate_to_grid(frames, self.interval_s)
+            if (self._last_slot is None or round(f.timestamp / self.interval_s) > self._last_slot)
+            and self.window_start <= f.timestamp < self.window_end
+        ]
+        while pending:
+            if self._bucket_start is None:
+                self._bucket_start = pending[0].timestamp
+            elif (pending[0].timestamp - self._generated_through) > self.interval_s * 1.5:
+                # Gap since the last accepted frame in THIS bucket (possibly
+                # from a prior segment) -- must be caught here too, since
+                # assign_cells only sees gaps *within* the frames passed to a
+                # single call (§5.2, §11 gap-splits-bucket test).
+                db.upsert_scrub_bucket(
+                    self.conn, camera=self.camera, start_ts=self._bucket_start,
+                    end_ts=self._generated_through + self.interval_s,
+                    interval_s=self.interval_s,
+                    width=self.cell_w, height=self.cell_h,
+                    generated_through=self._generated_through, complete=True,
+                )
+                self.conn.commit()
+                self._bucket_start = pending[0].timestamp
+            result = grid.assign_cells(pending, self._bucket_start, self.interval_s)
+            self.new_frames += len(result.accepted)
+
+            if result.accepted:
+                # Route accepted cells into their sheet (a bucket ~30 sheets deep).
+                by_sheet: dict[float, list[grid.Assignment]] = {}
+                for a in result.accepted:
+                    sheet_idx_start = self._bucket_start + (
+                        (a.idx // self.cells_per_sheet) * self.cells_per_sheet * self.interval_s
+                    )
+                    local = grid.Assignment(
+                        idx=a.idx - round((sheet_idx_start - self._bucket_start) / self.interval_s),
+                        timestamp=a.timestamp, path=a.path,
+                    )
+                    by_sheet.setdefault(sheet_idx_start, []).append(local)
+
+                for sheet_start, cell_list in by_sheet.items():
+                    if sheet_start not in self._pending_sheets:
+                        existing = self.conn.execute(
+                            "SELECT COALESCE(MAX(count),0) AS c FROM scrub_sheets "
+                            "WHERE camera=? AND interval_s=? AND start_ts=?",
+                            (self.camera, self.interval_s, sheet_start),
+                        ).fetchone()
+                        self._pending_sheets[sheet_start] = int(existing["c"]) if existing else 0
+                    if self._pending_sheets[sheet_start] >= self.cells_per_sheet:
+                        # Already sealed: its cell store is gone, so re-tiling
+                        # would publish a blank sheet over it.
+                        continue
+                    _persist_cells(
+                        scrub.cache_dir, self.camera, self.interval_s, sheet_start, cell_list
+                    )
+                    new_count = min(
+                        self.cells_per_sheet,
+                        max(self._pending_sheets[sheet_start],
+                            max(a.idx for a in cell_list) + 1),
+                    )
+                    self._pending_sheets[sheet_start] = new_count
+                    self._dirty_sheets.add(sheet_start)
+                    if new_count >= self.cells_per_sheet:
+                        # Final version of this sheet: nothing more can be added,
+                        # so publish now and let the cells go.
+                        await self._flush_sheet(sheet_start, new_count)
+                        self._dirty_sheets.discard(sheet_start)
+
+                self._generated_through = max(a.timestamp for a in result.accepted)
+                self._last_slot = round(self._generated_through / self.interval_s)
+                db.upsert_scrub_bucket(
+                    self.conn, camera=self.camera, start_ts=self._bucket_start,
+                    end_ts=self._generated_through + self.interval_s,
+                    interval_s=self.interval_s,
+                    width=self.cell_w, height=self.cell_h,
+                    generated_through=self._generated_through, complete=False,
+                )
+                self.conn.commit()
+
+            if result.split_at is not None:
+                # Seal the current bucket and start a fresh one at split_at.
+                db.upsert_scrub_bucket(
+                    self.conn, camera=self.camera, start_ts=self._bucket_start,
+                    end_ts=self._generated_through + self.interval_s,
+                    interval_s=self.interval_s,
+                    width=self.cell_w, height=self.cell_h,
+                    generated_through=self._generated_through, complete=True,
+                )
+                self.conn.commit()
+                self._bucket_start = None
+                pending = result.remaining
+            else:
+                pending = []
+
+    async def flush(self) -> None:
+        """One version per still-filling sheet per cycle, not per segment."""
+        for sheet_start in sorted(self._dirty_sheets):
+            await self._flush_sheet(sheet_start, self._pending_sheets[sheet_start])
+        self._dirty_sheets.clear()
+
+
+async def _tier_writer(
+    settings: Settings,
+    camera: str,
+    *,
+    interval_s: float,
+    window_start: float,
+    window_end: float,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    profile: SourceProfile,
+) -> _TierWriter:
+    cell_w, cell_h = await camera_cell_size(
+        settings, camera, frigate_conn=frigate_conn, profile=profile
+    )
+    return _TierWriter(
+        settings, camera,
+        interval_s=interval_s, window_start=window_start, window_end=window_end,
+        cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
+    )
+
+
 async def _generate_tier(
     settings: Settings,
     camera: str,
@@ -294,6 +542,7 @@ async def _generate_tier(
     sidecar_conn: sqlite3.Connection,
     profile: SourceProfile,
     sem: asyncio.Semaphore,
+    also: Sequence[_TierWriter] = (),
 ) -> dict[str, Any]:
     """Sample `[since, window_end)` for one thinning tier, never emitting frames
     outside `[window_start, window_end)` (§4.2 non-overlap, §5.5 thinning tiers).
@@ -301,18 +550,53 @@ async def _generate_tier(
     `since` is the caller's, not derived from MAX(generated_through) here: the
     scheduler runs this against the live edge and against holes behind it in the
     same cycle, and those passes have entirely different resume points.
-    """
-    scrub = settings.scrub
-    cols, rows = scrub.sheet_cols, scrub.sheet_rows
-    cell_w, cell_h = await camera_cell_size(
-        settings, camera, frigate_conn=frigate_conn, profile=profile
-    )
-    cells_per_sheet = cols * rows
 
+    `also` are additional, always coarser tiers to fill from the same decode --
+    see `_TierWriter`. They cost nothing but the cell writes: the segments are
+    being opened for this tier regardless, and each coarse tier keeps only the
+    frames landing on its own grid.
+    """
     if window_end <= window_start or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
+    writer = await _tier_writer(
+        settings, camera, interval_s=interval_s,
+        window_start=window_start, window_end=window_end,
+        frigate_conn=frigate_conn, sidecar_conn=sidecar_conn, profile=profile,
+    )
+    return await _generate_tiers(
+        settings, camera,
+        writers=[writer, *also],
+        drive_interval_s=interval_s,
+        window_end=window_end, since=max(min(since, window_end), window_start),
+        budget=budget,
+        frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
+        profile=profile, sem=sem,
+    )
 
-    since = min(max(since, window_start), window_end)
+
+async def _generate_tiers(
+    settings: Settings,
+    camera: str,
+    *,
+    writers: Sequence[_TierWriter],
+    drive_interval_s: float,
+    window_end: float,
+    since: float,
+    budget: int,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    profile: SourceProfile,
+    sem: asyncio.Semaphore,
+) -> dict[str, Any]:
+    """Open each segment once and feed every tier that wants a frame from it.
+
+    `budget` counts *segments opened*, not tier-segments: serving three tiers
+    from one decode is the whole point, so a fan-out pass costs the same as the
+    single-tier pass it replaces.
+    """
+    scrub = settings.scrub
+    if not writers or budget <= 0:
+        return {"camera": camera, "segments": 0, "new_frames": 0}
 
     # Oldest-first and budgeted: a cold start has no resume point, so `since` is
     # the far edge of the retention window and this query would otherwise return
@@ -332,59 +616,18 @@ async def _generate_tier(
         try:
             profile.gop_s[camera] = await ffmpeg_io.probe_gop_seconds(first_path)
         except ffmpeg_io.FfmpegError:
-            profile.gop_s[camera] = interval_s  # assume best case; drift check will catch it
+            # Assume best case; the drift check will catch it.
+            profile.gop_s[camera] = drive_interval_s
     gop_s = profile.gop_s[camera]
 
-    # Resume an open bucket only if it actually ends where this pass begins.
-    # With live-edge and backfill passes interleaved, the newest incomplete
-    # bucket is usually the live one; attaching an older backfill pass to it
-    # would seal it at the wrong end and hand cell assignment negative indices.
-    # Geometry is part of the match: a bucket recorded at one cell size can't be
-    # continued at another, or its row would describe cells it doesn't contain
-    # and re-tiling would stretch the ones already stored.
-    open_bucket = sidecar_conn.execute(
-        "SELECT * FROM scrub_buckets WHERE camera = ? AND interval_s = ? AND complete = 0 "
-        "AND width = ? AND height = ? "
-        "AND generated_through BETWEEN ? AND ? ORDER BY start_ts DESC LIMIT 1",
-        (camera, interval_s, cell_w, cell_h,
-         since - interval_s * 1.5, since + interval_s * 1.5),
-    ).fetchone()
-    bucket_start = open_bucket["start_ts"] if open_bucket else None
-    bucket_generated_through = open_bucket["generated_through"] if open_bucket else since
-    # Grid slot of the newest frame actually stored, or None when nothing has
-    # been generated for this tier yet. Distinct from `bucket_generated_through`,
-    # which falls back to the window edge -- a moment no frame sits behind, and
-    # so not a slot anything should be excluded for.
-    last_slot: int | None = (
-        round(open_bucket["generated_through"] / interval_s) if open_bucket else None
-    )
+    for writer in writers:
+        writer.resume(since)
 
-    new_frames = 0
+    # Writers outlive a single pass (a coarse tier is fed by every finer tier's
+    # holes in turn), so report this pass's delta rather than their running total.
+    frames_before = sum(w.new_frames for w in writers)
+    cell_w, cell_h = writers[0].cell_w, writers[0].cell_h
     missing_segments = 0
-    # Sheets touched this cycle, with their declared cell count. Publishing is
-    # deferred to sheet completion or the end of the cycle: every distinct count
-    # is its own immutable object (§4.3), so publishing once per *segment* wrote
-    # a full sheet image for every couple of cells -- ~30x the bytes of the sheet
-    # it was building, all of it superseded and all of it kept until retention.
-    pending_sheets: dict[float, int] = {}
-    dirty_sheets: set[float] = set()
-
-    async def _flush_sheet(sheet_start: float, count: int) -> None:
-        complete = count >= cells_per_sheet
-        rel = await asyncio.to_thread(
-            _publish_sheet_version,
-            scrub.cache_dir, camera, interval_s, sheet_start,
-            count, cols, rows, cell_w, cell_h, scrub.format,
-        )
-        db.upsert_scrub_sheet(
-            sidecar_conn, camera=camera, start_ts=sheet_start, interval_s=interval_s,
-            cols=cols, rows=rows, cell_w=cell_w, cell_h=cell_h,
-            count=count, path=rel, complete=complete,
-        )
-        sidecar_conn.commit()
-        if complete:
-            _drop_cells_dir(scrub.cache_dir, camera, interval_s, sheet_start)
-
     for row in rows_:
         seg_path = map_recording_path(
             row["path"], settings.frigate.media_path, settings.frigate.recordings_path
@@ -401,7 +644,7 @@ async def _generate_tier(
             work_dir = Path(td)
             try:
                 frames = await _sample_segment(
-                    seg_path, row["start_time"], interval_s, gop_s, sem, work_dir,
+                    seg_path, row["start_time"], drive_interval_s, gop_s, sem, work_dir,
                     cell_w=cell_w, cell_h=cell_h,
                 )
             except ffmpeg_io.FfmpegInterrupted as exc:
@@ -412,105 +655,13 @@ async def _generate_tier(
             except ffmpeg_io.FfmpegError as exc:
                 logger.warning("scrub: sampling failed for %s: %s", seg_path, exc)
                 continue
-            # Skip anything already represented: compare *grid slots*, not raw
-            # timestamps. Each segment is decimated independently, so a slot
-            # straddling a segment boundary gets a candidate from both sides,
-            # and handing both to cell assignment forces a bucket split at
-            # every boundary.
-            frames = [
-                f
-                for f in frames
-                if (last_slot is None or round(f.timestamp / interval_s) > last_slot)
-                and window_start <= f.timestamp < window_end
-            ]
             if not frames:
                 continue
+            for writer in writers:
+                await writer.feed(frames)
 
-            pending = frames
-            while pending:
-                if bucket_start is None:
-                    bucket_start = pending[0].timestamp
-                elif (pending[0].timestamp - bucket_generated_through) > interval_s * 1.5:
-                    # Gap since the last accepted frame in THIS bucket (possibly
-                    # from a prior segment) -- must be caught here too, since
-                    # assign_cells only sees gaps *within* the frames passed to a
-                    # single call (§5.2, §11 gap-splits-bucket test).
-                    db.upsert_scrub_bucket(
-                        sidecar_conn, camera=camera, start_ts=bucket_start,
-                        end_ts=bucket_generated_through + interval_s, interval_s=interval_s,
-                        width=cell_w, height=cell_h,
-                        generated_through=bucket_generated_through, complete=True,
-                    )
-                    sidecar_conn.commit()
-                    bucket_start = pending[0].timestamp
-                result = grid.assign_cells(pending, bucket_start, interval_s)
-                new_frames += len(result.accepted)
-
-                if result.accepted:
-                    # Route accepted cells into their sheet (a bucket ~30 sheets deep).
-                    by_sheet: dict[float, list[grid.Assignment]] = {}
-                    for a in result.accepted:
-                        sheet_idx_start = bucket_start + (
-                            (a.idx // cells_per_sheet) * cells_per_sheet * interval_s
-                        )
-                        local = grid.Assignment(
-                            idx=a.idx - round((sheet_idx_start - bucket_start) / interval_s),
-                            timestamp=a.timestamp, path=a.path,
-                        )
-                        by_sheet.setdefault(sheet_idx_start, []).append(local)
-
-                    for sheet_start, cell_list in by_sheet.items():
-                        if sheet_start not in pending_sheets:
-                            existing = sidecar_conn.execute(
-                                "SELECT COALESCE(MAX(count),0) AS c FROM scrub_sheets "
-                                "WHERE camera=? AND interval_s=? AND start_ts=?",
-                                (camera, interval_s, sheet_start),
-                            ).fetchone()
-                            pending_sheets[sheet_start] = int(existing["c"]) if existing else 0
-                        if pending_sheets[sheet_start] >= cells_per_sheet:
-                            # Already sealed: its cell store is gone, so
-                            # re-tiling would publish a blank sheet over it.
-                            continue
-                        _persist_cells(scrub.cache_dir, camera, interval_s, sheet_start, cell_list)
-                        new_count = min(
-                            cells_per_sheet,
-                            max(pending_sheets[sheet_start], max(a.idx for a in cell_list) + 1),
-                        )
-                        pending_sheets[sheet_start] = new_count
-                        dirty_sheets.add(sheet_start)
-                        if new_count >= cells_per_sheet:
-                            # Final version of this sheet: nothing more can be
-                            # added, so publish now and let the cells go.
-                            await _flush_sheet(sheet_start, new_count)
-                            dirty_sheets.discard(sheet_start)
-
-                    bucket_generated_through = max(a.timestamp for a in result.accepted)
-                    last_slot = round(bucket_generated_through / interval_s)
-                    db.upsert_scrub_bucket(
-                        sidecar_conn, camera=camera, start_ts=bucket_start,
-                        end_ts=bucket_generated_through + interval_s, interval_s=interval_s,
-                        width=cell_w, height=cell_h,
-                        generated_through=bucket_generated_through, complete=False,
-                    )
-                    sidecar_conn.commit()
-
-                if result.split_at is not None:
-                    # Seal the current bucket and start a fresh one at split_at.
-                    db.upsert_scrub_bucket(
-                        sidecar_conn, camera=camera, start_ts=bucket_start,
-                        end_ts=bucket_generated_through + interval_s, interval_s=interval_s,
-                        width=cell_w, height=cell_h,
-                        generated_through=bucket_generated_through, complete=True,
-                    )
-                    sidecar_conn.commit()
-                    bucket_start = None
-                    pending = result.remaining
-                else:
-                    pending = []
-
-    # One version per still-filling sheet per cycle, not per segment.
-    for sheet_start in sorted(dirty_sheets):
-        await _flush_sheet(sheet_start, pending_sheets[sheet_start])
+    for writer in writers:
+        await writer.flush()
 
     if missing_segments:
         logger.warning(
@@ -518,7 +669,11 @@ async def _generate_tier(
             "frigate.recordings_path (%s) -- check the recordings mount (§8.2)",
             missing_segments, len(rows_), camera, settings.frigate.recordings_path,
         )
-    return {"camera": camera, "segments": len(rows_), "new_frames": new_frames}
+    return {
+        "camera": camera,
+        "segments": len(rows_),
+        "new_frames": sum(w.new_frames for w in writers) - frames_before,
+    }
 
 
 #: How many holes a single cycle will look at before giving up. A span with no
@@ -568,6 +723,7 @@ async def _backfill_tier(
     sidecar_conn: sqlite3.Connection,
     profile: SourceProfile,
     sem: asyncio.Semaphore,
+    also: Sequence[_TierWriter] = (),
 ) -> dict[str, int]:
     """Fill holes in one tier, newest first, each from its newest end.
 
@@ -581,6 +737,11 @@ async def _backfill_tier(
     on the hole's width: a hole's newest end is frequently dead air (camera
     offline, motion-only retention past the continuous window), and a pass
     aimed there samples nothing and leaves the hole exactly as it found it.
+
+    `also` are coarser tiers filled from the same decode (`_TierWriter`). They
+    ride along free, which is what lets the coarse tiers keep up at all: filling
+    them from their own passes needed a segment-open per tier, and this
+    deployment cannot afford even one full pass per tier per retention window.
     """
     segments = 0
     frames = 0
@@ -602,7 +763,7 @@ async def _backfill_tier(
             since=newest["start_time"] if newest else hole_start,
             budget=budget,
             frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-            profile=profile, sem=sem,
+            profile=profile, sem=sem, also=also,
         )
         segments += result["segments"]
         frames += result["new_frames"]
@@ -886,6 +1047,18 @@ async def generate_live_edge(
     live_since = max(window_start, now - scrub.live_edge_lookback_s)
     if recent_through is not None and recent_through > live_since:
         live_since = recent_through
+    # The coarse tiers span the live edge too, and these segments are being
+    # decoded anyway -- so keep them current here rather than making backfill
+    # walk back over the same segments later.
+    also = [
+        await _tier_writer(
+            settings, camera, interval_s=c_interval,
+            window_start=c_start, window_end=c_end,
+            frigate_conn=frigate_conn, sidecar_conn=sidecar_conn, profile=profile,
+        )
+        for c_interval, c_start, c_end in plan[1:]
+        if c_interval in scrub.coarse_intervals_s and c_interval > interval_s
+    ]
     result = await _generate_tier(
         settings, camera,
         interval_s=interval_s,
@@ -893,7 +1066,7 @@ async def generate_live_edge(
         since=live_since,
         budget=max(1, scrub.live_edge_segments),
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-        profile=profile, sem=sem,
+        profile=profile, sem=sem, also=also,
     )
     return {"camera": camera, **result}
 
@@ -912,30 +1085,61 @@ async def generate_backfill(
     """Fill history behind the live edge with whatever budget is left.
 
     Recent tier first -- it is what someone scrubbing the last day sees -- then
-    the coarser aged tier.
+    the coarser aged tier, then the coarse whole-history tiers.
+
+    Every tier gets a guaranteed slice of the budget rather than drawing from one
+    shared pool. Under the shared pool the tiers after the first hungry one were
+    never reached at all: on this deployment the aged tier had tens of hours of
+    holes on nine of ten cameras and consumed the whole budget every cycle, so
+    the coarse tiers stayed empty indefinitely. Unused slices roll forward, so a
+    tier with no holes still donates its share to the next.
     """
     gop_s = await camera_gop_seconds(
         settings, camera, frigate_conn=frigate_conn, profile=profile
     )
+    plan = [(i, ws, we) for i, ws, we in tier_plan(settings, now, gop_s) if we > ws]
+    if not plan or budget <= 0:
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    # One writer per coarse tier, shared across every pass in this call: each
+    # finer tier's decode feeds the coarser ones for free (`_TierWriter`).
+    coarse: list[_TierWriter] = []
+    for interval_s, w_start, w_end in plan:
+        if interval_s in settings.scrub.coarse_intervals_s:
+            coarse.append(await _tier_writer(
+                settings, camera, interval_s=interval_s,
+                window_start=w_start, window_end=w_end,
+                frigate_conn=frigate_conn, sidecar_conn=sidecar_conn, profile=profile,
+            ))
+
+    per_tier = max(1, budget // len(plan))
     segments = 0
     frames = 0
     remaining = budget
-    for interval_s, w_start, w_end in tier_plan(settings, now, gop_s):
-        if remaining <= 0:
-            break
-        if w_end <= w_start:
-            continue
-        result = await _backfill_tier(
-            settings, camera,
-            interval_s=interval_s,
-            window_start=w_start, window_end=w_end,
-            budget=remaining,
-            frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-            profile=profile, sem=sem,
-        )
-        segments += result["segments"]
-        frames += result["new_frames"]
-        remaining -= result["segments"]
+    # Two rounds. The first hands every tier a floor, so no tier can be starved
+    # by a hungrier one ahead of it. The second offers whatever nobody needed
+    # back in plan order, so an idle tier still donates to the recent tier --
+    # a floor alone would have permanently halved the live tier's share on a
+    # deployment whose aged window holds no recordings at all.
+    for floor_only in (True, False):
+        for interval_s, w_start, w_end in plan:
+            if remaining <= 0:
+                break
+            alloc = min(remaining, per_tier) if floor_only else remaining
+            result = await _backfill_tier(
+                settings, camera,
+                interval_s=interval_s,
+                window_start=w_start, window_end=w_end,
+                budget=alloc,
+                frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
+                profile=profile, sem=sem,
+                # Strictly coarser only: a tier must not be fed by its own pass,
+                # and a coarse tier can never usefully feed a finer one.
+                also=[w for w in coarse if w.interval_s > interval_s],
+            )
+            segments += result["segments"]
+            frames += result["new_frames"]
+            remaining -= result["segments"]
 
     return {
         "camera": camera,
@@ -1005,9 +1209,19 @@ async def generate_cycle(
         # the edge slip behind in the first place.
         share = max(1, scrub.backfill_segments_per_cycle // len(cameras))
         deadline = _time.monotonic() + scrub.backfill_time_budget_s
-        for camera in cameras:
+        # Start where the last cycle stopped. The deadline below routinely cuts
+        # this loop off part-way -- one camera spending its whole share can take
+        # half the budget -- and restarting at cameras[0] every cycle meant the
+        # tail was never reached at all: measured on this deployment, four of ten
+        # cameras had never been backfilled once, each still sitting behind a
+        # single untouched 72h hole.
+        start = profile.backfill_cursor % len(cameras)
+        order = cameras[start:] + cameras[:start]
+        served = 0
+        for camera in order:
             if _time.monotonic() >= deadline:
                 break
+            served += 1
             try:
                 _merge(camera, await generate_backfill(
                     settings, camera, budget=share, frigate_conn=conn, sidecar_conn=conn,
@@ -1016,6 +1230,7 @@ async def generate_cycle(
             except Exception:
                 logger.exception("scrub: backfill failed for camera %s", camera)
                 totals[camera]["error"] = True
+        profile.backfill_cursor = start + served
 
         # One line per cycle. Whether the edge is being held is otherwise only
         # visible by querying the DB and inferring it from timestamps, and the
@@ -1044,10 +1259,22 @@ async def generate_cycle(
             if lag_row and lag_row["furthest"] is not None
             else float("nan")
         )
+        # Per-tier coverage, so a tier that has stopped filling is visible in the
+        # log rather than only by querying the DB -- which is how the coarse
+        # tiers were found sitting empty for a day after they shipped.
+        tier_rows = conn.execute(
+            "SELECT interval_s, COUNT(*) AS buckets, "
+            "       SUM(end_ts - start_ts) / 3600.0 AS hours "
+            "FROM scrub_buckets GROUP BY interval_s ORDER BY interval_s"
+        ).fetchall()
+        tiers = " ".join(
+            f"{grid.fmt_time(r['interval_s'])}s={r['hours'] or 0:.1f}h" for r in tier_rows
+        )
         logger.info(
-            "scrub: cycle %.0fs, %d cameras, %d segments, %d frames; worst live-edge lag %.0fs",
-            elapsed, len(cameras), live_total,
-            sum(r["new_frames"] for r in totals.values()), worst_lag,
+            "scrub: cycle %.0fs, %d cameras (%d backfilled), %d segments, %d frames; "
+            "coverage %s; worst live-edge lag %.0fs",
+            elapsed, len(cameras), served, live_total,
+            sum(r["new_frames"] for r in totals.values()), tiers or "none", worst_lag,
         )
         if worst_lag > elapsed * 3 and elapsed > 0:
             logger.warning(

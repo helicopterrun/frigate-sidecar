@@ -14,9 +14,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Sequence
 from typing import Any
 
 SIDECAR_SCHEMA = """

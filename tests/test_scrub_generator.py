@@ -1539,3 +1539,177 @@ def test_gop_is_pooled_across_segments(
     assert gop == pytest.approx(4.995), "the outlier must not decide the cadence"
     plan = generator.tier_plan(settings, 1_800_000_000.0, gop)
     assert plan[0][0] == 5.0, "and it must land on one stable tier"
+
+
+# --- coarse tier fan-out, budget and rotation -------------------------------
+# The coarse tiers (10s/60s) shipped in aa7fe8e and then sat empty on the live
+# deployment for a day. Three independent causes, one test each below.
+
+
+@pytest.fixture
+def coarse_env(env: Settings) -> Settings:
+    """`env` plus coarse tiers whose grids are subsets of the aged tier's."""
+    return env.model_copy(
+        update={
+            "scrub": env.scrub.model_copy(
+                update={
+                    "recent_interval_s": 1.0,
+                    "aged_interval_s": 5.0,
+                    "coarse_intervals_s": [10.0, 60.0],
+                }
+            )
+        }
+    )
+
+
+def test_one_decode_feeds_every_tier(coarse_env: Settings) -> None:
+    """Coarse grids are exact subsets of the finer ones, so a segment opened for
+    the recent tier can serve them all. Paying a segment-open per tier is what
+    made the coarse tiers unaffordable: three tiers over this deployment's
+    retention window is ~750k opens against a box that sustains ~2 segments/s."""
+    conn = db.open_joined(coarse_env.frigate.db_path, coarse_env.sidecar.db_path)
+    try:
+        result = asyncio.run(
+            generator.generate_live_edge(
+                coarse_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_020.0, profile=generator.SourceProfile(),
+                sem=asyncio.Semaphore(3),
+            )
+        )
+        intervals = {
+            row["interval_s"]
+            for row in db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+        }
+    finally:
+        conn.close()
+
+    assert 1.0 in intervals, "the driving tier must still be generated"
+    assert 10.0 in intervals, "the coarse tier must ride along on the same decode"
+    # Two 10s segments exist; the fan-out must not bill them once per tier.
+    assert result["segments"] <= 2, (
+        f"segments must count opens, not tier-segments (got {result['segments']})"
+    )
+
+
+def test_a_frame_shared_by_two_tiers_reaches_both_cell_stores(
+    coarse_env: Settings,
+) -> None:
+    """Cells used to be *moved* into the sheet's store. Once one decode serves
+    several tiers, two of them can select the same frame -- the second move
+    found a vanished source and left a black cell."""
+    conn = db.open_joined(coarse_env.frigate.db_path, coarse_env.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_live_edge(
+                coarse_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_020.0, profile=generator.SourceProfile(),
+                sem=asyncio.Semaphore(3),
+            )
+        )
+    finally:
+        conn.close()
+
+    # A frame at an exact multiple of 10 is on both the 1s and the 10s grid.
+    for interval in (1.0, 10.0):
+        stores = sorted(
+            (coarse_env.scrub.cache_dir / "doorbell" / f"{interval:g}").rglob("*.jpg")
+        )
+        assert stores or list(
+            (coarse_env.scrub.cache_dir / "doorbell" / f"{interval:g}").rglob("*")
+        ), f"tier {interval} produced nothing on disk"
+        for cell in stores:
+            assert cell.stat().st_size > 0, f"{cell} is empty -- the source was consumed"
+
+
+def test_a_hungry_tier_cannot_starve_the_ones_behind_it(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Budget used to be one pool drawn down in plan order, so the first tier
+    with holes consumed it every cycle and the coarse tiers were never reached
+    at all -- empty on nine of ten cameras after a full day."""
+    env = long_history_env.model_copy(
+        update={
+            "scrub": long_history_env.scrub.model_copy(
+                update={"coarse_intervals_s": [10.0], "aged_interval_s": 5.0}
+            )
+        }
+    )
+    seen: list[float] = []
+    real = generator._backfill_tier
+
+    async def _record(*a: object, **kw: object) -> dict[str, int]:
+        seen.append(float(kw["interval_s"]))  # type: ignore[arg-type]
+        return await real(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(generator, "_backfill_tier", _record)
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_backfill(
+                env, "doorbell", budget=12, frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_000.0 + 86400.0, profile=generator.SourceProfile(),
+                sem=asyncio.Semaphore(3),
+            )
+        )
+    finally:
+        conn.close()
+
+    assert 10.0 in seen, "the coarse tier never got a share of the budget"
+
+
+def test_backfill_starts_where_the_last_cycle_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wall-clock deadline routinely cuts the backfill loop off part-way.
+    Restarting at cameras[0] every cycle meant the tail was never reached: four
+    of ten cameras on the live deployment had never been backfilled once."""
+    frigate_db = tmp_path / "frigate.db"
+    conn = sqlite3.connect(frigate_db)
+    conn.executescript(RECORDINGS_SCHEMA)
+    base = 1_800_000_000.0
+    for cam in ("a", "b", "c"):
+        conn.execute(
+            f"INSERT INTO recordings VALUES ('{cam}1','{cam}','/media/frigate/1.mp4',?,?,10.0,5.0)",
+            (base, base + 10),
+        )
+    conn.commit()
+    conn.close()
+    recordings_root = tmp_path / "recordings"
+    recordings_root.mkdir()
+    (recordings_root / "1.mp4").write_bytes(b"fake")
+
+    settings = Settings(
+        frigate=FrigateSection(
+            config_path=tmp_path / "cfg.yml", db_path=frigate_db,
+            media_path=Path("/media/frigate"), recordings_path=recordings_root,
+        ),
+        sidecar=SidecarSection(db_path=tmp_path / "sidecar.db"),
+        scrub=ScrubSection(
+            enabled=True, cache_dir=tmp_path / "scrub", coarse_intervals_s=[],
+            # Tiny but non-zero: the first camera is always attempted, and the
+            # one below overruns the budget, so every cycle is cut before the
+            # *second* camera. That is exactly the starvation shape being fixed.
+            backfill_time_budget_s=0.01,
+        ),
+    )
+
+    served: list[str] = []
+
+    async def _fake_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        served.append(camera)
+        await asyncio.sleep(0.05)  # overruns the budget, so only one runs per cycle
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    async def _noop_live(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0}
+
+    monkeypatch.setattr(generator, "generate_backfill", _fake_backfill)
+    monkeypatch.setattr(generator, "generate_live_edge", _noop_live)
+
+    profile = generator.SourceProfile()
+    for cycle in range(3):
+        asyncio.run(generator.generate_cycle(settings, now=base + cycle, profile=profile))
+
+    assert sorted(served) == ["a", "b", "c"], (
+        f"rotation must reach every camera across cycles, served {served}"
+    )
