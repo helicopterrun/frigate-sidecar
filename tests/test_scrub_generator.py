@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageStat
 
 from frigate_sidecar import db
 from frigate_sidecar.config import FrigateSection, ScrubSection, Settings, SidecarSection
@@ -1713,3 +1713,211 @@ def test_backfill_starts_where_the_last_cycle_stopped(
     assert sorted(served) == ["a", "b", "c"], (
         f"rotation must reach every camera across cycles, served {served}"
     )
+
+
+def _cell_is_black(sheet: Path, row_meta: dict[str, object], idx: int) -> bool:
+    """True if the sheet's cell `idx` is the tiler's black padding.
+
+    Mean brightness, not peak: the canvas is JPEG-encoded after pasting, so a
+    padded cell bleeds ringing from its lit neighbours (measured peak channel 34
+    against a real neighbour's 255 on live footage) and no peak threshold
+    separates it from genuinely dark night footage. Its mean stays at zero.
+    """
+    cw, ch, cols = int(row_meta["cell_w"]), int(row_meta["cell_h"]), int(row_meta["cols"])
+    x, y = (idx % cols) * cw, (idx // cols) * ch
+    with Image.open(sheet) as im:
+        crop = im.convert("RGB").crop((x, y, x + cw, y + ch))
+    return sum(ImageStat.Stat(crop).mean) < 5.0
+
+
+def test_sheet_never_claims_a_cell_it_padded_black(env: Settings) -> None:
+    """The index must not advertise coverage the image can't back.
+
+    The tiler composes onto a black canvas and places cells at their own index,
+    so an index inside the declared count with no cell file on disk is served as
+    a black frame -- indistinguishable to the client from real night footage,
+    and declared covered so it never falls back to Frigate's preview frames.
+    Publishing therefore counts the contiguous cells that actually exist rather
+    than trusting the assignment indices.
+    """
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_camera(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
+                sem=asyncio.Semaphore(3),
+            )
+        )
+        # The still-filling sheet: a sheet published full has already released
+        # its cell store, which is exactly the state that must not be re-tiled.
+        sheets = db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+        target = max((s for s in sheets if not s["complete"]), key=lambda s: s["count"])
+        start_ts, interval_s, full_count = target["start_ts"], target["interval_s"], target["count"]
+        assert full_count >= 4, "need a multi-cell sheet to punch a hole in"
+
+        # Lose one cell file the way a link failure or a vanished scratch frame
+        # does -- after assignment, before publication.
+        cells_dir = generator._cells_dir(env.scrub.cache_dir, "doorbell", interval_s, start_ts)
+        (cells_dir / "002.jpg").unlink()
+
+        republished = generator._publish_sheet_version(
+            env.scrub.cache_dir, "doorbell", interval_s, start_ts, full_count,
+            target["cols"], target["rows"], target["cell_w"], target["cell_h"], "jpeg",
+        )
+        assert republished is not None
+        rel, published_count = republished
+        assert published_count == 2, (
+            f"must stop at the hole (cell 2), published {published_count} of {full_count}"
+        )
+
+        # The published image contains no padded cell at all...
+        sheet_path = env.scrub.cache_dir / rel
+        for idx in range(published_count):
+            assert not _cell_is_black(sheet_path, target, idx), f"cell {idx} is padding"
+        # ...and its URL declares exactly what it contains.
+        assert Path(rel).name == grid.sheet_filename(start_ts, interval_s, published_count, ".jpg")
+    finally:
+        conn.close()
+
+
+def test_publishing_a_short_sheet_retires_the_overclaiming_version(env: Settings) -> None:
+    """A version claiming cells the store can't back must leave the index.
+
+    `db.list_scrub_sheets` advertises the *highest* count per sheet as current,
+    so an inflated row would stay at the head of the index no matter how honest
+    the version published next to it -- the client would keep being handed the
+    black-padded URL.
+    """
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_camera(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
+                sem=asyncio.Semaphore(3),
+            )
+        )
+        target = max(
+            (s for s in db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+             if not s["complete"]),
+            key=lambda s: s["count"],
+        )
+        start_ts, interval_s = target["start_ts"], target["interval_s"]
+        inflated_path = env.scrub.cache_dir / target["path"]
+        assert inflated_path.exists()
+
+        writer = generator._TierWriter(
+            env, "doorbell", interval_s=interval_s,
+            window_start=0.0, window_end=1_900_000_000.0,
+            cell_w=target["cell_w"], cell_h=target["cell_h"], sidecar_conn=conn,
+        )
+        cells_dir = generator._cells_dir(env.scrub.cache_dir, "doorbell", interval_s, start_ts)
+        (cells_dir / "002.jpg").unlink()
+        asyncio.run(writer._flush_sheet(start_ts, target["count"]))
+
+        current = [
+            s for s in db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+            if s["start_ts"] == start_ts and s["interval_s"] == interval_s
+        ]
+        assert len(current) == 1
+        assert current[0]["count"] == 2, f"index still over-claims: {current[0]['count']}"
+        assert not inflated_path.exists(), "the over-claiming image is still servable"
+    finally:
+        conn.close()
+
+
+def test_a_sheet_short_of_full_keeps_its_cells_for_the_backfilled_hole(env: Settings) -> None:
+    """A sheet held short by a hole must not be sealed.
+
+    Sealing drops the cell store, and the cells past the hole live there: drop
+    them and the hole being backfilled later can never extend the sheet, so the
+    span stays permanently unclaimed instead of temporarily.
+    """
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_camera(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
+                sem=asyncio.Semaphore(3),
+            )
+        )
+        full = min(
+            (s for s in db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+             if s["count"] == env.scrub.sheet_cols * env.scrub.sheet_rows),
+            key=lambda s: s["start_ts"],
+        )
+        start_ts, interval_s = full["start_ts"], full["interval_s"]
+        cells_dir = generator._cells_dir(env.scrub.cache_dir, "doorbell", interval_s, start_ts)
+        assert not cells_dir.exists(), "a genuinely full sheet should have released its cells"
+
+        # Rebuild the store minus one cell and republish: short, so kept.
+        cells_dir.mkdir(parents=True)
+        for i in range(full["count"]):
+            if i != 5:
+                _make_jpg(cells_dir / f"{i:03d}.jpg")
+        writer = generator._TierWriter(
+            env, "doorbell", interval_s=interval_s,
+            window_start=0.0, window_end=1_900_000_000.0,
+            cell_w=full["cell_w"], cell_h=full["cell_h"], sidecar_conn=conn,
+        )
+        asyncio.run(writer._flush_sheet(start_ts, full["count"]))
+        assert cells_dir.exists(), "cells dropped while the sheet is still incomplete"
+        assert start_ts not in writer._sealed
+
+        # Fill the hole; the next publish extends over the cells that were kept.
+        _make_jpg(cells_dir / "005.jpg")
+        asyncio.run(writer._flush_sheet(start_ts, full["count"]))
+        current = [
+            s for s in db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+            if s["start_ts"] == start_ts and s["interval_s"] == interval_s
+        ]
+        assert current[0]["count"] == full["count"], "hole filled but the sheet did not extend"
+        assert start_ts in writer._sealed
+    finally:
+        conn.close()
+
+
+def test_a_late_frame_starts_a_new_bucket_instead_of_skipping_a_cell(env: Settings) -> None:
+    """A frame landing two cells past the bucket's last must split it.
+
+    `grid.assign_cells` measures contiguity against `accepted[-1]`, which is
+    empty at the start of every call, so a segment contributing a single frame
+    one slot late was accepted at its own index -- leaving the cell between with
+    no file, rendered black, inside a bucket and sheet that both still declare
+    the span contiguous. Measured on live footage before this check: 9 of 14
+    sheets in a single cycle carried exactly one such hole.
+    """
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        writer = generator._TierWriter(
+            env, "doorbell", interval_s=10.0,
+            window_start=0.0, window_end=1_900_000_000.0,
+            cell_w=32, cell_h=18, sidecar_conn=conn,
+        )
+        writer.resume(1_800_000_000.0)
+        scratch = Path(tempfile.mkdtemp())
+        def frame(ts: float) -> grid.Frame:
+            p = scratch / f"{ts:.0f}.jpg"
+            _make_jpg(p)
+            return grid.Frame(timestamp=ts, path=str(p))
+
+        # Cells 0-3 of a bucket at 1_800_000_000, then a lone frame on cell 5.
+        asyncio.run(writer.feed([frame(1_800_000_000.0 + i * 10.0) for i in range(4)]))
+        asyncio.run(writer.feed([frame(1_800_000_000.0 + 50.0)]))
+        asyncio.run(writer.flush())
+
+        sheets = db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+        for sheet in sheets:
+            cells_dir = generator._cells_dir(
+                env.scrub.cache_dir, "doorbell", sheet["interval_s"], sheet["start_ts"]
+            )
+            on_disk = sorted(int(p.stem) for p in cells_dir.glob("*.jpg"))
+            assert on_disk == list(range(sheet["count"])), (
+                f"sheet {sheet['start_ts']} declares {sheet['count']} cells, has {on_disk}"
+            )
+        # The late frame is its own bucket, not cell 5 of the first one.
+        assert len(sheets) == 2, f"expected the late frame to start a new sheet, got {sheets}"
+    finally:
+        conn.close()

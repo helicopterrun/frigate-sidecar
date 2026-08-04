@@ -151,20 +151,45 @@ def _publish_sheet_version(
     cell_w: int,
     cell_h: int,
     fmt: str,
-) -> str:
+) -> tuple[str, int] | None:
     """Tile the current cell files for this sheet and atomically publish a new
     immutable version (URL includes `count`, §4.3). Returns the on-disk
-    relative path stored in scrub_sheets.path.
+    relative path stored in scrub_sheets.path and the count actually published,
+    or None when there is nothing to publish.
 
-    `count` is the sheet's declared cell count and is used verbatim in the
-    filename, so the row and the object it points at always agree; cells are
-    passed to the tiler with their indices so a missing file leaves its slot
-    empty instead of shifting every later frame.
+    **The published count is measured from the cell store, never taken from the
+    caller.** `count` is only an upper bound to look under. The tiler composes
+    onto a black canvas and places each cell at its own index, so any index
+    inside the declared count without a file on disk renders as a black frame --
+    and the count is what tells the client that cell is covered. Deriving the
+    count from assignment indices instead meant a cell whose file was never
+    stored (a link failure, a segment lost between assignment and persistence)
+    was advertised as real imagery and served as black pixels, with nothing in
+    the index saying otherwise.
+
+    Truncating to the contiguous run also keeps the sheet consistent with the
+    bucket contract it inherits: cell k is `sheet_start + k * interval_s`, which
+    is only true while the cells are contiguous from zero. Cells sitting past a
+    hole are kept on disk, not discarded -- when backfill fills the hole the next
+    publish extends the count over them at no decode cost.
     """
     cells_dir = _cells_dir(cache_dir, camera, interval_s, sheet_start)
-    cells: list[tiling.Cell] = [
-        (i, p) for i in range(count) if (p := cells_dir / f"{i:03d}.jpg").exists()
-    ]
+    cells: list[tiling.Cell] = []
+    for i in range(count):
+        p = cells_dir / f"{i:03d}.jpg"
+        if not p.exists():
+            break
+        cells.append((i, p))
+    published = len(cells)
+    if published == 0:
+        return None
+    if published < count:
+        logger.warning(
+            "scrub: %s %gs sheet %s has no cell %03d -- publishing %d of %d cells rather than "
+            "padding the rest black and claiming them",
+            camera, interval_s, grid.fmt_time(sheet_start), published, published, count,
+        )
+    count = published
 
     rel = grid.sheet_rel_path(camera, interval_s, sheet_start, count, grid.ext_for_format(fmt))
     out_path = cache_dir / rel
@@ -179,7 +204,7 @@ def _publish_sheet_version(
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-    return rel
+    return rel, count
 
 
 def _persist_cells(
@@ -207,6 +232,43 @@ def _persist_cells(
                 # Never silent: a failure here is a cell the sheet will render
                 # black, and it used to be swallowed whole.
                 logger.warning("scrub: could not store cell %s -> %s: %s", a.path, dst, exc)
+
+
+def _retire_overclaiming_sheets(
+    conn: sqlite3.Connection,
+    cache_dir: Path,
+    camera: str,
+    interval_s: float,
+    sheet_start: float,
+    kept_count: int,
+) -> None:
+    """Delete already-published versions of this sheet that claim more cells
+    than the cell store can back.
+
+    §4.3 keeps superseded versions servable forever, and that is still true of
+    every version published from real imagery. This removes only versions whose
+    count was inflated by the pre-fix publish path -- they advertise cells that
+    render black. It has to happen here rather than being left to age out,
+    because `db.list_scrub_sheets` picks the *highest* count as a sheet's current
+    version: leaving a 45-cell claim in the table would keep it at the head of
+    the index no matter how honest the version published beside it.
+    """
+    rows = conn.execute(
+        "SELECT path FROM scrub_sheets "
+        "WHERE camera = ? AND interval_s = ? AND start_ts = ? AND count > ?",
+        (camera, interval_s, sheet_start, kept_count),
+    ).fetchall()
+    if not rows:
+        return
+    conn.execute(
+        "DELETE FROM scrub_sheets "
+        "WHERE camera = ? AND interval_s = ? AND start_ts = ? AND count > ?",
+        (camera, interval_s, sheet_start, kept_count),
+    )
+    conn.commit()
+    for row in rows:
+        with contextlib.suppress(OSError):
+            (cache_dir / row["path"]).unlink()
 
 
 def _drop_cells_dir(cache_dir: Path, camera: str, interval_s: float, sheet_start: float) -> None:
@@ -349,6 +411,12 @@ class _TierWriter:
         # until retention.
         self._pending_sheets: dict[float, int] = {}
         self._dirty_sheets: set[float] = set()
+        # Sheets published full, whose cell store has therefore been dropped:
+        # re-tiling one would publish a blank image over it. Tracked separately
+        # from `_pending_sheets` reaching `cells_per_sheet`, which is only the
+        # highest index *touched* -- a sheet held short of full by a missing cell
+        # must keep accepting cells so the hole can still be filled.
+        self._sealed: set[float] = set()
 
     def resume(self, since: float) -> None:
         """Attach to an open bucket only if it ends where this pass begins.
@@ -378,20 +446,38 @@ class _TierWriter:
         )
 
     async def _flush_sheet(self, sheet_start: float, count: int) -> None:
+        """Publish this sheet at whatever count its cell store can actually back.
+
+        `count` is the high-water index touched, an upper bound only; the
+        published count comes back from `_publish_sheet_version`, which measures
+        the contiguous run of cell files on disk. A sheet whose cells are all
+        missing publishes nothing at all rather than an all-black image with a
+        row claiming it.
+        """
         scrub = self.settings.scrub
-        complete = count >= self.cells_per_sheet
-        rel = await asyncio.to_thread(
+        published = await asyncio.to_thread(
             _publish_sheet_version,
             scrub.cache_dir, self.camera, self.interval_s, sheet_start,
             count, self.cols, self.rows, self.cell_w, self.cell_h, scrub.format,
         )
+        if published is None:
+            return
+        rel, real_count = published
+        complete = real_count >= self.cells_per_sheet
         db.upsert_scrub_sheet(
             self.conn, camera=self.camera, start_ts=sheet_start, interval_s=self.interval_s,
             cols=self.cols, rows=self.rows, cell_w=self.cell_w, cell_h=self.cell_h,
-            count=count, path=rel, complete=complete,
+            count=real_count, path=rel, complete=complete,
         )
         self.conn.commit()
+        _retire_overclaiming_sheets(
+            self.conn, scrub.cache_dir, self.camera, self.interval_s, sheet_start, real_count
+        )
         if complete:
+            # Only a sheet published full can lose its cells: a sheet held short
+            # by a hole still needs them, so the publish that follows the hole
+            # being backfilled can re-tile the cells past it.
+            self._sealed.add(sheet_start)
             _drop_cells_dir(scrub.cache_dir, self.camera, self.interval_s, sheet_start)
 
     async def feed(self, frames: list[grid.Frame]) -> None:
@@ -417,11 +503,27 @@ class _TierWriter:
         while pending:
             if self._bucket_start is None:
                 self._bucket_start = pending[0].timestamp
-            elif (pending[0].timestamp - self._generated_through) > self.interval_s * 1.5:
+            elif (pending[0].timestamp - self._generated_through) > self.interval_s * 1.5 or (
+                grid.cell_index(pending[0].timestamp, self._bucket_start, self.interval_s)
+                != grid.cell_index(self._generated_through, self._bucket_start, self.interval_s) + 1
+            ):
                 # Gap since the last accepted frame in THIS bucket (possibly
                 # from a prior segment) -- must be caught here too, since
                 # assign_cells only sees gaps *within* the frames passed to a
                 # single call (§5.2, §11 gap-splits-bucket test).
+                #
+                # The index comparison catches what the timestamp comparison
+                # cannot: a call whose *first* frame lands two or more cells past
+                # the bucket's last stored one. `assign_cells` measures
+                # contiguity against `accepted[-1]`, which is empty at the start
+                # of every call, so a lone frame arriving one slot late was
+                # accepted at its own index and the cell between was left with no
+                # file -- a black cell in the middle of a sheet the bucket still
+                # declares contiguous. Measured on live footage: 9 of 14 sheets
+                # in one cycle had exactly this single-slot hole. The rounding
+                # boundary is why the timestamp test misses it -- a two-slot jump
+                # can achieve a delta just under 1.5x when the frames sit on
+                # opposite edges of their cells.
                 db.upsert_scrub_bucket(
                     self.conn, camera=self.camera, start_ts=self._bucket_start,
                     end_ts=self._generated_through + self.interval_s,
@@ -450,14 +552,17 @@ class _TierWriter:
                 for sheet_start, cell_list in by_sheet.items():
                     if sheet_start not in self._pending_sheets:
                         existing = self.conn.execute(
-                            "SELECT COALESCE(MAX(count),0) AS c FROM scrub_sheets "
+                            "SELECT COALESCE(MAX(count),0) AS c, "
+                            "       COALESCE(MAX(complete),0) AS done FROM scrub_sheets "
                             "WHERE camera=? AND interval_s=? AND start_ts=?",
                             (self.camera, self.interval_s, sheet_start),
                         ).fetchone()
                         self._pending_sheets[sheet_start] = int(existing["c"]) if existing else 0
-                    if self._pending_sheets[sheet_start] >= self.cells_per_sheet:
-                        # Already sealed: its cell store is gone, so re-tiling
-                        # would publish a blank sheet over it.
+                        if existing and int(existing["done"]):
+                            self._sealed.add(sheet_start)
+                    if sheet_start in self._sealed:
+                        # Published full in an earlier cycle: its cell store is
+                        # gone, so re-tiling would publish a blank sheet over it.
                         continue
                     _persist_cells(
                         scrub.cache_dir, self.camera, self.interval_s, sheet_start, cell_list
@@ -470,8 +575,11 @@ class _TierWriter:
                     self._pending_sheets[sheet_start] = new_count
                     self._dirty_sheets.add(sheet_start)
                     if new_count >= self.cells_per_sheet:
-                        # Final version of this sheet: nothing more can be added,
-                        # so publish now and let the cells go.
+                        # Every index this sheet has is now accounted for, so
+                        # publish immediately rather than waiting for the cycle
+                        # flush. Whether that publish *seals* the sheet depends on
+                        # the cell store backing all of them -- a later pass that
+                        # fills a hole re-dirties it (`_sealed`).
                         await self._flush_sheet(sheet_start, new_count)
                         self._dirty_sheets.discard(sheet_start)
 
