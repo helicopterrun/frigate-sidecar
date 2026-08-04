@@ -159,24 +159,30 @@ def _publish_sheet_version(
     or None when there is nothing to publish.
 
     **The published count is measured from the cell store, never taken from the
-    caller.** `count` is only an upper bound to look under. The tiler composes
-    onto a black canvas and places each cell at its own index, so any index
-    inside the declared count without a file on disk renders as a black frame --
-    and the count is what tells the client that cell is covered. Deriving the
-    count from assignment indices instead meant a cell whose file was never
-    stored (a link failure, a segment lost between assignment and persistence)
-    was advertised as real imagery and served as black pixels, with nothing in
-    the index saying otherwise.
+    caller**, and the whole grid is scanned rather than the caller's `count`,
+    which is only what this pass happened to touch. The tiler composes onto a
+    black canvas and places each cell at its own index, so any index inside the
+    declared count without a file on disk renders as a black frame -- and the
+    count is what tells the client that cell is covered. Deriving the count from
+    assignment indices instead meant a cell whose file was never stored (a link
+    failure, a segment lost between assignment and persistence) was advertised as
+    real imagery and served as black pixels, with nothing in the index saying so.
 
-    Truncating to the contiguous run also keeps the sheet consistent with the
-    bucket contract it inherits: cell k is `sheet_start + k * interval_s`, which
-    is only true while the cells are contiguous from zero. Cells sitting past a
-    hole are kept on disk, not discarded -- when backfill fills the hole the next
-    publish extends the count over them at no decode cost.
+    Scanning the full grid rather than `count` is what makes a hole recoverable.
+    A pass that fills only the missing cell touches one index, so a caller-bounded
+    scan would stop one past the hole and never look at the cells beyond it --
+    real imagery, already decoded and stored, stranded until retention deleted it.
+    Reading the store itself means the sheet extends over everything contiguous
+    the moment the hole is filled, at no decode cost.
+
+    Truncating to the contiguous run keeps the sheet consistent with the bucket
+    contract it inherits: cell k is `sheet_start + k * interval_s`, which is only
+    true while the cells are contiguous from zero. Cells past a hole are kept on
+    disk, not discarded.
     """
     cells_dir = _cells_dir(cache_dir, camera, interval_s, sheet_start)
     cells: list[tiling.Cell] = []
-    for i in range(count):
+    for i in range(cols * rows):
         p = cells_dir / f"{i:03d}.jpg"
         if not p.exists():
             break
@@ -1429,9 +1435,24 @@ def sweep_superseded_versions(
     Complete sheets are never touched: nothing can supersede a full sheet, and
     they are the versions clients keep longest.
 
-    Age comes from the file's own mtime rather than a column: publication time
-    isn't in the schema, and the file is written exactly once at publication.
-    A row whose file has already gone is swept immediately -- it can serve
+    **The grace runs from when a version stopped being current, not from when it
+    was published**, and those are far apart whenever a sheet sits as the only
+    version of its span for a while -- which is normal, since backfill's
+    round-robin may not return to a given hole for many cycles. Measuring from
+    the version's own mtime made a sheet that had been current for two hours
+    instantly sweepable the moment something superseded it, so a client that
+    indexed it a minute earlier got a 404: precisely the case the grace exists
+    to prevent.
+
+    There is no supersession timestamp in the schema, but there doesn't need to
+    be one. A version stops being current when the version that replaced it is
+    published, so the test is simply **how long the current version has been
+    current** -- once that exceeds the grace, every index fetch within the grace
+    window returned the current URL and nobody can still be holding an older one.
+    That is read from the current version's file mtime, which is written exactly
+    once, at publication.
+
+    A row whose file has already gone is swept regardless -- it can serve
     nothing, and leaving it would keep it in the index as a 404.
     """
     now = now if now is not None else time.time()
@@ -1442,7 +1463,9 @@ def sweep_superseded_versions(
     params: list[Any] = [camera, camera] if camera is not None else []
     rows = conn.execute(
         f"""
-        SELECT s.camera, s.start_ts, s.interval_s, s.count, s.path FROM scrub_sheets s
+        SELECT s.camera, s.start_ts, s.interval_s, s.count, s.path,
+               current.path AS current_path
+        FROM scrub_sheets s
         JOIN (
             SELECT camera, interval_s, start_ts, MAX(count) AS max_count
             FROM scrub_sheets
@@ -1451,6 +1474,9 @@ def sweep_superseded_versions(
         ) latest
         ON s.camera = latest.camera AND s.interval_s = latest.interval_s
            AND s.start_ts = latest.start_ts
+        JOIN scrub_sheets current
+        ON current.camera = s.camera AND current.interval_s = s.interval_s
+           AND current.start_ts = s.start_ts AND current.count = latest.max_count
         WHERE s.count < latest.max_count AND s.complete = 0 {outer_filter}
         """,
         params,
@@ -1459,12 +1485,15 @@ def sweep_superseded_versions(
     removed = 0
     for row in rows:
         path = cache_dir / row["path"]
-        try:
-            too_young = path.stat().st_mtime > now - grace_s
-        except OSError:
-            too_young = False  # already gone: the row can only serve a 404
-        if too_young:
-            continue
+        if path.exists():
+            try:
+                superseded_for = now - (cache_dir / row["current_path"]).stat().st_mtime
+            except OSError:
+                # The current version's file is gone, so this span is already
+                # serving 404s and the grace protects nothing.
+                superseded_for = float("inf")
+            if superseded_for < grace_s:
+                continue
         conn.execute(
             "DELETE FROM scrub_sheets WHERE camera = ? AND start_ts = ? AND interval_s = ? "
             "AND count = ?",

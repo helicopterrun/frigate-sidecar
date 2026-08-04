@@ -18,13 +18,21 @@ Two ways to establish the true count, cheapest first:
    that is the tiler's black padding.
 
 Detection in (2) is deliberately conservative about what counts as padding, and
-the asymmetry of the two mistakes is what sets the threshold. Calling a real
-night frame "padding" costs the client one cell of coverage, which it fills from
-Frigate's preview-frames cache -- a real still of the same dark scene. Calling
-padding "real" leaves the black frame on screen, which is the bug. So the test
-is strict about black (padding is pasted as exactly 0 and JPEG keeps a flat
-block flat) while the margin below keeps a lit neighbour's ringing from rescuing
-a genuinely padded cell.
+the asymmetry of the two mistakes is what sets the threshold.
+
+Be clear about the size of a false positive, because it is not one cell. The
+count is a contiguous run from zero -- that is the whole contract -- so reading
+a real frame at index k as padding truncates the sheet there and gives up
+indices k..95 as well, even where those hold real imagery. That is intended (a
+sheet cannot declare a run it doesn't have), but it means a drifting threshold
+costs coverage in sheet-sized chunks, not cell-sized ones. What it costs the
+*client* is bounded: unclaimed spans come from Frigate's preview-frames cache,
+which holds real stills of the same scene. Calling padding "real" is the
+unbounded mistake -- it leaves the black frame on screen, which is the bug.
+
+So the test is strict about black (padding is pasted as exactly 0 and JPEG keeps
+a flat block flat) while the margin below keeps a lit neighbour's ringing from
+rescuing a genuinely padded cell.
 """
 
 from __future__ import annotations

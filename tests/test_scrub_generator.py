@@ -1991,45 +1991,43 @@ def test_the_tighter_of_deadline_and_budget_wins(env: Settings) -> None:
     assert calls == [], f"a far deadline overrode the budget: {calls}"
 
 
-def test_superseded_partial_sheet_versions_are_swept_after_the_grace(env: Settings) -> None:
+def test_every_superseded_partial_version_is_swept_once_the_grace_passes(
+    env: Settings,
+) -> None:
     """A still-filling sheet is published once per tick and every version is its
-    own object, so the intermediates outlive their usefulness by days. Only
-    versions that are both superseded and older than the grace are removed --
-    a URL from a client's most recent index fetch still has to resolve.
+    own object, so the intermediates outlive their usefulness by days. Once the
+    version that replaced them has been current for the whole grace, all of them
+    go -- and the current one stays, however many versions preceded it.
     """
     conn = db.open_sidecar(env.sidecar.db_path)
     now = 1_800_000_000.0
     try:
-        for count, complete in ((10, False), (40, False), (96, False)):
+        paths = {}
+        for count, complete in ((10, False), (40, False), (96, True)):
             rel = f"doorbell/1/{grid.sheet_filename(now, 1.0, count, '.jpg')}"
-            path = env.scrub.cache_dir / rel
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _make_jpg(path)
+            paths[count] = env.scrub.cache_dir / rel
+            paths[count].parent.mkdir(parents=True, exist_ok=True)
+            _make_jpg(paths[count])
             db.upsert_scrub_sheet(
                 conn, camera="doorbell", start_ts=now, interval_s=1.0, cols=4, rows=3,
                 cell_w=32, cell_h=18, count=count, path=rel, complete=complete,
             )
         conn.commit()
-        old, fresh = now - 10_000.0, now - 60.0
-        # The 10-cell version is old; the 40-cell one was published a minute ago.
-        os.utime(env.scrub.cache_dir / f"doorbell/1/{grid.sheet_filename(now, 1.0, 10, '.jpg')}",
-                 (old, old))
-        os.utime(env.scrub.cache_dir / f"doorbell/1/{grid.sheet_filename(now, 1.0, 40, '.jpg')}",
-                 (fresh, fresh))
+        for count in paths:
+            os.utime(paths[count], (now - 10_000.0, now - 10_000.0))
 
         removed = generator.sweep_superseded_versions(
             conn, env.scrub.cache_dir, camera=None, grace_s=900.0, now=now,
         )
-        assert removed == 1
+        assert removed == 2
         surviving = sorted(
             r["count"] for r in conn.execute(
                 "SELECT count FROM scrub_sheets WHERE camera='doorbell'"
             )
         )
-        assert surviving == [40, 96], f"swept the wrong versions: {surviving}"
-        assert not (
-            env.scrub.cache_dir / f"doorbell/1/{grid.sheet_filename(now, 1.0, 10, '.jpg')}"
-        ).exists()
+        assert surviving == [96], f"swept the wrong versions: {surviving}"
+        assert paths[96].exists()
+        assert not paths[10].exists() and not paths[40].exists()
     finally:
         conn.close()
 
@@ -2125,5 +2123,103 @@ def test_sweep_scoped_to_a_camera_leaves_the_others_alone(env: Settings) -> None
             for r in conn.execute("SELECT camera, count FROM scrub_sheets")
         )
         assert remaining == [("a", 20), ("b", 5), ("b", 20)], remaining
+    finally:
+        conn.close()
+
+
+def test_grace_runs_from_supersession_not_from_publication(env: Settings) -> None:
+    """A version that was current for hours must still get its full grace.
+
+    Backfill's round-robin can leave a partially-filled sheet as the only version
+    of its span for many cycles. Measuring the grace from that version's own
+    publication made it instantly sweepable the moment something finally
+    superseded it -- so a client that indexed it a minute earlier got a 404,
+    which is exactly what the grace exists to prevent.
+    """
+    conn = db.open_sidecar(env.sidecar.db_path)
+    now = 1_800_000_000.0
+    try:
+        paths = {}
+        for count in (10, 15):
+            rel = f"doorbell/1/{grid.sheet_filename(now, 1.0, count, '.jpg')}"
+            paths[count] = env.scrub.cache_dir / rel
+            paths[count].parent.mkdir(parents=True, exist_ok=True)
+            _make_jpg(paths[count])
+            db.upsert_scrub_sheet(
+                conn, camera="doorbell", start_ts=now, interval_s=1.0, cols=4, rows=3,
+                cell_w=32, cell_h=18, count=count, path=rel, complete=False,
+            )
+        conn.commit()
+        # The old version was published two hours ago and was current that whole
+        # time; the version that superseded it went out one minute ago.
+        os.utime(paths[10], (now - 7200.0, now - 7200.0))
+        os.utime(paths[15], (now - 60.0, now - 60.0))
+
+        assert generator.sweep_superseded_versions(
+            conn, env.scrub.cache_dir, camera=None, grace_s=900.0, now=now,
+        ) == 0, "swept a version superseded only a minute ago"
+        assert paths[10].exists()
+
+        # Once the current version has been current for the whole grace, no
+        # client can still be holding the older URL.
+        os.utime(paths[15], (now - 1000.0, now - 1000.0))
+        assert generator.sweep_superseded_versions(
+            conn, env.scrub.cache_dir, camera=None, grace_s=900.0, now=now,
+        ) == 1
+        assert not paths[10].exists()
+        assert paths[15].exists()
+    finally:
+        conn.close()
+
+
+def test_filling_a_hole_extends_the_sheet_over_the_cells_beyond_it(env: Settings) -> None:
+    """The cells kept past a hole have to actually become reachable.
+
+    A pass that fills the missing cell touches exactly one index, so a publish
+    bounded by what *this pass* touched would stop one past the hole and never
+    look at the cells beyond it -- real imagery, already decoded and stored,
+    stranded until retention deleted it. This drives it through `feed()`, the
+    path that computes that bound, rather than calling the publisher directly.
+    """
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    scratch = Path(tempfile.mkdtemp())
+
+    def frame(ts: float) -> grid.Frame:
+        p = scratch / f"{ts:.0f}.jpg"
+        _make_jpg(p)
+        return grid.Frame(timestamp=ts, path=str(p))
+
+    try:
+        writer = generator._TierWriter(
+            env, "doorbell", interval_s=10.0, window_start=0.0, window_end=1_900_000_000.0,
+            cell_w=32, cell_h=18, sidecar_conn=conn,
+        )
+        writer.resume(1_800_000_000.0)
+        base = 1_800_000_000.0
+        asyncio.run(writer.feed([frame(base + i * 10.0) for i in range(6)]))
+        asyncio.run(writer.flush())
+
+        # Lose cell 3 the way a link failure does, and republish: the sheet
+        # truncates to 3 while cells 4 and 5 stay on disk.
+        cells_dir = generator._cells_dir(env.scrub.cache_dir, "doorbell", 10.0, base)
+        (cells_dir / "003.jpg").unlink()
+        asyncio.run(writer._flush_sheet(base, 6))
+        current = [
+            s for s in db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+            if s["start_ts"] == base and s["interval_s"] == 10.0
+        ]
+        assert current[0]["count"] == 3, current[0]["count"]
+        assert (cells_dir / "004.jpg").exists(), "cells past the hole were discarded"
+
+        # Backfill fills only the hole -- one index touched.
+        _make_jpg(cells_dir / "003.jpg")
+        asyncio.run(writer._flush_sheet(base, 4))
+        current = [
+            s for s in db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+            if s["start_ts"] == base and s["interval_s"] == 10.0
+        ]
+        assert current[0]["count"] == 6, (
+            f"sheet stopped at the hole's own index instead of extending: {current[0]['count']}"
+        )
     finally:
         conn.close()

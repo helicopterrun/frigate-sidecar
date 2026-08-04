@@ -258,12 +258,16 @@ class ScrubSection(BaseModel):
             raise ValueError(f"scrub.format must be 'jpeg' or 'webp', got {v!r}")
         return fmt
 
-    @field_validator("live_edge_interval_s", "sheet_version_grace_s")
+    @field_validator("generate_interval_s", "live_edge_interval_s", "sheet_version_grace_s")
     @classmethod
     def _positive(cls, v: float) -> float:
         """A non-positive tick would spin the generation loop without yielding,
         and a non-positive grace would sweep a version the index is advertising
         in the same breath it publishes it.
+
+        `generate_interval_s` is checked too because it is now the ceiling on the
+        loop's tick (`min` of the two), so a zero there defeats the check on
+        `live_edge_interval_s` entirely.
         """
         if v <= 0:
             raise ValueError(f"must be > 0, got {v!r}")
