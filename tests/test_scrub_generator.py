@@ -2057,3 +2057,73 @@ def test_the_current_version_is_never_swept_however_old(env: Settings) -> None:
         assert path.exists()
     finally:
         conn.close()
+
+
+def test_sweep_never_crosses_camera_or_tier_keys(env: Settings) -> None:
+    """"Superseded" is per (camera, interval, start) -- all three.
+
+    The same start_ts and count recur across every camera and tier, so a join
+    that drops any key component would read one camera's larger version as
+    superseding another's and delete a span's only sheet.
+    """
+    conn = db.open_sidecar(env.sidecar.db_path)
+    start_ts = 1_800_000_000.0
+    try:
+        for camera in ("a", "b"):
+            for interval_s in (1.0, 60.0):
+                for count, complete in ((5, False), (20, False), (96, True)):
+                    rel = (f"{camera}/{interval_s:g}/"
+                           f"{grid.sheet_filename(start_ts, interval_s, count, '.jpg')}")
+                    path = env.scrub.cache_dir / rel
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    _make_jpg(path)
+                    os.utime(path, (1_000_000.0, 1_000_000.0))  # older than any grace
+                    db.upsert_scrub_sheet(
+                        conn, camera=camera, start_ts=start_ts, interval_s=interval_s,
+                        cols=12, rows=8, cell_w=320, cell_h=180,
+                        count=count, path=rel, complete=complete,
+                    )
+        conn.commit()
+
+        generator.sweep_superseded_versions(
+            conn, env.scrub.cache_dir, camera=None, grace_s=10.0, now=start_ts,
+        )
+        survivors = {
+            (r["camera"], r["interval_s"], r["count"])
+            for r in conn.execute("SELECT camera, interval_s, count FROM scrub_sheets")
+        }
+        assert survivors == {
+            (c, i, 96) for c in ("a", "b") for i in (1.0, 60.0)
+        }, f"sweep crossed a key boundary: {sorted(survivors)}"
+    finally:
+        conn.close()
+
+
+def test_sweep_scoped_to_a_camera_leaves_the_others_alone(env: Settings) -> None:
+    conn = db.open_sidecar(env.sidecar.db_path)
+    start_ts = 1_800_000_000.0
+    try:
+        for camera in ("a", "b"):
+            for count in (5, 20):
+                rel = f"{camera}/1/{grid.sheet_filename(start_ts, 1.0, count, '.jpg')}"
+                path = env.scrub.cache_dir / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _make_jpg(path)
+                os.utime(path, (1_000_000.0, 1_000_000.0))
+                db.upsert_scrub_sheet(
+                    conn, camera=camera, start_ts=start_ts, interval_s=1.0, cols=12, rows=8,
+                    cell_w=320, cell_h=180, count=count, path=rel, complete=False,
+                )
+        conn.commit()
+
+        removed = generator.sweep_superseded_versions(
+            conn, env.scrub.cache_dir, camera="a", grace_s=10.0, now=start_ts,
+        )
+        assert removed == 1
+        remaining = sorted(
+            (r["camera"], r["count"])
+            for r in conn.execute("SELECT camera, count FROM scrub_sheets")
+        )
+        assert remaining == [("a", 20), ("b", 5), ("b", 20)], remaining
+    finally:
+        conn.close()
