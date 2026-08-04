@@ -462,6 +462,27 @@ def scrub_backfill(
     )
 
 
+@scrub_app.command("verify")
+def scrub_verify(
+    camera: str | None = typer.Option(None, "--camera"),
+    interval: float | None = typer.Option(None, "--interval"),
+    repair: bool = typer.Option(False, "--repair", help="Republish over-claiming sheets."),
+) -> None:
+    """Find sheets whose index entry claims more cells than they render.
+
+    Publication can no longer produce one, but sheets written before that fix
+    keep their inflated count -- their span has passed, so nothing republishes
+    them. `--repair` republishes each at its true count (same pixels, honest
+    name) and retires the over-claiming version.
+    """
+    from frigate_sidecar.scrub.repair import verify_and_repair
+
+    result = verify_and_repair(
+        load_settings(), camera=camera, interval=interval, repair=repair
+    )
+    typer.echo(json.dumps(result, default=str))
+
+
 @scrub_app.command("prune")
 def scrub_prune(camera: str | None = typer.Option(None, "--camera")) -> None:
     """Drop sheets/buckets past scrub.retention_days, oldest-first."""
