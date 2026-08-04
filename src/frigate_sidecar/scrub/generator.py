@@ -1238,6 +1238,7 @@ async def _decimate_source(
     window_start: float,
     window_end: float,
     work_dir: Path,
+    deadline: float | None = None,
 ) -> list[grid.Frame]:
     """Select every Nth already-published cell of `finer_interval_s`'s sheets
     landing on `derived_interval_s`'s epoch grid, cropped to its own temp file.
@@ -1248,6 +1249,13 @@ async def _decimate_source(
     guarantees it), so cell k's timestamp is exactly
     `start_ts + k * finer_interval_s`, and it lands on the derived grid iff
     `round(cell_t / finer_interval_s) % ratio == 0`.
+
+    `deadline`, when given, is checked once per source sheet. A single call
+    can otherwise cover thousands of sheets (a coarse derived interval
+    decimating from the whole retention window on its first-ever run) and
+    run for as long as opening and cropping every one of them takes, with no
+    regard for the caller's own budget -- the same class of problem the
+    per-segment backfill deadline check exists to fix, one level up.
     """
     ratio = round(derived_interval_s / finer_interval_s)
     sheets = db.list_scrub_sheets(
@@ -1255,6 +1263,8 @@ async def _decimate_source(
     )
     frames: list[grid.Frame] = []
     for sheet in sheets:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         img_path = cache_dir / sheet["path"]
         if not img_path.exists():
             continue
@@ -1349,6 +1359,7 @@ async def generate_derived_tier(
                 sidecar_conn, scrub.cache_dir, camera,
                 finer_interval_s=finer_interval, derived_interval_s=interval_s,
                 window_start=span_start, window_end=span_end, work_dir=work_dir,
+                deadline=deadline,
             )
             if frames:
                 await writer.feed(frames)
