@@ -25,6 +25,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -1264,6 +1265,7 @@ async def generate_cycle(
     *,
     now: float | None = None,
     profile: SourceProfile | None = None,
+    backfill_deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     """One generation pass across all opted-in cameras (§5.4).
 
@@ -1271,6 +1273,13 @@ async def generate_cycle(
     one every cycle re-probes each camera's GOP and aspect, which is two ffprobe
     calls per camera against an ~80s cycle. Callers that want isolation (tests,
     one-shot CLI runs) simply omit it.
+
+    `backfill_deadline` is a `time.monotonic()` instant the backfill phase must
+    stop by, on top of its own `backfill_time_budget_s`. The generation loop
+    passes its next tick, which is what keeps the trailing-window pass on cadence:
+    backfill gets the time left in the tick rather than the tick getting whatever
+    is left after backfill. Omit it and the phase is bounded by its own budget
+    alone, which is what the CLI's one-shot run wants.
     """
     import time as _time
 
@@ -1317,6 +1326,8 @@ async def generate_cycle(
         # the edge slip behind in the first place.
         share = max(1, scrub.backfill_segments_per_cycle // len(cameras))
         deadline = _time.monotonic() + scrub.backfill_time_budget_s
+        if backfill_deadline is not None:
+            deadline = min(deadline, backfill_deadline)
         # Start where the last cycle stopped. The deadline below routinely cuts
         # this loop off part-way -- one camera spending its whole share can take
         # half the budget -- and restarting at cameras[0] every cycle meant the
@@ -1397,10 +1408,82 @@ async def generate_cycle(
         conn.close()
 
 
+def sweep_superseded_versions(
+    conn: sqlite3.Connection,
+    cache_dir: Path,
+    *,
+    camera: str | None,
+    grace_s: float,
+    now: float | None = None,
+) -> int:
+    """Drop still-filling sheet versions that a larger version has replaced.
+
+    A sheet is published once per generation tick while it fills, and every
+    version is its own immutable object (§4.3), so the intermediate ones pile up
+    until retention removes them days later -- roughly three times the tier's
+    steady-state size at the default tick, measured on real footage. Only
+    versions that are *both* superseded (a larger count exists for the same
+    camera/interval/start) and older than `grace_s` are removed, so a URL from a
+    client's most recent index fetch still resolves.
+
+    Complete sheets are never touched: nothing can supersede a full sheet, and
+    they are the versions clients keep longest.
+
+    Age comes from the file's own mtime rather than a column: publication time
+    isn't in the schema, and the file is written exactly once at publication.
+    A row whose file has already gone is swept immediately -- it can serve
+    nothing, and leaving it would keep it in the index as a 404.
+    """
+    now = now if now is not None else time.time()
+    # The camera filter is applied inside the grouped subquery as well as
+    # outside it, so both halves see the same rows.
+    inner_filter = "WHERE camera = ?" if camera is not None else ""
+    outer_filter = "AND s.camera = ?" if camera is not None else ""
+    params: list[Any] = [camera, camera] if camera is not None else []
+    rows = conn.execute(
+        f"""
+        SELECT s.camera, s.start_ts, s.interval_s, s.count, s.path FROM scrub_sheets s
+        JOIN (
+            SELECT camera, interval_s, start_ts, MAX(count) AS max_count
+            FROM scrub_sheets
+            {inner_filter}
+            GROUP BY camera, interval_s, start_ts
+        ) latest
+        ON s.camera = latest.camera AND s.interval_s = latest.interval_s
+           AND s.start_ts = latest.start_ts
+        WHERE s.count < latest.max_count AND s.complete = 0 {outer_filter}
+        """,
+        params,
+    ).fetchall()
+
+    removed = 0
+    for row in rows:
+        path = cache_dir / row["path"]
+        try:
+            too_young = path.stat().st_mtime > now - grace_s
+        except OSError:
+            too_young = False  # already gone: the row can only serve a 404
+        if too_young:
+            continue
+        conn.execute(
+            "DELETE FROM scrub_sheets WHERE camera = ? AND start_ts = ? AND interval_s = ? "
+            "AND count = ?",
+            (row["camera"], row["start_ts"], row["interval_s"], row["count"]),
+        )
+        with contextlib.suppress(OSError):
+            path.unlink()
+        removed += 1
+    if removed:
+        conn.commit()
+    return removed
+
+
 def prune(
     settings: Settings, *, camera: str | None = None, now: float | None = None
 ) -> dict[str, Any]:
-    """Drop sheets/buckets past retention_days, oldest-first (§5.5, §5.7)."""
+    """Drop sheets/buckets past retention_days, oldest-first (§5.5, §5.7), and
+    sweep superseded still-filling sheet versions (`sweep_superseded_versions`).
+    """
     import time as _time
 
     now = now if now is not None else _time.time()
@@ -1410,6 +1493,10 @@ def prune(
         paths = db.delete_scrub_sheets_before(camera, cutoff, conn)
         n_buckets = db.delete_scrub_buckets_before(conn, camera, cutoff)
         conn.commit()
+        n_superseded = sweep_superseded_versions(
+            conn, settings.scrub.cache_dir, camera=camera,
+            grace_s=settings.scrub.sheet_version_grace_s, now=now,
+        )
     finally:
         conn.close()
 
@@ -1430,4 +1517,5 @@ def prune(
         "files_deleted": n_files,
         "buckets_deleted": n_buckets,
         "cell_dirs_deleted": n_cell_dirs,
+        "superseded_versions_deleted": n_superseded,
     }

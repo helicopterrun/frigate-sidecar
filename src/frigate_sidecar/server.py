@@ -47,9 +47,22 @@ logger = logging.getLogger(__name__)
 
 
 async def _scrub_generation_loop(app: FastAPI) -> None:
-    """Continuous ~60s edge (docs spec §5.4 option (a)) -- NEVER hourly, per
+    """Continuous trailing edge (docs spec §5.4 option (a)) -- NEVER hourly, per
     the spec's own blocking correction: an hourly cron reproduces the
     top-of-hour hole this cache exists to remove.
+
+    The tick is `live_edge_interval_s`, and it is a *deadline*, not a sleep: the
+    trailing-window pass runs at the top of every tick and backfill gets the time
+    left over. It used to be the other way round -- a full cycle, then a fixed
+    sleep -- so backfill's budget landed on top of a live-edge pass that had
+    grown to ~65s and pushed the effective cadence to ~100s. Cadence is the floor
+    on how stale the newest cell can be, so that came straight off the freshness
+    the client is promised. Nothing here bounds *throughput*; the same segments
+    are decoded either way, in smaller instalments.
+
+    A tick that overruns is not slept off -- backfill is simply cut, and if the
+    live pass alone overran, the next tick starts immediately. That is the
+    correct priority: history can wait, the edge cannot.
 
     Retention pruning rides along on its own slower cadence: it used to be
     reachable only from the CLI, so an unattended deployment kept every sheet
@@ -58,33 +71,31 @@ async def _scrub_generation_loop(app: FastAPI) -> None:
     from frigate_sidecar.scrub.generator import SourceProfile, generate_cycle, prune
 
     settings: Settings = app.state.settings
-    interval = settings.scrub.generate_interval_s
+    # `generate_interval_s` remains the ceiling, so a deployment that has
+    # deliberately slowed generation down keeps that setting meaningful.
+    tick = min(settings.scrub.generate_interval_s, settings.scrub.live_edge_interval_s)
     next_prune = time.time() + settings.scrub.prune_interval_s
     # Measured GOP and aspect per camera, kept for the process lifetime.
     profile = SourceProfile()
     while True:
-        caught_up = True
+        deadline = time.monotonic() + tick
         try:
-            results = await generate_cycle(settings, now=time.time(), profile=profile)
-            # A camera that spent its whole backfill share still has history
-            # behind it. Sleeping the full interval anyway makes a cold backfill
-            # spend most of its wall-clock idle; the live edge only ever needs a
-            # handful of segments, so this changes nothing in steady state.
-            caught_up = not any(r.get("backfilled") for r in results)
+            await generate_cycle(
+                settings, now=time.time(), profile=profile, backfill_deadline=deadline
+            )
         except Exception:
             logger.exception("scrub: generation cycle failed")
         if time.time() >= next_prune:
             next_prune = time.time() + settings.scrub.prune_interval_s
             try:
                 result = await asyncio.to_thread(prune, settings)
-                if result["sheets_deleted"] or result["buckets_deleted"]:
+                if any(v for k, v in result.items() if k.endswith("_deleted")):
                     logger.info("scrub: retention prune %s", result)
             except Exception:
                 logger.exception("scrub: retention prune failed")
-        if caught_up:
-            await asyncio.sleep(interval)
-        else:
-            await asyncio.sleep(0)  # yield, then keep catching up
+        # Zero when the tick overran, which keeps the edge pass running
+        # back-to-back on a cache that is still catching up.
+        await asyncio.sleep(max(0.0, deadline - time.monotonic()))
 
 
 def _cache_on_separate_filesystem(cache_dir: Path, recordings_path: Path) -> bool:

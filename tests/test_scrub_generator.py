@@ -9,6 +9,7 @@ math itself, tested in isolation.
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -1919,5 +1920,140 @@ def test_a_late_frame_starts_a_new_bucket_instead_of_skipping_a_cell(env: Settin
             )
         # The late frame is its own bucket, not cell 5 of the first one.
         assert len(sheets) == 2, f"expected the late frame to start a new sheet, got {sheets}"
+    finally:
+        conn.close()
+
+
+def test_backfill_phase_stops_at_the_callers_deadline(env: Settings) -> None:
+    """Backfill must yield to the next trailing-window pass.
+
+    The loop hands `generate_cycle` its own tick as the deadline, so history can
+    never push the edge pass out -- the failure that put measured live-edge lag
+    at ~105s against a promised 90s.
+    """
+    import time as _time
+
+    calls: list[str] = []
+
+    async def _slow_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        calls.append(camera)
+        await asyncio.sleep(0.05)
+        return {"camera": camera, "segments": 1, "new_frames": 0, "backfilled": True}
+
+    async def _noop_live(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0}
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(generator, "generate_backfill", _slow_backfill)
+        mp.setattr(generator, "generate_live_edge", _noop_live)
+        many = env.model_copy(
+            update={"scrub": env.scrub.model_copy(
+                update={"cameras": [f"cam{i}" for i in range(10)]}
+            )}
+        )
+        # A deadline already in the past: not one camera may be backfilled.
+        asyncio.run(generator.generate_cycle(
+            many, now=1_800_000_030.0, backfill_deadline=_time.monotonic() - 1.0,
+        ))
+        assert calls == [], f"backfill ran past its deadline: {calls}"
+
+        # Without one, the phase's own budget applies and work happens.
+        asyncio.run(generator.generate_cycle(many, now=1_800_000_030.0))
+        assert calls, "backfill should run when the deadline allows it"
+
+
+def test_the_tighter_of_deadline_and_budget_wins(env: Settings) -> None:
+    """A generous tick must not extend backfill past `backfill_time_budget_s`."""
+    import time as _time
+
+    calls: list[str] = []
+
+    async def _slow_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        calls.append(camera)
+        await asyncio.sleep(0.05)
+        return {"camera": camera, "segments": 1, "new_frames": 0, "backfilled": True}
+
+    async def _noop_live(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0}
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(generator, "generate_backfill", _slow_backfill)
+        mp.setattr(generator, "generate_live_edge", _noop_live)
+        tiny_budget = env.model_copy(
+            update={"scrub": env.scrub.model_copy(update={
+                "cameras": [f"cam{i}" for i in range(10)],
+                "backfill_time_budget_s": 0.0,
+            })}
+        )
+        asyncio.run(generator.generate_cycle(
+            tiny_budget, now=1_800_000_030.0, backfill_deadline=_time.monotonic() + 600.0,
+        ))
+    assert calls == [], f"a far deadline overrode the budget: {calls}"
+
+
+def test_superseded_partial_sheet_versions_are_swept_after_the_grace(env: Settings) -> None:
+    """A still-filling sheet is published once per tick and every version is its
+    own object, so the intermediates outlive their usefulness by days. Only
+    versions that are both superseded and older than the grace are removed --
+    a URL from a client's most recent index fetch still has to resolve.
+    """
+    conn = db.open_sidecar(env.sidecar.db_path)
+    now = 1_800_000_000.0
+    try:
+        for count, complete in ((10, False), (40, False), (96, False)):
+            rel = f"doorbell/1/{grid.sheet_filename(now, 1.0, count, '.jpg')}"
+            path = env.scrub.cache_dir / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _make_jpg(path)
+            db.upsert_scrub_sheet(
+                conn, camera="doorbell", start_ts=now, interval_s=1.0, cols=4, rows=3,
+                cell_w=32, cell_h=18, count=count, path=rel, complete=complete,
+            )
+        conn.commit()
+        old, fresh = now - 10_000.0, now - 60.0
+        # The 10-cell version is old; the 40-cell one was published a minute ago.
+        os.utime(env.scrub.cache_dir / f"doorbell/1/{grid.sheet_filename(now, 1.0, 10, '.jpg')}",
+                 (old, old))
+        os.utime(env.scrub.cache_dir / f"doorbell/1/{grid.sheet_filename(now, 1.0, 40, '.jpg')}",
+                 (fresh, fresh))
+
+        removed = generator.sweep_superseded_versions(
+            conn, env.scrub.cache_dir, camera=None, grace_s=900.0, now=now,
+        )
+        assert removed == 1
+        surviving = sorted(
+            r["count"] for r in conn.execute(
+                "SELECT count FROM scrub_sheets WHERE camera='doorbell'"
+            )
+        )
+        assert surviving == [40, 96], f"swept the wrong versions: {surviving}"
+        assert not (
+            env.scrub.cache_dir / f"doorbell/1/{grid.sheet_filename(now, 1.0, 10, '.jpg')}"
+        ).exists()
+    finally:
+        conn.close()
+
+
+def test_the_current_version_is_never_swept_however_old(env: Settings) -> None:
+    """Nothing supersedes the largest count, so age alone must not remove it --
+    that would delete the only sheet covering a span."""
+    conn = db.open_sidecar(env.sidecar.db_path)
+    now = 1_800_000_000.0
+    try:
+        rel = f"doorbell/1/{grid.sheet_filename(now, 1.0, 12, '.jpg')}"
+        path = env.scrub.cache_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _make_jpg(path)
+        db.upsert_scrub_sheet(
+            conn, camera="doorbell", start_ts=now, interval_s=1.0, cols=4, rows=3,
+            cell_w=32, cell_h=18, count=12, path=rel, complete=True,
+        )
+        conn.commit()
+        os.utime(path, (now - 1_000_000.0, now - 1_000_000.0))
+
+        assert generator.sweep_superseded_versions(
+            conn, env.scrub.cache_dir, camera=None, grace_s=1.0, now=now,
+        ) == 0
+        assert path.exists()
     finally:
         conn.close()

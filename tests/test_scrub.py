@@ -608,44 +608,113 @@ def test_sheet_index_advertises_the_stored_extension(
 
 
 @pytest.mark.parametrize(
-    ("backfilled", "expect_sleep"),
-    [(False, True), (True, False)],
+    ("cycle_cost_s", "expected_sleep_s"),
+    [(5.0, 15.0), (25.0, 0.0)],
 )
-def test_generation_loop_skips_the_idle_wait_while_catching_up(
-    monkeypatch: pytest.MonkeyPatch, backfilled: bool, expect_sleep: bool
+def test_generation_loop_holds_its_tick_as_a_deadline(
+    monkeypatch: pytest.MonkeyPatch, cycle_cost_s: float, expected_sleep_s: float
 ) -> None:
-    """A cold start has days of history behind it; sleeping the full interval
-    after a cycle that used its whole budget leaves most of the wall-clock idle.
-    The live edge only ever needs a handful of segments, so steady state is
-    unaffected."""
+    """The tick is a deadline, not a sleep.
+
+    Cadence is the floor on how stale the newest sprite cell can be, so the
+    trailing-window pass has to start every `live_edge_interval_s` regardless of
+    what history cost. A cycle that fits sleeps out the remainder; one that
+    overruns sleeps nothing and the next pass starts immediately, rather than
+    the loop adding an idle wait on top of an already-late tick.
+    """
     import asyncio
 
     from frigate_sidecar import server
 
-    settings = Settings(scrub=ScrubSection(generate_interval_s=60.0))
+    settings = Settings(
+        scrub=ScrubSection(generate_interval_s=60.0, live_edge_interval_s=20.0)
+    )
     app = type("_App", (), {"state": type("_S", (), {"settings": settings})})()
 
+    clock = {"monotonic": 1000.0}
+    deadlines: list[float] = []
     sleeps: list[float] = []
     cycles = 0
 
-    async def _fake_cycle(_settings: object, **kw: object) -> list[dict[str, object]]:
+    class _Clock:
+        @staticmethod
+        def monotonic() -> float:
+            return clock["monotonic"]
+
+        @staticmethod
+        def time() -> float:
+            return 1_800_000_000.0  # wall clock; only the prune schedule reads it
+
+    async def _fake_cycle(
+        _settings: object, *, backfill_deadline: float | None = None, **kw: object
+    ) -> list[dict[str, object]]:
         nonlocal cycles
         cycles += 1
         if cycles > 2:
             raise asyncio.CancelledError
-        return [{"camera": "doorbell", "segments": 12, "backfilled": backfilled}]
+        deadlines.append(backfill_deadline)  # type: ignore[arg-type]
+        clock["monotonic"] += cycle_cost_s
+        return [{"camera": "doorbell", "segments": 12}]
 
     async def _fake_sleep(seconds: float) -> None:
         sleeps.append(seconds)
 
     monkeypatch.setattr("frigate_sidecar.scrub.generator.generate_cycle", _fake_cycle)
     monkeypatch.setattr(server.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(server, "time", _Clock)
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(server._scrub_generation_loop(app))  # type: ignore[arg-type]
 
     assert sleeps, "loop should always yield"
-    assert (sleeps[0] == 60.0) is expect_sleep
+    assert sleeps[0] == pytest.approx(expected_sleep_s)
+    # Backfill is handed the tick's own deadline, so it can never push the next
+    # trailing-window pass out.
+    assert deadlines[0] == pytest.approx(1020.0)
+
+
+def test_generation_loop_tick_is_the_finer_of_the_two_intervals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`generate_interval_s` stays meaningful as the ceiling, so a deployment
+    that deliberately slowed generation down is not sped back up by the new
+    knob's default."""
+    import asyncio
+
+    from frigate_sidecar import server
+
+    settings = Settings(
+        scrub=ScrubSection(generate_interval_s=10.0, live_edge_interval_s=20.0)
+    )
+    app = type("_App", (), {"state": type("_S", (), {"settings": settings})})()
+    deadlines: list[float] = []
+
+    class _Clock:
+        @staticmethod
+        def monotonic() -> float:
+            return 500.0
+
+        @staticmethod
+        def time() -> float:
+            return 1_800_000_000.0
+
+    async def _fake_cycle(
+        _settings: object, *, backfill_deadline: float | None = None, **kw: object
+    ) -> list[dict[str, object]]:
+        deadlines.append(backfill_deadline)  # type: ignore[arg-type]
+        raise asyncio.CancelledError
+
+    async def _fake_sleep(seconds: float) -> None:  # pragma: no cover - never reached
+        return None
+
+    monkeypatch.setattr("frigate_sidecar.scrub.generator.generate_cycle", _fake_cycle)
+    monkeypatch.setattr(server.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(server, "time", _Clock)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(server._scrub_generation_loop(app))  # type: ignore[arg-type]
+
+    assert deadlines[0] == pytest.approx(510.0), "tick must be the 10s ceiling, not the 20s knob"
 
 
 # ----- /v1/highlights: score, ranking, clustering (§4.7) -----

@@ -181,6 +181,38 @@ class ScrubSection(BaseModel):
     format: str = "jpeg"  # "jpeg" | "webp" -- JPEG measured smaller on real
     # camera content (see docs spec §5.3 M4); WebP requires -lossless 0.
     generate_interval_s: float = 60.0  # continuous edge, NOT hourly (§5.4)
+    # How often the trailing-window pass runs, and therefore the generation
+    # loop's tick. This is the floor on how stale the newest sprite cell can be,
+    # because a camera serviced at the start of one tick is not touched again
+    # until the next.
+    #
+    # It exists because the tick used to be `generate_interval_s` with the
+    # backfill phase inside it: backfill's own budget landed on top of a
+    # live-edge pass that had grown to ~65s (it feeds the coarse tiers now), so
+    # the effective cadence was ~100s and measured lag ~105s -- past the ~90s
+    # the client is told to expect, and past it *further* whenever a slow
+    # segment stretched the cycle. Backfill is now bounded by the next tick
+    # rather than the tick being bounded by backfill.
+    #
+    # Throughput is unchanged by shortening it: the same segments are decoded
+    # either way, just in smaller instalments, so latency improves at equal CPU.
+    # What it does cost is sheet versions -- a still-filling sheet is published
+    # once per tick, and every version is its own immutable object (§4.3) --
+    # which is what `sheet_version_grace_s` sweeps back up.
+    live_edge_interval_s: float = 20.0
+    # How long a *superseded* still-filling sheet version stays servable after a
+    # larger version of the same sheet is published. Complete sheets are never
+    # superseded and are never swept by this; retention alone removes those.
+    #
+    # Without a sweep, a 96-cell 1s sheet publishes ~5 growing versions at the
+    # default tick and all of them live until retention: measured at ~1.1 MB for
+    # a full sheet on real footage, that is roughly 3x the tier's steady-state
+    # size, on the filesystem §8.3 goes out of its way to keep free. The grace
+    # window is what keeps the sweep safe -- a client holding a URL from its last
+    # index fetch still resolves it; one holding a 15-minute-old URL gets a 404
+    # and falls back, which is the same path it already takes for a span with no
+    # coverage.
+    sheet_version_grace_s: float = 900.0
     # Retention sweep cadence for the in-process generator. Pruning used to be
     # CLI-only, so an unattended deployment grew past retention_days forever.
     prune_interval_s: float = 3600.0
@@ -225,6 +257,17 @@ class ScrubSection(BaseModel):
         if fmt not in ("jpeg", "webp"):
             raise ValueError(f"scrub.format must be 'jpeg' or 'webp', got {v!r}")
         return fmt
+
+    @field_validator("live_edge_interval_s", "sheet_version_grace_s")
+    @classmethod
+    def _positive(cls, v: float) -> float:
+        """A non-positive tick would spin the generation loop without yielding,
+        and a non-positive grace would sweep a version the index is advertising
+        in the same breath it publishes it.
+        """
+        if v <= 0:
+            raise ValueError(f"must be > 0, got {v!r}")
+        return v
 
     @model_validator(mode="after")
     def _check_coarse_intervals(self) -> ScrubSection:

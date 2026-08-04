@@ -184,6 +184,8 @@ GET /v1/scrub/{camera}/sheet/{start}-{interval}-{count}.jpg   → image/jpeg (or
 - **Sheet URLs are content-addressed by `(start, interval, count)`, not just `(start, interval)`.** The earlier draft kept one URL while a still-filling sheet's `count` grew, served with `Cache-Control: immutable` — that's a silent-wrong-frame bug: the client caches the image at `count=12`, the generator advances it to `count=40`, the URL doesn't change, and the client's cell-index arithmetic now points past what it has cached with no way to detect the mismatch (client-side review finding 3, blocking). Putting `count` in the filename makes **every version of a sheet its own immutable object** — the live/still-filling sheet is genuinely a different URL each time it grows, `immutable` is true unconditionally, and the client builds the URL from `count`, which `/sheets` already returns. No freshness reasoning exists anywhere in the system.
 - **Why sheets, not individual frames:** measured, individual frame fetches saturate at ~88 frames/s over six HTTP/1.1 connections and going wider *worsens* per-request latency (p95 110 ms → 250 ms from 6→24 conns) without the client being able to use the throughput. One sheet fetch covering a whole drag span sidesteps the connection cap entirely.
 - **Sizing:** cap a sheet at ~**96 cells** (≈ two minutes of 1 fps timeline). At 320×180 that's a decoded footprint of **~21 MB** (measured: 12×8 grid = 3840×1440 RGBA); the client holds **two**, not three (client-side review measured its own memory budget and settled on two — match that number here so both sides size to the same figure). `count` may be < `cols·rows` for the newest (still-filling) sheet.
+- **`count` means "cells rendered from real imagery", and is measured from the cell store at publication — never from assignment indices.** The tiler composes onto a black canvas and pastes each cell at its own index, so *any* index below `count` without a cell file is served as a black frame while the index declares it covered. Shipped as exactly that bug: a client attributed an on-screen black frame to `stairway-tight` sheet `1785816900-60.0-45.jpg` cell 39, and a clean generation cycle over live recordings was measured leaving a one-cell hole in 9 of 14 sheets. The published count is therefore the **contiguous run of cells present from zero**; cells past a hole stay on disk but are not claimed, and the sheet extends over them (as a new URL, per the rule above) once backfill fills the hole. A client that finds a span unclaimed falls back to Frigate's preview-frames cache, which holds real stills for it — strictly better than a black cell it believes.
+- **Sheets published before that rule keep their inflated count** — their span has passed, so nothing republishes them. `fsc scrub verify --repair` is the one-shot fix: it re-derives each sheet's true count from the cell store, or from the published pixels when the store is gone, and republishes at the honest count (same image, honest name).
 
 ### 4.4 Recording coverage (what Frigate recorded) — `GET /v1/coverage/{camera}?start={ts}&end={ts}`
 
@@ -316,6 +318,10 @@ Two implementation shapes:
 
 Recommend **(a)** for the continuous forward edge, with the CLI (§5.7) also available for **(b)** and for one-shot backfill. Either way it is *not* hourly.
 
+**The tick is a deadline, not a sleep (`live_edge_interval_s`, default 20 s).** "Loop every 60 s" was read as *cycle, then sleep 60 s*, and the cycle grew: the live-edge pass now feeds the coarse tiers from the same decode, so it reached ~65 s on its own, backfill's budget landed on top, and the effective cadence became ~100 s with measured worst lag ~105 s — past the ~90 s the client is told to expect, and past it further whenever a slow segment stretched the cycle. Cadence *is* the freshness bound: a camera serviced at the top of one tick is untouched until the next. So the trailing-window pass now starts every `live_edge_interval_s` and **backfill is given the remainder of the tick** (bounded also by `backfill_time_budget_s`); a tick that overruns is not slept off. History can wait, the edge cannot.
+
+Shortening the tick does not change throughput — the same segments are decoded either way, in smaller instalments — so latency improves at equal CPU. What it costs is **sheet versions**: a still-filling sheet is published once per tick and every version is its own immutable object (§4.3), so a 96-cell 1 s sheet accumulates ~5 growing versions instead of ~2. `sheet_version_grace_s` (default 900 s) sweeps superseded *incomplete* versions back up in the retention pass, which more than pays for the extra churn — complete sheets are never superseded and are never swept by it.
+
 ### 5.5 Retention & thinning — **4 days, not 14, and this is a hard ceiling**
 
 **⛔ Blocking correction (client-side review finding 1, independently reconfirmed, M3):** continuous (uniformly-sampleable) footage does not last 14 days. Measured `doorbell` and independently reconfirmed on `alley-wide`, `crows-nest`, and `street` (2026-07-30):
@@ -430,7 +436,9 @@ class ScrubSection(BaseModel):
     sheet_rows: int = 8                                # 96 cells ≈ 2 min at 1 fps
     format: str = "jpeg"                                # "jpeg" | "webp" (§5.3) — JPEG measured smaller on
                                                          # real camera content (M4); WebP is opt-in only
-    generate_interval_s: float = 60.0                  # the ~60 s continuous edge (NOT hourly) (§5.4)
+    generate_interval_s: float = 60.0                  # ceiling on the loop's tick (NOT hourly) (§5.4)
+    live_edge_interval_s: float = 20.0                 # trailing-window cadence = the freshness bound (§5.4)
+    sheet_version_grace_s: float = 900.0               # superseded incomplete versions swept after this (§5.4)
     ffmpeg_concurrency: int = 3                         # semaphore width (matches wildlife)
 
 class ProxySection(BaseModel):
