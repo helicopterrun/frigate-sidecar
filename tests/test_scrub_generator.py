@@ -1046,6 +1046,48 @@ def test_backfill_stops_at_its_wall_clock_budget(
     assert all(r["segments"] > 0 for r in results)
 
 
+def test_derived_tier_gets_a_guaranteed_floor_even_when_backfill_is_hungry(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A camera with a persistent trickle of real backfill holes must not be
+    able to consume the entire shared deadline every cycle -- traced live on
+    the actual deployment, that starved decimation completely (zero derived-
+    tier cycles across several minutes of real operation) because backfill's
+    demand never reliably hits zero. `derive_time_reserve_s` carves out a
+    floor for Pass 3 regardless of how hungry backfill is.
+    """
+    env = long_history_env.model_copy(
+        update={
+            "scrub": long_history_env.scrub.model_copy(
+                update={"backfill_time_budget_s": 10.0, "derive_time_reserve_s": 4.0}
+            )
+        }
+    )
+
+    async def _hungry_backfill(settings: object, camera: str, **kw: object) -> dict[str, object]:
+        # Consumes more than backfill's own (reserve-shrunk) deadline but
+        # less than the outer deadline, simulating real per-cycle demand that
+        # never fully idles.
+        await asyncio.sleep(7.0)
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": True}
+
+    derived_calls: list[str] = []
+
+    async def _tracked_derived(settings: object, camera: str, **kw: object) -> dict[str, object]:
+        derived_calls.append(camera)
+        return {"camera": camera, "new_frames": 0, "tiers_touched": 0}
+
+    monkeypatch.setattr(generator, "generate_backfill", _hungry_backfill)
+    monkeypatch.setattr(generator, "generate_derived", _tracked_derived)
+
+    asyncio.run(generator.generate_cycle(env, now=1_800_000_000.0 + 86400.0))
+
+    assert derived_calls, (
+        "decimation must still get a turn even when backfill alone exceeds "
+        "the shared deadline -- the reserved floor exists exactly for this"
+    )
+
+
 # ----- Cadence matching: don't full-decode what the source can't provide -----
 
 

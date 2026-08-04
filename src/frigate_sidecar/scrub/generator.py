@@ -1428,6 +1428,21 @@ async def generate_cycle(
         deadline = _time.monotonic() + scrub.backfill_time_budget_s
         if backfill_deadline is not None:
             deadline = min(deadline, backfill_deadline)
+        # Backfill gets everything up to `deadline` minus a reserved floor for
+        # Pass 3 below -- without this, backfill's own demand doesn't reliably
+        # hit zero (a couple of cameras can have a persistent small trickle of
+        # real holes every cycle) and it consumes the whole shared deadline
+        # every time, so decimation never runs at all. Measured live: backfill
+        # alone burned the full 22s default on 4 of 10 cameras, and derived-tier
+        # generation got zero cycles across several minutes of real operation.
+        # Capped at half of backfill's own budget: a reserve configured larger
+        # than the budget itself (or a test/deployment with a tiny budget)
+        # must not eliminate backfill's own cushion entirely, which would
+        # break its "the first camera in rotation is always attempted" floor
+        # -- clamping `max(monotonic(), ...)` to "now" collapses that cushion
+        # to zero and races the very next statement's own clock read.
+        reserve = min(scrub.derive_time_reserve_s, scrub.backfill_time_budget_s / 2)
+        backfill_deadline_own = deadline - reserve
         # Start where the last cycle stopped. The deadline below routinely cuts
         # this loop off part-way -- one camera spending its whole share can take
         # half the budget -- and restarting at cameras[0] every cycle meant the
@@ -1438,7 +1453,7 @@ async def generate_cycle(
         order = cameras[start:] + cameras[:start]
         served = 0
         for camera in order:
-            if _time.monotonic() >= deadline:
+            if _time.monotonic() >= backfill_deadline_own:
                 break
             served += 1
             try:
@@ -1452,9 +1467,10 @@ async def generate_cycle(
         profile.backfill_cursor = start + served
 
         # Pass 3: derived tiers, decimated from already-published decode-tier
-        # sheets -- no ffmpeg, so this only ever eats what live-edge+backfill
-        # left of the tick's deadline (priority: live-edge > backfill >
-        # decimation).
+        # sheets -- no ffmpeg, so this eats whatever live-edge+backfill left of
+        # the tick's deadline, plus the floor reserved above (priority:
+        # live-edge > backfill > decimation, but decimation is guaranteed to
+        # run every cycle rather than only when backfill happens to idle).
         for camera in cameras:
             if _time.monotonic() >= deadline:
                 break

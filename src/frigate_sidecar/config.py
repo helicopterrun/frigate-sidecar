@@ -253,6 +253,18 @@ class ScrubSection(BaseModel):
     # backfill: crawling up from a day ago meant nothing recent was ever
     # generated, which is the one window clients actually scrub.
     live_edge_lookback_s: float = 900.0
+    # Wall-clock reserved out of `backfill_time_budget_s`, exclusively for the
+    # derived-tier decimation pass (generate_derived, run last each cycle).
+    # Without this, backfill's own demand doesn't reliably hit zero -- measured
+    # on this deployment, two or three cameras have a persistent small trickle
+    # of real holes every cycle (motion-driven recording gaps), so backfill
+    # alone consumes the whole shared deadline and decimation never runs at
+    # all: traced directly, backfill burned 22s on 4 of 10 cameras and
+    # derived-tier generation got exactly zero cycles across several minutes of
+    # live operation. This carves out a floor for it regardless of how hungry
+    # backfill is; backfill still gets everything left over. Set to 0 to
+    # restore the old "decimation gets pure leftovers" behaviour.
+    derive_time_reserve_s: float = 5.0
 
     @field_validator("format")
     @classmethod
@@ -275,6 +287,15 @@ class ScrubSection(BaseModel):
         """
         if v <= 0:
             raise ValueError(f"must be > 0, got {v!r}")
+        return v
+
+    @field_validator("derive_time_reserve_s")
+    @classmethod
+    def _non_negative(cls, v: float) -> float:
+        """0 is a valid, explicit "no floor" setting -- unlike the tick
+        constants above, there's nothing broken about turning this off."""
+        if v < 0:
+            raise ValueError(f"must be >= 0, got {v!r}")
         return v
 
     @model_validator(mode="after")
