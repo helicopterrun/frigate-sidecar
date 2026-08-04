@@ -654,6 +654,7 @@ async def _generate_tier(
     sidecar_conn: sqlite3.Connection,
     profile: SourceProfile,
     sem: asyncio.Semaphore,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Sample `[since, window_end)` for one thinning tier, never emitting frames
     outside `[window_start, window_end)` (§4.2 non-overlap, §5.5 thinning tiers).
@@ -661,6 +662,9 @@ async def _generate_tier(
     `since` is the caller's, not derived from MAX(generated_through) here: the
     scheduler runs this against the live edge and against holes behind it in the
     same cycle, and those passes have entirely different resume points.
+
+    `deadline` (a `time.monotonic()` instant), when given, is checked between
+    segments -- see `_generate_tiers`.
     """
     if window_end <= window_start or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -676,7 +680,7 @@ async def _generate_tier(
         window_end=window_end, since=max(min(since, window_end), window_start),
         budget=budget,
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-        profile=profile, sem=sem,
+        profile=profile, sem=sem, deadline=deadline,
     )
 
 
@@ -693,8 +697,19 @@ async def _generate_tiers(
     sidecar_conn: sqlite3.Connection,
     profile: SourceProfile,
     sem: asyncio.Semaphore,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
-    """Open each segment in `[since, window_end)` and feed it to `writer`."""
+    """Open each segment in `[since, window_end)` and feed it to `writer`.
+
+    `deadline`, when given, is checked before each segment -- not just between
+    camera calls in the caller's own loop. Without this, a single camera's
+    whole `budget` (a segment *count*, unbounded in wall time) could still run
+    to completion after the caller's deadline had already passed: measured
+    live, one camera's 12-segment backfill batch took ~13s on its own, which
+    blew straight through a 5s budget floor reserved for the derived-tier pass
+    that runs after it in the same cycle -- checking wall clock only between
+    cameras was too coarse to protect that floor.
+    """
     scrub = settings.scrub
     if budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -721,7 +736,11 @@ async def _generate_tiers(
     frames_before = writer.new_frames
     cell_w, cell_h = writer.cell_w, writer.cell_h
     missing_segments = 0
+    processed = 0
     for row in rows_:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        processed += 1
         seg_path = map_recording_path(
             row["path"], settings.frigate.media_path, settings.frigate.recordings_path
         )
@@ -758,11 +777,11 @@ async def _generate_tiers(
         logger.warning(
             "scrub: %d/%d segment file(s) for %s did not resolve under "
             "frigate.recordings_path (%s) -- check the recordings mount (§8.2)",
-            missing_segments, len(rows_), camera, settings.frigate.recordings_path,
+            missing_segments, processed, camera, settings.frigate.recordings_path,
         )
     return {
         "camera": camera,
-        "segments": len(rows_),
+        "segments": processed,
         "new_frames": writer.new_frames - frames_before,
     }
 
@@ -814,6 +833,7 @@ async def _backfill_tier(
     sidecar_conn: sqlite3.Connection,
     profile: SourceProfile,
     sem: asyncio.Semaphore,
+    deadline: float | None = None,
 ) -> dict[str, int]:
     """Fill holes in one tier, newest first, each from its newest end.
 
@@ -827,12 +847,16 @@ async def _backfill_tier(
     on the hole's width: a hole's newest end is frequently dead air (camera
     offline, motion-only retention past the continuous window), and a pass
     aimed there samples nothing and leaves the hole exactly as it found it.
+
+    `deadline`, when given, is passed all the way down to `_generate_tiers`'
+    per-segment check -- see there for why the per-camera check alone isn't
+    tight enough.
     """
     segments = 0
     frames = 0
     spans = uncovered_spans(sidecar_conn, camera, interval_s, window_start, window_end)
     for hole_start, hole_end in list(reversed(spans))[:_MAX_HOLES_PER_CYCLE]:
-        if budget <= 0:
+        if budget <= 0 or (deadline is not None and time.monotonic() >= deadline):
             break
         newest = frigate_conn.execute(
             "SELECT start_time FROM recordings "
@@ -848,7 +872,7 @@ async def _backfill_tier(
             since=newest["start_time"] if newest else hole_start,
             budget=budget,
             frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-            profile=profile, sem=sem,
+            profile=profile, sem=sem, deadline=deadline,
         )
         segments += result["segments"]
         frames += result["new_frames"]
@@ -1134,6 +1158,7 @@ async def generate_backfill(
     now: float,
     profile: SourceProfile,
     sem: asyncio.Semaphore,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Fill history behind the live edge with whatever budget is left.
 
@@ -1146,6 +1171,12 @@ async def generate_backfill(
     holes on nine of ten cameras and consumed the whole budget every cycle, so a
     second tier could sit empty indefinitely. Unused slices roll forward, so a
     tier with no holes still donates its share to the next.
+
+    `deadline` (a `time.monotonic()` instant) is checked per-segment, not just
+    once per camera in the caller's own loop -- a single tier's segment budget
+    is otherwise unbounded in wall time, and measured live, one 12-segment
+    batch alone took ~13s, which blew straight through a floor reserved for
+    the pass that runs after backfill in the same cycle.
     """
     gop_s = await camera_gop_seconds(
         settings, camera, frigate_conn=frigate_conn, profile=profile
@@ -1165,7 +1196,7 @@ async def generate_backfill(
     # deployment whose aged window holds no recordings at all.
     for floor_only in (True, False):
         for interval_s, w_start, w_end in plan:
-            if remaining <= 0:
+            if remaining <= 0 or (deadline is not None and time.monotonic() >= deadline):
                 break
             alloc = min(remaining, per_tier) if floor_only else remaining
             result = await _backfill_tier(
@@ -1174,7 +1205,7 @@ async def generate_backfill(
                 window_start=w_start, window_end=w_end,
                 budget=alloc,
                 frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-                profile=profile, sem=sem,
+                profile=profile, sem=sem, deadline=deadline,
             )
             segments += result["segments"]
             frames += result["new_frames"]
@@ -1459,7 +1490,7 @@ async def generate_cycle(
             try:
                 _merge(camera, await generate_backfill(
                     settings, camera, budget=share, frigate_conn=conn, sidecar_conn=conn,
-                    now=now, profile=profile, sem=sem,
+                    now=now, profile=profile, sem=sem, deadline=backfill_deadline_own,
                 ))
             except Exception:
                 logger.exception("scrub: backfill failed for camera %s", camera)
