@@ -40,7 +40,6 @@ def env(tmp_path: Path) -> Settings:
         scrub=ScrubSection(
             enabled=True, cameras=["doorbell"], cache_dir=tmp_path / "scrub",
             sheet_cols=COLS, sheet_rows=ROWS, cell_w=CELL_W, cell_h=CELL_H,
-            coarse_intervals_s=[],
         ),
     )
 

@@ -88,7 +88,6 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
         scrub=ScrubSection(
             enabled=True, cameras=["doorbell"], cache_dir=tmp_path / "scrub",
             recent_interval_s=1.0, sheet_cols=4, sheet_rows=3,  # 12-cell sheets for a fast test
-            coarse_intervals_s=[],  # unrelated to this test; keep the plan to one/two tiers
         ),
     )
 
@@ -234,7 +233,6 @@ def aged_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
             # is exactly what cadence-matching declines to do; keep the two
             # configured tiers so the thinning machinery is what's under test.
             match_keyframe_cadence=False,
-            coarse_intervals_s=[],  # unrelated to this test; keep the plan to two tiers
         ),
     )
 
@@ -361,55 +359,6 @@ def test_scrub_generate_recent_bucket_retired_once_superseded_by_aged(
     assert not any(p.exists() for p in sheet_paths_1)
 
 
-def test_coarse_tier_buckets_survive_recent_tier_retirement(aged_env: Settings) -> None:
-    """The coarse tiers overlap the recent tier in time on purpose, and unlike
-    the aged tier they never supersede it -- so retirement (which only ever
-    targets `recent_interval_s` rows, see `_retire_stale_recent_buckets`) must
-    leave coarse-tier rows alone even though the same cycle that retires the
-    stale recent bucket also touches the same time span at the coarse
-    cadence."""
-    env = aged_env.model_copy(
-        update={
-            "scrub": aged_env.scrub.model_copy(update={"coarse_intervals_s": [10.0, 60.0]})
-        }
-    )
-    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
-    try:
-        now1 = 1_800_000_020.0 + (env.scrub.aged_after_h * 3600) - 1.0
-        asyncio.run(
-            generator.generate_camera(
-                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=now1, profile=generator.SourceProfile(), sem=asyncio.Semaphore(3),
-            )
-        )
-        coarse_after_1 = [
-            b
-            for b in db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
-            if b["interval_s"] in (10.0, 60.0)
-        ]
-        assert coarse_after_1, "expected coarse-tier buckets after the first cycle"
-
-        now2 = now1 + (env.scrub.aged_after_h * 3600) + 10.0
-        asyncio.run(
-            generator.generate_camera(
-                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=now2, profile=generator.SourceProfile(), sem=asyncio.Semaphore(3),
-            )
-        )
-        buckets_after_2 = db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
-    finally:
-        conn.close()
-
-    coarse_after_2 = [b for b in buckets_after_2 if b["interval_s"] in (10.0, 60.0)]
-    assert coarse_after_2, "coarse-tier buckets must survive the recent->aged retirement cycle"
-    # And the stale recent-tier bucket from earlier in the window is still gone.
-    boundary2 = now2 - env.scrub.aged_after_h * 3600
-    stale_recent = [
-        b for b in buckets_after_2 if b["interval_s"] == 1.0 and b["start_ts"] < boundary2
-    ]
-    assert not stale_recent
-
-
 def test_generation_leaves_no_scratch_behind(env: Settings) -> None:
     """Extraction used to stage frames in the system temp dir and leave every
     frame it didn't accept there -- about a segment's worth per cycle, forever,
@@ -490,15 +439,15 @@ def test_prune_removes_sheets_and_their_cell_stores(env: Settings) -> None:
     assert not list((env.scrub.cache_dir / "doorbell").rglob("*.jpg"))
 
 
-def test_prune_uses_a_coarse_sheets_own_end_time_not_a_hardcoded_interval(
+def test_prune_uses_a_sheets_own_end_time_not_a_hardcoded_interval(
     env: Settings,
 ) -> None:
-    """A full 12x8 sheet at the 60s coarse cadence spans
-    12*8*60s = 5760s = 96 minutes. `delete_scrub_sheets_before` (the query
-    `prune` runs) computes each row's end as `start_ts + cols*rows*interval_s`
-    -- interval-generic, not hardcoded to `recent_interval_s`/`aged_interval_s`
-    -- so a 60s sheet must survive a cutoff that lands inside its 96-minute
-    span and be removed once the cutoff passes its actual end."""
+    """A full 12x8 sheet at a 60s cadence spans 12*8*60s = 5760s = 96 minutes.
+    `delete_scrub_sheets_before` (the query `prune` runs) computes each row's
+    end as `start_ts + cols*rows*interval_s` -- interval-generic, not
+    hardcoded to `recent_interval_s`/`aged_interval_s` -- so a 60s sheet must
+    survive a cutoff that lands inside its 96-minute span and be removed once
+    the cutoff passes its actual end."""
     conn = db.open_sidecar(env.sidecar.db_path)
     start_ts = 1_800_000_000.0
     span_s = 12 * 8 * 60.0
@@ -711,7 +660,6 @@ def test_dense_keyframes_fill_whole_sheets(
             enabled=True, cameras=["doorbell"], cache_dir=tmp_path / "scrub",
             recent_interval_s=5.0, aged_after_h=9999.0,  # one tier, 5s cadence
             sheet_cols=4, sheet_rows=3,  # 12-cell sheets = 60s of footage each
-            coarse_intervals_s=[],  # unrelated to this test; keep the plan to one tier
         ),
     )
 
@@ -813,7 +761,6 @@ def long_history_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Setting
             sheet_cols=4, sheet_rows=3,
             backfill_segments_per_cycle=12, live_edge_segments=6,
             live_edge_lookback_s=300.0,
-            coarse_intervals_s=[],  # unrelated to this test; keep the plan to one tier
         ),
     )
 
@@ -953,7 +900,6 @@ def test_a_hole_with_no_recordings_does_not_stall_backfill(
             enabled=True, cameras=["doorbell"], cache_dir=tmp_path / "scrub",
             recent_interval_s=1.0, aged_after_h=48.0, sheet_cols=4, sheet_rows=3,
             backfill_segments_per_cycle=12, live_edge_segments=2, live_edge_lookback_s=60.0,
-            coarse_intervals_s=[],  # unrelated to this test; keep the plan to one tier
         ),
     )
 
@@ -1107,7 +1053,6 @@ def _settings_with_gop(tmp_path: Path, **scrub_kw: object) -> Settings:
     defaults: dict[str, object] = {
         "recent_interval_s": 1.0, "aged_interval_s": 5.0, "aged_after_h": 24.0,
         "retention_days": 4,
-        "coarse_intervals_s": [],  # unrelated to most callers; opt in explicitly
     }
     defaults.update(scrub_kw)
     return Settings(
@@ -1240,56 +1185,6 @@ def test_small_measurement_noise_does_not_create_a_new_tier(tmp_path: Path) -> N
         for g in (4.98, 4.995056, 5.0, 5.02, 5.11)
     }
     assert intervals == {5.0}, f"same source resolved to several tiers: {intervals}"
-
-
-# ----- Coarse tiers: overlapping, whole-history cadences -----
-
-
-def test_coarse_intervals_append_two_full_window_overlapping_tiers(tmp_path: Path) -> None:
-    """10s and 60s tiers both cover the whole retention window, deliberately
-    overlapping the recent/aged tiers and each other -- unlike recent/aged,
-    which never overlap."""
-    now = 1_800_000_000.0
-    settings = _settings_with_gop(tmp_path, coarse_intervals_s=[10.0, 60.0])
-    plan = generator.tier_plan(settings, now, gop_s=1.0)
-    assert [p[0] for p in plan] == [1.0, 5.0, 10.0, 60.0]
-    retention_cutoff = now - settings.scrub.retention_days * 86400
-    for interval, start, end in plan[2:]:
-        assert (start, end) == (retention_cutoff, now), (
-            f"coarse tier {interval} did not span the full retention window"
-        )
-
-
-def test_empty_coarse_intervals_disables_the_extra_tiers(tmp_path: Path) -> None:
-    now = 1_800_000_000.0
-    settings = _settings_with_gop(tmp_path, coarse_intervals_s=[])
-    plan = generator.tier_plan(settings, now, gop_s=1.0)
-    assert [p[0] for p in plan] == [1.0, 5.0]
-
-
-def test_coarse_intervals_also_append_when_recent_and_aged_collapse(tmp_path: Path) -> None:
-    """A coarse-GOP camera still gets its extra tiers on top of the single
-    collapsed recent/aged tier."""
-    now = 1_800_000_000.0
-    settings = _settings_with_gop(tmp_path, coarse_intervals_s=[10.0, 60.0])
-    plan = generator.tier_plan(settings, now, gop_s=5.0)
-    assert [p[0] for p in plan] == [5.0, 10.0, 60.0]
-
-
-def test_a_coarse_interval_colliding_with_the_effective_recent_tier_is_skipped(
-    tmp_path: Path,
-) -> None:
-    """A ~10s GOP raises the effective recent interval to exactly 10.0 -- the
-    same value as the first coarse tier. Emitting both would generate the same
-    (interval, window) twice, each pass clobbering the other's bucket resume
-    points, so the colliding coarse entry is dropped and the surviving tier
-    plays both roles."""
-    now = 1_800_000_000.0
-    settings = _settings_with_gop(tmp_path, coarse_intervals_s=[10.0, 60.0])
-    plan = generator.tier_plan(settings, now, gop_s=10.0)
-    assert [p[0] for p in plan] == [10.0, 60.0]
-    retention_cutoff = now - settings.scrub.retention_days * 86400
-    assert plan[0][1:] == (retention_cutoff, now)
 
 
 # ----- Cell geometry follows the source shape -----
@@ -1542,120 +1437,147 @@ def test_gop_is_pooled_across_segments(
     assert plan[0][0] == 5.0, "and it must land on one stable tier"
 
 
-# --- coarse tier fan-out, budget and rotation -------------------------------
-# The coarse tiers (10s/60s) shipped in aa7fe8e and then sat empty on the live
-# deployment for a day. Three independent causes, one test each below.
+# ----- Derived tiers: decimated from already-published decode-tier sheets --
 
 
-@pytest.fixture
-def coarse_env(env: Settings) -> Settings:
-    """`env` plus coarse tiers whose grids are subsets of the aged tier's."""
+def test_decimate_source_selects_every_nth_cell(tmp_path: Path) -> None:
+    """`_decimate_source` must pick exactly the cells landing on the derived
+    grid, cropped from the finer tier's own published sheet -- no ffmpeg."""
+    frigate_db = tmp_path / "f.db"
+    sqlite3.connect(frigate_db).close()
+    sidecar_db = tmp_path / "s.db"
+    cache_dir = tmp_path / "scrub"
+
+    conn = db.open_sidecar(sidecar_db)
+    try:
+        cols, rows, cell_w, cell_h = 4, 3, 8, 6
+        start = 1000.0
+        rel = grid.sheet_rel_path("cam", 1.0, start, 12)
+        out = cache_dir / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cells = [
+            (i, _distinct_cell(tmp_path / f"src{i}.jpg", cell_w, cell_h, i))
+            for i in range(12)
+        ]
+        from frigate_sidecar.scrub import tiling
+
+        tiling.tile_sheet(cells, cols=cols, rows=rows, cell_w=cell_w, cell_h=cell_h, out_path=out)
+        db.upsert_scrub_sheet(
+            conn, camera="cam", start_ts=start, interval_s=1.0, cols=cols, rows=rows,
+            cell_w=cell_w, cell_h=cell_h, count=12, path=rel, complete=True,
+        )
+        conn.commit()
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        frames = asyncio.run(
+            generator._decimate_source(
+                conn, cache_dir, "cam",
+                finer_interval_s=1.0, derived_interval_s=4.0,
+                window_start=start, window_end=start + 12, work_dir=work_dir,
+            )
+        )
+    finally:
+        conn.close()
+
+    # 1000 is itself a multiple of 4, so cells at k=0,4,8 (ts 1000,1004,1008)
+    # land on the derived grid -- every 4th cell, exactly.
+    assert [f.timestamp for f in frames] == [1000.0, 1004.0, 1008.0]
+    for f in frames:
+        assert Path(f.path).exists()
+
+
+def _distinct_cell(path: Path, w: int, h: int, idx: int) -> Path:
+    Image.new("RGB", (w, h), color=((idx * 20) % 256, 0, 0)).save(path)
+    return path
+
+
+def _derived_env(env: Settings, *, derived_intervals_s: list[float]) -> Settings:
     return env.model_copy(
-        update={
-            "scrub": env.scrub.model_copy(
-                update={
-                    "recent_interval_s": 1.0,
-                    "aged_interval_s": 5.0,
-                    "coarse_intervals_s": [10.0, 60.0],
-                }
-            )
-        }
+        update={"scrub": env.scrub.model_copy(update={"derived_intervals_s": derived_intervals_s})}
     )
 
 
-def test_one_decode_feeds_every_tier(coarse_env: Settings) -> None:
-    """Coarse grids are exact subsets of the finer ones, so a segment opened for
-    the recent tier can serve them all. Paying a segment-open per tier is what
-    made the coarse tiers unaffordable: three tiers over this deployment's
-    retention window is ~750k opens against a box that sustains ~2 segments/s."""
-    conn = db.open_joined(coarse_env.frigate.db_path, coarse_env.sidecar.db_path)
+def test_generate_derived_tier_builds_bucket_and_sheet_from_decode_tier(
+    env: Settings,
+) -> None:
+    """A derived tier records buckets/sheets exactly like a decode tier --
+    same `_TierWriter`, just fed by decimated cells instead of ffmpeg output."""
+    denv = _derived_env(env, derived_intervals_s=[10.0])
+    conn = db.open_joined(denv.frigate.db_path, denv.sidecar.db_path)
     try:
+        profile = generator.SourceProfile()
+        # Build the recent (1.0s) decode tier first -- 20 frames across base..base+19.
+        asyncio.run(
+            generator.generate_camera(
+                denv, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
         result = asyncio.run(
-            generator.generate_live_edge(
-                coarse_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_020.0, profile=generator.SourceProfile(),
-                sem=asyncio.Semaphore(3),
+            generator.generate_derived_tier(
+                denv, "doorbell", interval_s=10.0,
+                frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=profile,
             )
         )
-        intervals = {
-            row["interval_s"]
-            for row in db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
-        }
+        buckets = [
+            b for b in db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+            if b["interval_s"] == 10.0
+        ]
+        sheets = [
+            s for s in db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000, interval=10.0)
+        ]
     finally:
         conn.close()
 
-    assert 1.0 in intervals, "the driving tier must still be generated"
-    assert 10.0 in intervals, "the coarse tier must ride along on the same decode"
-    # Two 10s segments exist; the fan-out must not bill them once per tier.
-    assert result["segments"] <= 2, (
-        f"segments must count opens, not tier-segments (got {result['segments']})"
-    )
+    base = 1_800_000_000.0
+    assert result["new_frames"] > 0
+    assert buckets, "expected a 10.0s derived bucket"
+    assert buckets[0]["start_ts"] == pytest.approx(base)
+    assert sheets, "expected a 10.0s derived sheet"
+    # base and base+10 both land on the recent tier's grid (1.0s) and on the
+    # derived tier's own 10.0s grid -- exactly 2 cells selected.
+    assert sheets[0]["count"] == 2
 
 
-def test_a_frame_shared_by_two_tiers_reaches_both_cell_stores(
-    coarse_env: Settings,
+def test_decimation_never_spawns_ffmpeg(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Cells used to be *moved* into the sheet's store. Once one decode serves
-    several tiers, two of them can select the same frame -- the second move
-    found a vanished source and left a black cell."""
-    conn = db.open_joined(coarse_env.frigate.db_path, coarse_env.sidecar.db_path)
+    """Decimating a derived tier must never call the ffmpeg extraction layer --
+    it only reads already-published sheets off disk."""
+    denv = _derived_env(env, derived_intervals_s=[10.0])
+    conn = db.open_joined(denv.frigate.db_path, denv.sidecar.db_path)
     try:
+        profile = generator.SourceProfile()
+        # Build the decode tier normally, with the harmless fakes `env` wires up.
         asyncio.run(
-            generator.generate_live_edge(
-                coarse_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_020.0, profile=generator.SourceProfile(),
-                sem=asyncio.Semaphore(3),
+            generator.generate_camera(
+                denv, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+
+        async def _boom_keyframes(*a: object, **k: object) -> object:
+            raise AssertionError("decimation must not decode keyframes")
+
+        async def _boom_fps(*a: object, **k: object) -> object:
+            raise AssertionError("decimation must not full-decode")
+
+        monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _boom_keyframes)
+        monkeypatch.setattr(ffmpeg_io, "extract_fps", _boom_fps)
+
+        result = asyncio.run(
+            generator.generate_derived_tier(
+                denv, "doorbell", interval_s=10.0,
+                frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=profile,
             )
         )
     finally:
         conn.close()
 
-    # A frame at an exact multiple of 10 is on both the 1s and the 10s grid.
-    for interval in (1.0, 10.0):
-        stores = sorted(
-            (coarse_env.scrub.cache_dir / "doorbell" / f"{interval:g}").rglob("*.jpg")
-        )
-        assert stores or list(
-            (coarse_env.scrub.cache_dir / "doorbell" / f"{interval:g}").rglob("*")
-        ), f"tier {interval} produced nothing on disk"
-        for cell in stores:
-            assert cell.stat().st_size > 0, f"{cell} is empty -- the source was consumed"
-
-
-def test_a_hungry_tier_cannot_starve_the_ones_behind_it(
-    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Budget used to be one pool drawn down in plan order, so the first tier
-    with holes consumed it every cycle and the coarse tiers were never reached
-    at all -- empty on nine of ten cameras after a full day."""
-    env = long_history_env.model_copy(
-        update={
-            "scrub": long_history_env.scrub.model_copy(
-                update={"coarse_intervals_s": [10.0], "aged_interval_s": 5.0}
-            )
-        }
-    )
-    seen: list[float] = []
-    real = generator._backfill_tier
-
-    async def _record(*a: object, **kw: object) -> dict[str, int]:
-        seen.append(float(kw["interval_s"]))  # type: ignore[arg-type]
-        return await real(*a, **kw)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(generator, "_backfill_tier", _record)
-    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
-    try:
-        asyncio.run(
-            generator.generate_backfill(
-                env, "doorbell", budget=12, frigate_conn=conn, sidecar_conn=conn,
-                now=1_800_000_000.0 + 86400.0, profile=generator.SourceProfile(),
-                sem=asyncio.Semaphore(3),
-            )
-        )
-    finally:
-        conn.close()
-
-    assert 10.0 in seen, "the coarse tier never got a share of the budget"
+    assert result["new_frames"] > 0
 
 
 def test_backfill_starts_where_the_last_cycle_stopped(
@@ -1686,7 +1608,7 @@ def test_backfill_starts_where_the_last_cycle_stopped(
         ),
         sidecar=SidecarSection(db_path=tmp_path / "sidecar.db"),
         scrub=ScrubSection(
-            enabled=True, cache_dir=tmp_path / "scrub", coarse_intervals_s=[],
+            enabled=True, cache_dir=tmp_path / "scrub",
             # Tiny but non-zero: the first camera is always attempted, and the
             # one below overruns the budget, so every cycle is cut before the
             # *second* camera. That is exactly the starvation shape being fixed.

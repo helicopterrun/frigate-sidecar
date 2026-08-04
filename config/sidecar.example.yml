@@ -88,6 +88,10 @@ scrub:
   # cadence travels per bucket in `interval`, so a camera generating at 5s is
   # contract-compatible: it just yields a still every 5s while scrubbing.
   match_keyframe_cadence: true
+  # Tiers derived from the recent/aged decode tiers by picking every Nth
+  # already-published cell and re-tiling -- no ffmpeg, generated last in each
+  # cycle out of whatever's left of the tick's deadline. [] disables this.
+  # derived_intervals_s: [60.0, 300.0, 900.0, 3600.0]
   aged_after_h: 24.0
   # Capped by how long CONTINUOUS (non-motion-only) recording actually lasts,
   # not by disk budget or record.retain.days. Measured at ~4 days on the

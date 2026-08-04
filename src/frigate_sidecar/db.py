@@ -392,7 +392,7 @@ def latest_generated_through(
 
     `exclude_intervals_s` instead drops the named tiers and scans the rest.
     Exclusion rather than inclusion, because the caller that needs this
-    (coverage, hiding the always-overlapping coarse tiers) cannot name the
+    (coverage, hiding the always-overlapping derived tiers) cannot name the
     tiers to *keep*: `match_keyframe_cadence` can bump the recent tier's
     effective interval past its configured value, so the configured
     recent/aged pair may name intervals no bucket actually has.
@@ -463,10 +463,10 @@ def list_scrub_sheets(
     with no way to tell which is current.
 
     `interval`, when given, restricts to that one tier's sheets. Without it a
-    window covered by more than one tier (e.g. the coarse tier overlapping
+    window covered by more than one tier (e.g. a derived tier overlapping
     recent/aged) returns sheets from all of them, which is the existing
     contract for callers that don't care which cadence they get -- a client
-    that does (e.g. picking the coarse tier for a whole-history scrubber)
+    that does (e.g. picking a derived tier for a whole-history scrubber)
     opts in explicitly.
     """
     params: list[Any] = [camera, end, start]

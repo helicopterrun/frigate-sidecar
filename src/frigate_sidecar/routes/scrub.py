@@ -65,9 +65,23 @@ def _etagged(request: Request, body: dict[str, Any]) -> Response:
     return JSONResponse(content=body, headers={"ETag": etag})
 
 
-def _known_cameras(conn: Any) -> set[str]:
+#: How long a `/v1/scrub/*` request may reuse the known-camera set cached on
+#: `app.state` instead of re-querying `frigate.db`. The set changes only when
+#: a camera is added/removed from the fleet, so a per-request
+#: `SELECT DISTINCT camera FROM recordings` on every scrub-coverage/sheets/
+#: reel/highlights call was paying a query nothing in that window needed.
+_CAMERA_CACHE_TTL_S = 30.0
+
+
+def _known_cameras(app_state: Any, conn: Any) -> set[str]:
+    cached = getattr(app_state, "scrub_known_cameras_cache", None)
+    now = time.time()
+    if cached is not None and now - cached[0] < _CAMERA_CACHE_TTL_S:
+        return cached[1]
     rows = conn.execute("SELECT DISTINCT camera FROM recordings").fetchall()
-    return {row["camera"] for row in rows}
+    cameras = {row["camera"] for row in rows}
+    app_state.scrub_known_cameras_cache = (now, cameras)
+    return cameras
 
 
 def _bad_range(message: str) -> HTTPException:
@@ -91,10 +105,11 @@ def _require_series(start: float, end: float, scale: float) -> None:
         )
 
 
-def _require_known_camera(settings: Any, camera: str) -> None:
+def _require_known_camera(request: Request, camera: str) -> None:
+    settings = request.app.state.settings
     conn = db.open_frigate_ro(settings.frigate.db_path)
     try:
-        known = _known_cameras(conn)
+        known = _known_cameras(request.app.state, conn)
     finally:
         conn.close()
     if camera not in known:
@@ -126,6 +141,15 @@ async def capabilities(request: Request) -> dict[str, Any]:
             )
         generated = bool(cams_with_data)
 
+    # What `/sheets?interval=` can be asked for: the two decode tiers plus
+    # every configured derived tier. Configured, not queried-from-the-DB --
+    # `cameras`/`generated` above already answer "has it backfilled"; this
+    # just tells the client which cadences exist to select.
+    intervals = sorted(
+        {settings.scrub.recent_interval_s, settings.scrub.aged_interval_s}
+        | set(settings.scrub.derived_intervals_s)
+    )
+
     return {
         "version": __version__,
         "scrub_cache": {
@@ -133,6 +157,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
             "format": settings.scrub.format,
             "cameras": generated_cameras,
             "generated": generated,
+            "intervals": intervals,
         },
         "proxy": {"enabled": settings.proxy.enabled},
         "push": {"enabled": settings.push.enabled, "transport": settings.push.transport},
@@ -148,7 +173,7 @@ async def coverage(camera: str, start: float, end: float, request: Request) -> A
 
     conn = db.open_frigate_ro(settings.frigate.db_path)
     try:
-        if camera not in _known_cameras(conn):
+        if camera not in _known_cameras(request.app.state, conn):
             raise HTTPException(
                 status_code=404,
                 detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
@@ -191,30 +216,23 @@ async def scrub_coverage(camera: str, start: float, end: float, request: Request
     """
     settings = request.app.state.settings
     _require_window(start, end)
-    _require_known_camera(settings, camera)
+    _require_known_camera(request, camera)
 
-    # The coarse tiers (settings.scrub.coarse_intervals_s) deliberately
-    # overlap the recent/aged tiers in time (unlike recent-vs-aged, which
-    # never overlap), and each other. `list_scrub_buckets` and the unfiltered
-    # `generated_through` both scan every tier, so leaving coarse tiers in
-    # would double- (or triple-)report coverage for any span they also cover
-    # -- multiple bucket rows for one instant, and a `generated_through`
-    # pulled ahead by whichever tier happens to be further along. Excluded
-    # below so this response keeps its pre-coarse-tier contract (one bucket
-    # per covered instant) exactly.
-    coarse_set = set(settings.scrub.coarse_intervals_s)
+    # Derived tiers (settings.scrub.derived_intervals_s) deliberately overlap
+    # the recent/aged decode tiers in time, and each other. `list_scrub_buckets`
+    # and the unfiltered `generated_through` both scan every tier, so leaving
+    # derived tiers in would double- (or triple-)report coverage for any span
+    # they also cover -- multiple bucket rows for one instant, and a
+    # `generated_through` pulled ahead by whichever tier happens to be further
+    # along. `grid.exclude_derived_buckets` drops them, keeping this response's
+    # one-bucket-per-instant contract exactly (shared with `/v1/reel`, which
+    # applies the same exclusion to its own `frames` list).
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:
         bucket_rows = db.list_scrub_buckets(conn, camera, start, end)
-        # Exclusion is computed against what the camera actually has, not the
-        # config alone: `match_keyframe_cadence` can raise the recent tier's
-        # effective interval past its configured value, all the way to
-        # *equalling* a configured coarse interval (a ~10 s GOP makes the
-        # recent tier exactly 10.0). In that case the interval is the
-        # camera's finest tier and IS its coverage — dropping it because the
-        # config also names 10.0 as coarse would blank coverage entirely.
-        finest = min((r["interval_s"] for r in bucket_rows), default=None)
-        exclude = sorted(iv for iv in coarse_set if iv != finest)
+        exclude = sorted(
+            grid.excluded_derived_intervals(bucket_rows, settings.scrub.derived_intervals_s)
+        )
         if exclude:
             bucket_rows = [r for r in bucket_rows if r["interval_s"] not in exclude]
             generated_through = (
@@ -241,12 +259,12 @@ async def scrub_sheets(
     keyed by (start, interval, count).
 
     `interval` is optional and restricts the response to that one tier (e.g.
-    the coarse tier, which overlaps recent/aged in time) -- omit it to get
+    a derived tier, which overlaps recent/aged in time) -- omit it to get
     every tier's sheets for the window, same as before this param existed.
     """
     settings = request.app.state.settings
     _require_window(start, end)
-    _require_known_camera(settings, camera)
+    _require_known_camera(request, camera)
 
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:
@@ -392,7 +410,7 @@ async def reel(
 
     conn = db.open_frigate_ro(settings.frigate.db_path)
     try:
-        if camera not in _known_cameras(conn):
+        if camera not in _known_cameras(request.app.state, conn):
             raise HTTPException(
                 status_code=404,
                 detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
@@ -407,6 +425,11 @@ async def reel(
         bucket_rows = db.list_scrub_buckets(sidecar_conn, camera, start, end)
     finally:
         sidecar_conn.close()
+
+    # Same exclusion `/v1/scrub/{camera}/coverage` applies -- without it, a
+    # window covered by both a decode tier and an overlapping derived tier
+    # double-reports `frames` for the same span.
+    bucket_rows = grid.exclude_derived_buckets(bucket_rows, settings.scrub.derived_intervals_s)
 
     frames = [
         {
@@ -505,7 +528,7 @@ async def highlights(
 
     conn = db.open_frigate_ro(settings.frigate.db_path)
     try:
-        if camera not in _known_cameras(conn):
+        if camera not in _known_cameras(request.app.state, conn):
             raise HTTPException(
                 status_code=404,
                 detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},

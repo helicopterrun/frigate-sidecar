@@ -247,22 +247,23 @@ def test_scrub_coverage_interval_contract_and_retention_distinction(
     assert queried_age_days > body2["retention_days"]  # client's "will never exist" check
 
 
-def test_scrub_coverage_excludes_coarse_tiers_to_avoid_double_reporting(
+def test_scrub_coverage_excludes_derived_tiers_to_avoid_double_reporting(
     client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The coarse tiers (default `coarse_intervals_s=[10.0, 60.0]`) span the
-    whole retention window and deliberately overlap the recent/aged tiers in
-    time. `/v1/scrub/{camera}/coverage` must not report all of them for the
-    same span -- that would look like several times the actual coverage for
-    one instant -- so it keeps its pre-coarse-tier contract: one bucket per
-    covered instant, drawn only from the recent/aged tiers."""
+    """Derived tiers (default `derived_intervals_s=[60.0, 300.0, 900.0,
+    3600.0]`) span the whole retention window and deliberately overlap the
+    recent/aged decode tiers in time. `/v1/scrub/{camera}/coverage` must not
+    report all of them for the same span -- that would look like several
+    times the actual coverage for one instant -- so it keeps its
+    pre-derived-tier contract: one bucket per covered instant, drawn only
+    from the recent/aged tiers."""
     _skip_auth(monkeypatch)
     now = time.time()
     _seed_bucket(sidecar_db_path, "doorbell", now - 100, now - 40, 1.0)
-    # Coarse-tier buckets covering the exact same span, at two coarser
+    # Derived-tier buckets covering the exact same span, at two coarser
     # cadences -- these must be excluded from the response.
-    _seed_bucket(sidecar_db_path, "doorbell", now - 100, now - 40, 10.0)
     _seed_bucket(sidecar_db_path, "doorbell", now - 100, now - 40, 60.0)
+    _seed_bucket(sidecar_db_path, "doorbell", now - 100, now - 40, 300.0)
 
     r = client.get(
         "/v1/scrub/doorbell/coverage",
@@ -272,17 +273,56 @@ def test_scrub_coverage_excludes_coarse_tiers_to_avoid_double_reporting(
     assert r.status_code == 200
     body = r.json()
     intervals = {b["interval"] for b in body["buckets"]}
-    assert intervals == {1.0}, f"coarse-tier buckets leaked into coverage: {intervals}"
-    # generated_through must not be pulled ahead by a coarse-tier bucket that
+    assert intervals == {1.0}, f"derived-tier buckets leaked into coverage: {intervals}"
+    # generated_through must not be pulled ahead by a derived-tier bucket that
     # reaches further than the recent/aged tiers actually do.
     assert body["generated_through"] == pytest.approx(now - 40)
+
+
+def test_reel_and_scrub_coverage_agree_on_derived_tier_exclusion(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/v1/reel`'s `frames` and `/v1/scrub/{camera}/coverage`'s `buckets` must
+    exclude the same derived-tier rows for the same overlapping-tier window --
+    they share `grid.exclude_derived_buckets` for exactly this reason."""
+    _skip_auth(monkeypatch)
+
+    async def _fake_motion(
+        settings: object, camera: str, start: float, end: float, scale: float
+    ) -> list[float]:
+        return [0.0] * int((end - start) / scale)
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _fake_motion)
+
+    now = time.time()
+    # A decode-tier bucket and a derived-tier bucket covering the exact same
+    # span -- the derived one must vanish from both endpoints identically.
+    _seed_bucket(sidecar_db_path, "doorbell", now - 100, now - 40, 1.0)
+    _seed_bucket(sidecar_db_path, "doorbell", now - 100, now - 40, 60.0)
+
+    coverage_r = client.get(
+        "/v1/scrub/doorbell/coverage",
+        params={"start": now - 200, "end": now},
+        headers={"cookie": "session=fake"},
+    )
+    reel_r = client.get(
+        "/v1/reel/doorbell",
+        params={"start": now - 200, "end": now, "motion_scale": 10},
+        headers={"cookie": "session=fake"},
+    )
+    assert coverage_r.status_code == reel_r.status_code == 200
+
+    coverage_intervals = {b["interval"] for b in coverage_r.json()["buckets"]}
+    reel_intervals = {f["interval"] for f in reel_r.json()["frames"]}
+    assert coverage_intervals == {1.0}
+    assert reel_intervals == coverage_intervals
 
 
 def test_scrub_sheets_interval_filter(
     client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """`?interval=` restricts the sheet index to one tier -- e.g. a client
-    building a whole-history scrubber wants only the coarse tier's sheets for
+    building a whole-history scrubber wants only a derived tier's sheets for
     a window the recent/aged tiers also cover."""
     _skip_auth(monkeypatch)
     cache_dir = client.app.state.settings.scrub.cache_dir  # type: ignore[attr-defined]

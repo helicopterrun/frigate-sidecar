@@ -248,31 +248,6 @@ async def extract_keyframes_with_pts(
     return list(zip(pts, files, strict=False))
 
 
-async def extract_keyframes(
-    segment_path: Path, out_dir: Path, *, timeout_s: float = _EXTRACT_TIMEOUT_S,
-    cell_w: int = 320, cell_h: int = 180,
-) -> list[Path]:
-    """Keyframe-only decode -- cheap, uniform when GOP ~= target interval
-    (§5.2). Frame N on disk corresponds to keyframe pts N from
-    `probe_keyframe_pts` (same underlying decode order)."""
-    proc = await _spawn(
-        _FFMPEG, "-nostdin", "-loglevel", "error",
-        "-skip_frame", "nokey", "-vsync", "0", "-i", str(segment_path),
-        "-vf", f"scale={cell_w}:{cell_h}", "-q:v", "8", "-f", "image2",
-        str(out_dir / "%06d.jpg"),
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-    )
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout_s)
-    except asyncio.TimeoutError as exc:
-        proc.kill()
-        await proc.wait()
-        raise FfmpegError(f"ffmpeg keyframe extract timed out on {segment_path}") from exc
-    if proc.returncode != 0:
-        raise FfmpegError(f"ffmpeg keyframe extract failed on {segment_path}")
-    return sorted(out_dir.glob("*.jpg"))
-
-
 def _stderr_tail(err: bytes, limit: int = 300) -> str:
     """Last line(s) of ffmpeg's complaint, for the error message.
 

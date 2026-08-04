@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
 from frigate_sidecar import db
 from frigate_sidecar.config import Settings
 from frigate_sidecar.scrub import ffmpeg_io, grid, tiling
@@ -371,16 +373,11 @@ def _retire_stale_recent_buckets(
 class _TierWriter:
     """Accumulates frames into one tier's buckets, sheets and cell store.
 
-    Split out of `_generate_tier` so a single decode can serve several tiers at
-    once. Every coarse interval is a whole multiple of `aged_interval_s`
-    (enforced by `ScrubSection._check_coarse_intervals`), so coarse grid points
-    are exact subsets of the aged tier's and one pass over a segment can feed
-    every tier that wants a frame from it.
-
-    Generating each tier from its own pass cost one segment-open per tier. On
-    this deployment that is ~345k opens per tier across the retention window --
-    Frigate's segments are 10s, so even a 60s tier had to open every one -- and
-    three tiers could not converge against a box that sustains ~2 segments/s.
+    One writer per decode pass (recent or aged), fed either by ffmpeg-sampled
+    frames (`_generate_tier`/`_generate_tiers`) or by decimated cells cropped
+    from an already-published finer tier's sheets (`generate_derived_tier`) --
+    the bucket-splitting, sheet-publishing and cell-store bookkeeping below
+    doesn't care which.
     """
 
     def __init__(
@@ -657,7 +654,6 @@ async def _generate_tier(
     sidecar_conn: sqlite3.Connection,
     profile: SourceProfile,
     sem: asyncio.Semaphore,
-    also: Sequence[_TierWriter] = (),
 ) -> dict[str, Any]:
     """Sample `[since, window_end)` for one thinning tier, never emitting frames
     outside `[window_start, window_end)` (§4.2 non-overlap, §5.5 thinning tiers).
@@ -665,11 +661,6 @@ async def _generate_tier(
     `since` is the caller's, not derived from MAX(generated_through) here: the
     scheduler runs this against the live edge and against holes behind it in the
     same cycle, and those passes have entirely different resume points.
-
-    `also` are additional, always coarser tiers to fill from the same decode --
-    see `_TierWriter`. They cost nothing but the cell writes: the segments are
-    being opened for this tier regardless, and each coarse tier keeps only the
-    frames landing on its own grid.
     """
     if window_end <= window_start or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -680,7 +671,7 @@ async def _generate_tier(
     )
     return await _generate_tiers(
         settings, camera,
-        writers=[writer, *also],
+        writer=writer,
         drive_interval_s=interval_s,
         window_end=window_end, since=max(min(since, window_end), window_start),
         budget=budget,
@@ -693,7 +684,7 @@ async def _generate_tiers(
     settings: Settings,
     camera: str,
     *,
-    writers: Sequence[_TierWriter],
+    writer: _TierWriter,
     drive_interval_s: float,
     window_end: float,
     since: float,
@@ -703,14 +694,9 @@ async def _generate_tiers(
     profile: SourceProfile,
     sem: asyncio.Semaphore,
 ) -> dict[str, Any]:
-    """Open each segment once and feed every tier that wants a frame from it.
-
-    `budget` counts *segments opened*, not tier-segments: serving three tiers
-    from one decode is the whole point, so a fan-out pass costs the same as the
-    single-tier pass it replaces.
-    """
+    """Open each segment in `[since, window_end)` and feed it to `writer`."""
     scrub = settings.scrub
-    if not writers or budget <= 0:
+    if budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
 
     # Oldest-first and budgeted: a cold start has no resume point, so `since` is
@@ -724,24 +710,16 @@ async def _generate_tiers(
     if not rows_:
         return {"camera": camera, "segments": 0, "new_frames": 0}
 
-    if camera not in profile.gop_s:
-        first_path = map_recording_path(
-            rows_[0]["path"], settings.frigate.media_path, settings.frigate.recordings_path
-        )
-        try:
-            profile.gop_s[camera] = await ffmpeg_io.probe_gop_seconds(first_path)
-        except ffmpeg_io.FfmpegError:
-            # Assume best case; the drift check will catch it.
-            profile.gop_s[camera] = drive_interval_s
+    # `camera_gop_seconds` (called by every caller of `_generate_tier` before
+    # it, via `generate_live_edge`/`generate_backfill`) always populates this
+    # first -- re-probing here would just repeat that call against the same
+    # segment.
     gop_s = profile.gop_s[camera]
 
-    for writer in writers:
-        writer.resume(since)
+    writer.resume(since)
 
-    # Writers outlive a single pass (a coarse tier is fed by every finer tier's
-    # holes in turn), so report this pass's delta rather than their running total.
-    frames_before = sum(w.new_frames for w in writers)
-    cell_w, cell_h = writers[0].cell_w, writers[0].cell_h
+    frames_before = writer.new_frames
+    cell_w, cell_h = writer.cell_w, writer.cell_h
     missing_segments = 0
     for row in rows_:
         seg_path = map_recording_path(
@@ -772,11 +750,9 @@ async def _generate_tiers(
                 continue
             if not frames:
                 continue
-            for writer in writers:
-                await writer.feed(frames)
+            await writer.feed(frames)
 
-    for writer in writers:
-        await writer.flush()
+    await writer.flush()
 
     if missing_segments:
         logger.warning(
@@ -787,7 +763,7 @@ async def _generate_tiers(
     return {
         "camera": camera,
         "segments": len(rows_),
-        "new_frames": sum(w.new_frames for w in writers) - frames_before,
+        "new_frames": writer.new_frames - frames_before,
     }
 
 
@@ -838,7 +814,6 @@ async def _backfill_tier(
     sidecar_conn: sqlite3.Connection,
     profile: SourceProfile,
     sem: asyncio.Semaphore,
-    also: Sequence[_TierWriter] = (),
 ) -> dict[str, int]:
     """Fill holes in one tier, newest first, each from its newest end.
 
@@ -852,11 +827,6 @@ async def _backfill_tier(
     on the hole's width: a hole's newest end is frequently dead air (camera
     offline, motion-only retention past the continuous window), and a pass
     aimed there samples nothing and leaves the hole exactly as it found it.
-
-    `also` are coarser tiers filled from the same decode (`_TierWriter`). They
-    ride along free, which is what lets the coarse tiers keep up at all: filling
-    them from their own passes needed a segment-open per tier, and this
-    deployment cannot afford even one full pass per tier per retention window.
     """
     segments = 0
     frames = 0
@@ -878,7 +848,7 @@ async def _backfill_tier(
             since=newest["start_time"] if newest else hole_start,
             budget=budget,
             frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-            profile=profile, sem=sem, also=also,
+            profile=profile, sem=sem,
         )
         segments += result["segments"]
         frames += result["new_frames"]
@@ -1013,16 +983,11 @@ def tier_plan(
     describe the same cadence, so they collapse into one covering the whole
     retention window; there is nothing left for thinning to save.
 
-    When `coarse_intervals_s` is non-empty, one further tier per entry is
-    appended *last* -- after whatever the recent/aged tiers resolved to -- each
-    spanning the full retention window (`retention_cutoff` to `now`). Unlike
-    the recent/aged pair these deliberately overlap them, and each other
-    (§4.2's non-overlap rule only ever applied between recent and aged);
-    nothing retires them as spans age, since none is superseded by another
-    tier the way recent is by aged. Appending them last keeps `plan[0]`/
-    `plan[1]` meaning what every existing caller (`generate_live_edge`'s
-    retirement boundary, `generate_camera`'s docstring) already assumes: the
-    live/recent tier first, the aged tier -- if any -- second.
+    Returns only decode tiers -- at most `(recent, ...)` or `(recent, ...),
+    (aged, ...)`. Derived tiers (`scrub.derived_intervals_s`) are not decode
+    tiers at all: they're generated afterwards by decimating already-published
+    sheets from whichever of these tiers is finest over a given span, and
+    never appear in this plan (see `generate_derived_tier`).
     """
     scrub = settings.scrub
     retention_cutoff = now - scrub.retention_days * 86400
@@ -1045,16 +1010,6 @@ def tier_plan(
         if boundary > retention_cutoff:
             plan.append((scrub.aged_interval_s, retention_cutoff, boundary))
 
-    if now > retention_cutoff:
-        # Skip a coarse entry that collides with a tier already in the plan:
-        # `match_keyframe_cadence` can raise the effective recent interval to
-        # exactly a configured coarse value (a ~10 s GOP → recent 10.0), and
-        # emitting both would generate the same (interval, window) twice,
-        # each pass clobbering the other's bucket resume points.
-        existing = {entry[0] for entry in plan}
-        for coarse in scrub.coarse_intervals_s:
-            if coarse not in existing:
-                plan.append((coarse, retention_cutoff, now))
     return plan
 
 
@@ -1141,15 +1096,10 @@ async def generate_live_edge(
     )
     plan = tier_plan(settings, now, gop_s)
     interval_s, window_start, window_end = plan[0]
-    # Only retire when a coarser *aged* tier actually exists to supersede this
-    # one -- collapsed plans would otherwise delete their own buckets. The
-    # (always-overlapping, never-retiring) coarse tiers can also occupy
-    # `plan[1]` when recent/aged collapsed into one, so it's not enough to
-    # check `len(plan) > 1`; the second entry must actually be the aged tier,
-    # distinguishable from every coarse tier by interval (the two can never be
-    # equal -- each of `coarse_intervals_s` is validated to exceed
-    # `aged_interval_s`).
-    if len(plan) > 1 and plan[1][0] not in scrub.coarse_intervals_s:
+    # Only retire when a coarser aged tier actually exists to supersede this
+    # one -- a collapsed (recent-only) plan would otherwise delete its own
+    # buckets.
+    if len(plan) > 1:
         _retire_stale_recent_buckets(
             sidecar_conn, scrub.cache_dir, camera, interval_s, window_start
         )
@@ -1162,18 +1112,6 @@ async def generate_live_edge(
     live_since = max(window_start, now - scrub.live_edge_lookback_s)
     if recent_through is not None and recent_through > live_since:
         live_since = recent_through
-    # The coarse tiers span the live edge too, and these segments are being
-    # decoded anyway -- so keep them current here rather than making backfill
-    # walk back over the same segments later.
-    also = [
-        await _tier_writer(
-            settings, camera, interval_s=c_interval,
-            window_start=c_start, window_end=c_end,
-            frigate_conn=frigate_conn, sidecar_conn=sidecar_conn, profile=profile,
-        )
-        for c_interval, c_start, c_end in plan[1:]
-        if c_interval in scrub.coarse_intervals_s and c_interval > interval_s
-    ]
     result = await _generate_tier(
         settings, camera,
         interval_s=interval_s,
@@ -1181,7 +1119,7 @@ async def generate_live_edge(
         since=live_since,
         budget=max(1, scrub.live_edge_segments),
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-        profile=profile, sem=sem, also=also,
+        profile=profile, sem=sem,
     )
     return {"camera": camera, **result}
 
@@ -1200,13 +1138,13 @@ async def generate_backfill(
     """Fill history behind the live edge with whatever budget is left.
 
     Recent tier first -- it is what someone scrubbing the last day sees -- then
-    the coarser aged tier, then the coarse whole-history tiers.
+    the coarser aged tier.
 
     Every tier gets a guaranteed slice of the budget rather than drawing from one
     shared pool. Under the shared pool the tiers after the first hungry one were
     never reached at all: on this deployment the aged tier had tens of hours of
-    holes on nine of ten cameras and consumed the whole budget every cycle, so
-    the coarse tiers stayed empty indefinitely. Unused slices roll forward, so a
+    holes on nine of ten cameras and consumed the whole budget every cycle, so a
+    second tier could sit empty indefinitely. Unused slices roll forward, so a
     tier with no holes still donates its share to the next.
     """
     gop_s = await camera_gop_seconds(
@@ -1215,17 +1153,6 @@ async def generate_backfill(
     plan = [(i, ws, we) for i, ws, we in tier_plan(settings, now, gop_s) if we > ws]
     if not plan or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
-
-    # One writer per coarse tier, shared across every pass in this call: each
-    # finer tier's decode feeds the coarser ones for free (`_TierWriter`).
-    coarse: list[_TierWriter] = []
-    for interval_s, w_start, w_end in plan:
-        if interval_s in settings.scrub.coarse_intervals_s:
-            coarse.append(await _tier_writer(
-                settings, camera, interval_s=interval_s,
-                window_start=w_start, window_end=w_end,
-                frigate_conn=frigate_conn, sidecar_conn=sidecar_conn, profile=profile,
-            ))
 
     per_tier = max(1, budget // len(plan))
     segments = 0
@@ -1248,9 +1175,6 @@ async def generate_backfill(
                 budget=alloc,
                 frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
                 profile=profile, sem=sem,
-                # Strictly coarser only: a tier must not be fed by its own pass,
-                # and a coarse tier can never usefully feed a finer one.
-                also=[w for w in coarse if w.interval_s > interval_s],
             )
             segments += result["segments"]
             frames += result["new_frames"]
@@ -1264,6 +1188,176 @@ async def generate_backfill(
         # loop shouldn't sit idle for a full interval before the next cycle.
         "backfilled": budget > 0 and remaining <= 0,
     }
+
+
+def _is_whole_multiple(numerator: float, denominator: float) -> bool:
+    if denominator <= 0:
+        return False
+    ratio = numerator / denominator
+    return abs(ratio - round(ratio)) < 1e-6 and round(ratio) >= 1
+
+
+async def _decimate_source(
+    sidecar_conn: sqlite3.Connection,
+    cache_dir: Path,
+    camera: str,
+    *,
+    finer_interval_s: float,
+    derived_interval_s: float,
+    window_start: float,
+    window_end: float,
+    work_dir: Path,
+) -> list[grid.Frame]:
+    """Select every Nth already-published cell of `finer_interval_s`'s sheets
+    landing on `derived_interval_s`'s epoch grid, cropped to its own temp file.
+
+    No ffmpeg involved -- the source is a finer decode tier's own published
+    sheet image, sliced with PIL. Grid alignment is exact: a finer tier's
+    sheet `start_ts` is itself epoch-grid-aligned (bucket contiguity
+    guarantees it), so cell k's timestamp is exactly
+    `start_ts + k * finer_interval_s`, and it lands on the derived grid iff
+    `round(cell_t / finer_interval_s) % ratio == 0`.
+    """
+    ratio = round(derived_interval_s / finer_interval_s)
+    sheets = db.list_scrub_sheets(
+        sidecar_conn, camera, window_start, window_end, interval=finer_interval_s
+    )
+    frames: list[grid.Frame] = []
+    for sheet in sheets:
+        img_path = cache_dir / sheet["path"]
+        if not img_path.exists():
+            continue
+        cols = sheet["cols"]
+        cell_w, cell_h = sheet["cell_w"], sheet["cell_h"]
+        wanted: list[tuple[int, float]] = []
+        for k in range(sheet["count"]):
+            cell_t = sheet["start_ts"] + k * finer_interval_s
+            if not (window_start <= cell_t < window_end):
+                continue
+            if round(cell_t / finer_interval_s) % ratio:
+                continue
+            wanted.append((k, cell_t))
+        if not wanted:
+            continue
+        try:
+            with Image.open(img_path) as im:
+                rgb = im.convert("RGB")
+                for k, cell_t in wanted:
+                    row, col = divmod(k, cols)
+                    crop = rgb.crop(
+                        (col * cell_w, row * cell_h, (col + 1) * cell_w, (row + 1) * cell_h)
+                    )
+                    out = work_dir / f"{k:06d}-{len(frames):06d}.jpg"
+                    crop.save(out, format="JPEG", quality=90)
+                    frames.append(grid.Frame(timestamp=cell_t, path=str(out)))
+        except OSError as exc:
+            logger.warning(
+                "scrub: could not read source sheet %s for decimation: %s", img_path, exc
+            )
+            continue
+    frames.sort(key=lambda f: f.timestamp)
+    return frames
+
+
+async def generate_derived_tier(
+    settings: Settings,
+    camera: str,
+    *,
+    interval_s: float,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    now: float,
+    profile: SourceProfile,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """Advance one derived tier for `camera` by decimating already-published
+    decode-tier sheets (recent/aged) rather than sampling ffmpeg.
+
+    Records buckets/sheets exactly like a decode tier, via the same
+    `_TierWriter` -- the only difference is where the frames come from.
+    """
+    scrub = settings.scrub
+    retention_cutoff = now - scrub.retention_days * 86400
+    gop_s = profile.gop_s.get(camera)
+    if gop_s is None:
+        # Decimation runs after live-edge/backfill in generate_cycle, which
+        # always probe first -- but a direct caller (CLI, test) can hit this
+        # against a cold profile, so fall back rather than assume it's set.
+        gop_s = await camera_gop_seconds(
+            settings, camera, frigate_conn=frigate_conn, profile=profile
+        )
+    decode_plan = [
+        (iv, ws, we)
+        for iv, ws, we in tier_plan(settings, now, gop_s)
+        if we > ws and iv <= interval_s and _is_whole_multiple(interval_s, iv)
+    ]
+    if not decode_plan:
+        return {"camera": camera, "interval_s": interval_s, "new_frames": 0}
+
+    cell_w, cell_h = await camera_cell_size(
+        settings, camera, frigate_conn=frigate_conn, profile=profile
+    )
+    writer = _TierWriter(
+        settings, camera, interval_s=interval_s,
+        window_start=retention_cutoff, window_end=now,
+        cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
+    )
+    since = db.latest_generated_through(sidecar_conn, camera, interval_s)
+    resume_since = since if since is not None else retention_cutoff
+    writer.resume(resume_since)
+
+    new_frames = 0
+    with tempfile.TemporaryDirectory(prefix="derive-", dir=_work_root(scrub.cache_dir)) as td:
+        work_dir = Path(td)
+        for finer_interval, seg_ws, seg_we in decode_plan:
+            span_start = max(seg_ws, retention_cutoff, resume_since)
+            span_end = min(seg_we, now)
+            if span_end <= span_start:
+                continue
+            frames = await _decimate_source(
+                sidecar_conn, scrub.cache_dir, camera,
+                finer_interval_s=finer_interval, derived_interval_s=interval_s,
+                window_start=span_start, window_end=span_end, work_dir=work_dir,
+            )
+            if frames:
+                await writer.feed(frames)
+                new_frames += len(frames)
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+    await writer.flush()
+    return {"camera": camera, "interval_s": interval_s, "new_frames": new_frames}
+
+
+async def generate_derived(
+    settings: Settings,
+    camera: str,
+    *,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    now: float,
+    profile: SourceProfile,
+    deadline: float,
+) -> dict[str, Any]:
+    """Advance every configured derived tier for `camera`, stopping at `deadline`.
+
+    Runs last in a generation cycle (after live-edge and backfill), consuming
+    only whatever's left of the tick's deadline -- decimation is cheap PIL
+    crops off already-published sheets, not ffmpeg, so it never competes with
+    the two decode passes for the concurrency-limited resource.
+    """
+    total_frames = 0
+    tiers_touched = 0
+    for interval_s in settings.scrub.derived_intervals_s:
+        if time.monotonic() >= deadline:
+            break
+        result = await generate_derived_tier(
+            settings, camera, interval_s=interval_s,
+            frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
+            now=now, profile=profile, deadline=deadline,
+        )
+        total_frames += result["new_frames"]
+        tiers_touched += 1
+    return {"camera": camera, "new_frames": total_frames, "tiers_touched": tiers_touched}
 
 
 async def generate_cycle(
@@ -1356,6 +1450,23 @@ async def generate_cycle(
                 logger.exception("scrub: backfill failed for camera %s", camera)
                 totals[camera]["error"] = True
         profile.backfill_cursor = start + served
+
+        # Pass 3: derived tiers, decimated from already-published decode-tier
+        # sheets -- no ffmpeg, so this only ever eats what live-edge+backfill
+        # left of the tick's deadline (priority: live-edge > backfill >
+        # decimation).
+        for camera in cameras:
+            if _time.monotonic() >= deadline:
+                break
+            try:
+                derived_result = await generate_derived(
+                    settings, camera, frigate_conn=conn, sidecar_conn=conn,
+                    now=now, profile=profile, deadline=deadline,
+                )
+                totals[camera]["new_frames"] += derived_result["new_frames"]
+            except Exception:
+                logger.exception("scrub: derived-tier generation failed for camera %s", camera)
+                totals[camera]["error"] = True
 
         # One line per cycle. Whether the edge is being held is otherwise only
         # visible by querying the DB and inferring it from timestamps, and the
@@ -1547,4 +1658,69 @@ def prune(
         "buckets_deleted": n_buckets,
         "cell_dirs_deleted": n_cell_dirs,
         "superseded_versions_deleted": n_superseded,
+    }
+
+
+def drop_intervals(
+    settings: Settings, intervals: Sequence[float], *, camera: str | None = None
+) -> dict[str, Any]:
+    """One-shot sweep: unconditionally delete every bucket/sheet at exactly
+    the given `interval_s` value(s), regardless of retention.
+
+    For migrating a deployment off an interval that no longer means anything
+    -- e.g. old `coarse_intervals_s` data (the whole-window-overlap piggyback
+    mechanism this replaced) at defaults like 10.0/60.0 that either have no
+    successor in `derived_intervals_s` or would carry data that doesn't obey
+    the new decimation tier's grid-alignment invariants. Reachable as
+    `fsc scrub prune --drop-interval`.
+    """
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        paths: list[str] = []
+        n_buckets = 0
+        cell_dir_rows: list[tuple[str, float, float]] = []
+        for interval_s in intervals:
+            if camera is None:
+                sheet_rows = conn.execute(
+                    "SELECT path, camera, start_ts FROM scrub_sheets WHERE interval_s = ?",
+                    (interval_s,),
+                ).fetchall()
+                conn.execute("DELETE FROM scrub_sheets WHERE interval_s = ?", (interval_s,))
+                cur = conn.execute("DELETE FROM scrub_buckets WHERE interval_s = ?", (interval_s,))
+            else:
+                sheet_rows = conn.execute(
+                    "SELECT path, camera, start_ts FROM scrub_sheets "
+                    "WHERE camera = ? AND interval_s = ?",
+                    (camera, interval_s),
+                ).fetchall()
+                conn.execute(
+                    "DELETE FROM scrub_sheets WHERE camera = ? AND interval_s = ?",
+                    (camera, interval_s),
+                )
+                cur = conn.execute(
+                    "DELETE FROM scrub_buckets WHERE camera = ? AND interval_s = ?",
+                    (camera, interval_s),
+                )
+            n_buckets += cur.rowcount
+            paths.extend(r["path"] for r in sheet_rows)
+            cell_dir_rows.extend((r["camera"], r["start_ts"], interval_s) for r in sheet_rows)
+        conn.commit()
+    finally:
+        conn.close()
+
+    n_files = 0
+    for rel in paths:
+        p = settings.scrub.cache_dir / rel
+        with contextlib.suppress(OSError):
+            p.unlink()
+            n_files += 1
+    for cam, start_ts, interval_s in cell_dir_rows:
+        shutil.rmtree(
+            _cells_dir(settings.scrub.cache_dir, cam, interval_s, start_ts), ignore_errors=True
+        )
+    return {
+        "intervals": list(intervals),
+        "sheets_deleted": len(paths),
+        "files_deleted": n_files,
+        "buckets_deleted": n_buckets,
     }

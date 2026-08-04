@@ -484,12 +484,26 @@ def scrub_verify(
 
 
 @scrub_app.command("prune")
-def scrub_prune(camera: str | None = typer.Option(None, "--camera")) -> None:
+def scrub_prune(
+    camera: str | None = typer.Option(None, "--camera"),
+    drop_interval: list[float] = typer.Option(
+        [],
+        "--drop-interval",
+        help="Unconditionally delete every bucket/sheet at exactly this interval_s, "
+        "regardless of retention -- e.g. migrating off an old coarse_intervals_s "
+        "default (10.0/60.0) that has no successor in scrub.derived_intervals_s. "
+        "Repeatable. Runs in addition to the normal retention-based prune below.",
+    ),
+) -> None:
     """Drop sheets/buckets past scrub.retention_days, oldest-first."""
-    from frigate_sidecar.scrub.generator import prune
+    from frigate_sidecar.scrub.generator import drop_intervals, prune
 
     s = load_settings()
-    typer.echo(json.dumps(prune(s, camera=camera)))
+    result: dict[str, object] = {}
+    if drop_interval:
+        result["dropped_intervals"] = drop_intervals(s, drop_interval, camera=camera)
+    result.update(prune(s, camera=camera))
+    typer.echo(json.dumps(result))
 
 
 @scrub_app.command("coverage")

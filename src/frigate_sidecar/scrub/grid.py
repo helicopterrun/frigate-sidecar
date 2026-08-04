@@ -7,7 +7,9 @@ Deliberately free of I/O so the cadence-verification and gap-splitting rules
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 
 def grid_point(start: float, interval: float, k: int) -> float:
@@ -89,6 +91,35 @@ def parse_sheet_spec(spec: str) -> tuple[float, float, int]:
         raise ValueError(f"malformed sheet spec: {spec}")
     start_s, interval_s, count_s = parts
     return float(start_s), float(interval_s), int(count_s)
+
+
+def excluded_derived_intervals(
+    bucket_rows: Sequence[dict[str, Any]], derived_intervals_s: Sequence[float]
+) -> set[float]:
+    """Which of `derived_intervals_s` should be dropped from `bucket_rows`.
+
+    A derived interval that also happens to equal a camera's actual
+    (GOP-adjusted) finest decode interval is NOT excluded -- it IS that
+    camera's coverage, and dropping it would blank coverage entirely for that
+    camera (`match_keyframe_cadence` can raise the recent tier's effective
+    interval all the way up to a configured derived value).
+    """
+    derived_set = set(derived_intervals_s)
+    finest = min((r["interval_s"] for r in bucket_rows), default=None)
+    return {iv for iv in derived_set if iv != finest}
+
+
+def exclude_derived_buckets(
+    bucket_rows: list[dict[str, Any]], derived_intervals_s: Sequence[float]
+) -> list[dict[str, Any]]:
+    """Drop derived-tier buckets, keeping the coverage/reel one-bucket-per-instant
+    contract (used identically by `/v1/scrub/{camera}/coverage` and
+    `/v1/reel`).
+    """
+    exclude = excluded_derived_intervals(bucket_rows, derived_intervals_s)
+    if not exclude:
+        return bucket_rows
+    return [r for r in bucket_rows if r["interval_s"] not in exclude]
 
 
 @dataclass
