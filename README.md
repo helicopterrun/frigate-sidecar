@@ -27,54 +27,74 @@ It adds:
 Runs as a single Docker container next to Frigate, bind-mounting Frigate's
 `config.yml` and `frigate.db` read-only and writing its own SQLite DB.
 
-## Setup
+## Install
 
-Two supported deployment shapes. The Docker compose file is the canonical
-"spin it up" path; the systemd unit is useful when Docker isn't an option
-(e.g. running inside an LXC where Docker can't load AppArmor profiles
-during image build).
+**Requirements:** a running Frigate install whose `config.yml`, database
+directory, and recordings tree are readable from the machine the sidecar runs
+on (usually the same box), plus network reach to Frigate's API. The scrub
+cache additionally needs ffmpeg (bundled in the Docker image) and MQTT access
+for push notifications.
 
-### Option A — Docker compose (recommended)
-
-1. Clone the repo:
-   ```sh
-   git clone https://github.com/helicopterrun/frigate-sidecar
-   cd frigate-sidecar
-   ```
-
-2. Copy and edit the example config — point it at your Frigate install:
-   ```sh
-   cp config/sidecar.example.yml config/sidecar.yml
-   $EDITOR config/sidecar.yml
-   ```
-
-3. Create the data directory the sidecar will write to:
-   ```sh
-   sudo mkdir -p /opt/frigate-sidecar/data
-   sudo chown -R "$(id -u):$(id -g)" /opt/frigate-sidecar/data
-   ```
-
-4. Launch:
-   ```sh
-   docker compose up -d
-   ```
-
-5. Open `http://<host>:5001`.
-
-### Option B — Systemd (host process)
-
-For environments where Docker image builds fail (e.g. unprivileged LXCs):
+### Quick install (recommended)
 
 ```sh
-pip install .                 # or pipx / venv as you prefer
+curl -fsSL https://raw.githubusercontent.com/helicopterrun/frigate-sidecar/main/install.sh | sudo bash
+```
+
+Uses Docker (image from `ghcr.io/helicopterrun/frigate-sidecar`) when
+available, otherwise falls back to a venv + systemd unit. Prompts for the
+handful of deployment-specific values (Frigate URLs and paths) and writes
+`sidecar.yml` for you. Re-run the same command to upgrade.
+
+### Manual — Docker compose
+
+```sh
+sudo mkdir -p /opt/frigate-sidecar && cd /opt/frigate-sidecar
+curl -fsSLO https://raw.githubusercontent.com/helicopterrun/frigate-sidecar/main/docker-compose.yml
+curl -fsSL  https://raw.githubusercontent.com/helicopterrun/frigate-sidecar/main/.env.example -o .env
+$EDITOR .env                                            # point the paths at YOUR Frigate
+mkdir -p data config && sudo chown -R 10001:10001 data  # container's non-root uid
+docker compose run --rm frigate-sidecar init -o /config/sidecar.yml
+docker compose up -d
+```
+
+Then open `http://<host>:5001`. To build the image locally instead of pulling,
+clone the repo and `docker compose build`.
+
+### Manual — systemd (host process)
+
+For environments where Docker isn't an option (e.g. unprivileged LXCs) — see
+[`docs/deployment.md`](docs/deployment.md) for details:
+
+```sh
+python3 -m venv /opt/frigate-sidecar/venv
+/opt/frigate-sidecar/venv/bin/pip install "frigate-sidecar @ git+https://github.com/helicopterrun/frigate-sidecar"
 sudo mkdir -p /opt/frigate-sidecar/data /etc/frigate-sidecar
-sudo cp config/sidecar.example.yml /etc/frigate-sidecar/sidecar.yml
-sudo $EDITOR /etc/frigate-sidecar/sidecar.yml
-# adjust sidecar.db_path to /opt/frigate-sidecar/data/frigate-sidecar.db
-sudo cp contrib/frigate-sidecar.service /etc/systemd/system/
+sudo /opt/frigate-sidecar/venv/bin/fsc init -o /etc/frigate-sidecar/sidecar.yml \
+  --sidecar-db /opt/frigate-sidecar/data/frigate-sidecar.db
+sudo cp contrib/frigate-sidecar.service /etc/systemd/system/   # adjust ExecStart to the venv python
 sudo systemctl daemon-reload
 sudo systemctl enable --now frigate-sidecar.service
 ```
+
+### Upgrading
+
+- **Docker:** `docker compose pull && docker compose up -d` (or re-run the
+  install script).
+- **Systemd:** `pip install --upgrade ...` in the venv, then
+  `systemctl restart frigate-sidecar`.
+
+Releases are tagged `vX.Y.Z`; the image is published multi-arch (amd64 +
+arm64) with `latest`, `X.Y`, and `vX.Y.Z` tags. `/v1/capabilities` reports the
+running version.
+
+### Push notifications and the Elsinore app
+
+`push.transport: relay` with the default `relay_base_url` uses the shared
+Elsinore push relay and works out of the box once `push.enabled: true` and the
+MQTT settings point at the broker Frigate publishes to. Self-hosting the relay
+(your own APNs key/bundle id) is optional — see
+[`docs/push-notifications.md`](docs/push-notifications.md).
 
 ## Auth
 

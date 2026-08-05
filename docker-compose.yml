@@ -1,35 +1,51 @@
+# Quickstart:
+#   cp .env.example .env && $EDITOR .env   # point the paths at YOUR Frigate
+#   docker compose run --rm frigate-sidecar init -o /config/sidecar.yml
+#   docker compose up -d
+#
+# Every host-specific path is an env var (read from .env) with a default
+# matching a stock /opt/frigate install. To build locally instead of pulling
+# from ghcr.io: docker compose build (the build context is kept below).
 services:
   frigate-sidecar:
+    image: ${SIDECAR_IMAGE:-ghcr.io/helicopterrun/frigate-sidecar:latest}
     build: .
-    image: frigate-sidecar:dev
     container_name: frigate-sidecar
     restart: unless-stopped
     # host networking is the simplest way to reach Frigate's API on the LAN.
-    # If you prefer bridge networking, drop this and set
+    # If you prefer bridge networking, drop this, publish 5001, and set
     # frigate.base_url to a name resolvable inside the container.
     network_mode: host
     volumes:
       # Frigate inputs (read-only).
-      - /opt/frigate/config.yml:/opt/frigate/config.yml:ro
+      - ${FRIGATE_CONFIG:-/opt/frigate/config.yml}:/opt/frigate/config.yml:ro
       # Mount the DB's DIRECTORY, not the file: Frigate runs SQLite in WAL mode,
       # so frigate.db-wal and frigate.db-shm are part of the database. Binding
       # frigate.db alone hides every committed-but-not-checkpointed write, and a
       # read-only WAL open can fail outright for want of the -shm.
-      - /opt/frigate/database:/opt/frigate/database:ro
+      - ${FRIGATE_DB_DIR:-/opt/frigate/database}:/opt/frigate/database:ro
       # Recordings, read-only -- the scrub generator's only input. Without this
       # every segment lookup misses and generation silently produces nothing.
-      # Note `frigate.recordings_path` names the path that REPLACES
-      # `frigate.media_path` in `recordings.path`, not the recordings tree root
-      # (the `recordings/` segment already comes from the DB value).
-      - /mnt/frigate-storage/recordings:/mnt/frigate-storage/recordings:ro
+      # Mounted at the SAME path inside the container so the config's
+      # frigate.recordings_path works unchanged. Note `frigate.recordings_path`
+      # names the path that REPLACES `frigate.media_path` in `recordings.path`,
+      # not the recordings tree root (the `recordings/` segment already comes
+      # from the DB value).
+      - ${FRIGATE_RECORDINGS:-/opt/frigate/media/recordings}:${FRIGATE_RECORDINGS:-/opt/frigate/media/recordings}:ro
       # Sidecar runtime data (read-write): the sidecar DB and, when
       # scrub.enabled, the sprite-sheet cache. Keep this on a different
-      # filesystem from the recordings mount above (spec §8.3).
-      - /opt/frigate-sidecar/data:/data
+      # filesystem from the recordings mount above (spec §8.3). Must be
+      # writable by uid 10001 (the container's non-root user).
+      - ${SIDECAR_DATA:-./data}:/data
       # Configuration
-      - ./config/sidecar.yml:/etc/frigate-sidecar/sidecar.yml:ro
+      - ${SIDECAR_CONFIG_DIR:-./config}:/config
     environment:
-      FRIGATE_SIDECAR_CONFIG: /etc/frigate-sidecar/sidecar.yml
+      FRIGATE_SIDECAR_CONFIG: /config/sidecar.yml
+    # .env is also passed into the container so FRIGATE_SIDECAR_* overrides
+    # (e.g. the MQTT password) take effect without editing this file.
+    env_file:
+      - path: .env
+        required: false
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/healthz', timeout=5)"]
       interval: 30s
