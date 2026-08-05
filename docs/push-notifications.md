@@ -44,22 +44,30 @@ restatement of the full spec — see that doc for the complete rationale
   could ever have been notified — invisible only while the mock transport is
   in use.
 
-  **Situation pushes need a third relay route.** A situation's title is its
+  **Situation pushes use a third relay route.** A situation's title is its
   user-authored name and its body names the label and dwell, none of which a
   fixed severity-keyed template can produce — so the sidecar builds the whole
   APNs body and `send_situation` posts it to `POST
   {relay_base_url}/v1/relay/situation` as
-  `{device_token, environment, bundle_id, payload, headers}` for the relay to
-  sign and forward verbatim. Deliberately *not* `/v1/relay/push`: that route
-  templates its own text, so handing it a situation would deliver a generic
-  "New alert" banner while reporting success. A separate route 404s cleanly
-  until the relay ships the matching version. **Not yet implemented in
-  elsinore-push-relay** — until it is, situation-tier pushes fail visibly
-  (logged send failure; `502 test_send_failed` from the app's test button)
-  while v1-shape pushes keep working. Plan §8's relay boundary governs: the
-  relay forwards these bytes to APNs in flight without persisting, logging, or
-  inspecting them, which is what "content-free *at rest*" has always meant.
-  Snapshots still never transit it.
+  `{device_token, environment, "apns-collapse-id", payload}`. The relay signs
+  the JWT, sets `apns-topic`/`apns-push-type`/`apns-priority` itself, and
+  forwards `payload` verbatim; it validates `payload.aps` and 422s anything
+  over 4KB. Deliberately *not* `/v1/relay/push`: that route templates its own
+  text, so handing it a situation would deliver a generic "New alert" banner
+  while reporting success. Implemented in elsinore-push-relay `4278bdf`;
+  until that is deployed to Workers a situation send 404s, which surfaces as
+  a logged send failure and `502 test_send_failed` from the app's test button
+  — visibly broken rather than silently wrong, and v1-shape pushes keep
+  working throughout. Plan §8's relay boundary governs: the relay forwards
+  these bytes to APNs in flight without persisting, logging, or inspecting
+  them, which is what "content-free *at rest*" has always meant. Snapshots
+  still never transit it.
+
+  **`apns-collapse-id` is capped at 64 bytes**, by Apple and again by the
+  relay, which truncates rather than rejects. `build_collapse_id` trims the
+  *situation* id and keeps the track id whole: cutting the tail instead would
+  make two people arriving 30s apart share a collapse id, and one
+  notification would silently replace the other.
 
   **Test push needs a second relay route.** `send_test` posts
   `{device_token, environment}` to `POST {relay_base_url}/v1/relay/test`:

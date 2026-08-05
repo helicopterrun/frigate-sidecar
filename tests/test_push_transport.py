@@ -32,6 +32,66 @@ async def test_log_transport_records_send_and_succeeds():
     assert "label" not in record
 
 
+async def test_relay_transport_situation_matches_the_relays_wire_contract():
+    """Exactly the four keys `validateSituation` requires in
+    elsinore-push-relay 4278bdf -- no `bundle_id`, no `headers` block. The
+    relay sets apns-topic/push-type/priority itself; it contributes routing
+    and the collapse id and nothing else."""
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = __import__("json").loads(request.content)
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"detail": "ok"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    relay = RelayTransport("https://relay.example.test", client=client)
+    aps = {"aps": {"alert": {"title": "At the door", "body": "Person, 6s"}},
+           "situation_id": "at-the-door", "handle": "h_1"}
+    result = await relay.send_situation(
+        _device(apns_token="tokXYZ", environment="prod"),
+        payload=aps, collapse_id="at-the-door:t1",
+    )
+    assert result.ok is True
+    assert captured["url"] == "https://relay.example.test/v1/relay/situation"
+    body = captured["json"]
+    assert set(body.keys()) == {
+        "device_token", "environment", "apns-collapse-id", "payload",
+    }
+    # `prod` is this codebase's spelling; the relay's wire API wants
+    # `production` and 422s anything else.
+    assert body["environment"] == "production"
+    assert body["apns-collapse-id"] == "at-the-door:t1"
+    assert body["payload"] == aps  # forwarded verbatim
+
+
+async def test_relay_transport_situation_surfaces_a_dead_token():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(410, json={"detail": "Unregistered"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    relay = RelayTransport("https://relay.example.test", client=client)
+    result = await relay.send_situation(
+        _device(), payload={"aps": {}}, collapse_id="s:t"
+    )
+    assert result.ok is False and result.unregistered is True
+
+
+async def test_relay_transport_situation_reports_a_rejected_payload():
+    """The relay 422s an oversized or aps-less payload with a readable
+    reason; that reason has to reach the logs, not be swallowed."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"error": "payload too large (5000 > 4096)"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    relay = RelayTransport("https://relay.example.test", client=client)
+    result = await relay.send_situation(
+        _device(), payload={"aps": {}}, collapse_id="s:t"
+    )
+    assert result.ok is False and result.unregistered is False
+    assert "payload too large" in (result.error or "")
+
+
 async def test_relay_transport_posts_minimal_payload():
     captured = {}
 

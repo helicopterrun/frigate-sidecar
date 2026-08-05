@@ -270,38 +270,30 @@ class RelayTransport:
         404s cleanly until the relay ships the matching version, which shows
         up in the logs and in the app's test button as a plain failure.
 
-        Wire contract the relay must implement:
+        Wire contract, as implemented in elsinore-push-relay `4278bdf`:
 
             POST /v1/relay/situation
             {
-              "device_token": "<hex>",
-              "environment": "sandbox" | "production",
-              "bundle_id":   "com.houseofpaimon.Elsinore",
-              "payload":     { …the APNs body, forwarded verbatim… },
-              "headers": {
-                "apns-collapse-id": "<situation-id>:<track-id>",
-                "apns-priority":    "10",
-                "apns-push-type":   "alert"
-              }
+              "device_token":     "<hex>",
+              "environment":      "sandbox" | "production",
+              "apns-collapse-id": "<situation-id>:<track-id>",
+              "payload":          { …the APNs body, forwarded verbatim… }
             }
 
-        The relay signs the provider JWT, sets `apns-topic` from `bundle_id`,
-        forwards `payload` unchanged, and returns APNs' status (200, or
+        The relay signs the provider JWT and sets `apns-topic`,
+        `apns-push-type: alert` and `apns-priority: 10` itself -- it
+        contributes routing and the collapse id, nothing else, so none of
+        those are sent from here. It validates `payload.aps` and rejects
+        anything over 4KB with a readable 422 rather than letting Apple
+        answer `PayloadTooLarge`. It returns APNs' own status (200, or
         410/400 for a dead token). It does not persist, log, or inspect the
         payload body -- plan §8's relay boundary.
         """
         body = {
             "device_token": device.apns_token,
             "environment": self._environment(device),
-            "bundle_id": device.bundle_id,
+            "apns-collapse-id": collapse_id,
             "payload": payload,
-            "headers": {
-                "apns-collapse-id": collapse_id,
-                # Immediate delivery -- these are security alerts, never
-                # battery-deferred background refreshes (plan §3).
-                "apns-priority": "10",
-                "apns-push-type": "alert",
-            },
         }
         url = f"{self.base_url}/v1/relay/situation"
         try:

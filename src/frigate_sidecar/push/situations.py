@@ -401,6 +401,34 @@ def _clamp_start(start_time: float, now: float, *, max_backdate_s: float = 300.0
     return start_time
 
 
+#: APNs' `apns-collapse-id` ceiling, enforced by Apple and mirrored by the
+#: relay. Not a soft limit: a longer value is truncated, not rejected.
+COLLAPSE_ID_MAX_BYTES = 64
+
+
+def build_collapse_id(situation_id: str, track_id: str) -> str:
+    """`<situation-id>:<track-id>`, trimmed to fit APNs' 64-byte cap.
+
+    The track id is kept whole and the situation id is shortened to make
+    room, because collapsing is keyed on the *track* -- see `Match.collapse_id`
+    for why losing the track id would be the expensive way to lose.
+    """
+    full = f"{situation_id}:{track_id}"
+    if len(full.encode()) <= COLLAPSE_ID_MAX_BYTES:
+        return full
+    room = COLLAPSE_ID_MAX_BYTES - len(track_id.encode()) - 1
+    if room <= 0:
+        # A track id alone at the ceiling: nothing left to qualify it with,
+        # so collapse on the track and accept that one pathological situation
+        # id can share it.
+        logger.warning(
+            "push: track id %r leaves no room for a situation id in a 64-byte "
+            "collapse id; collapsing on the track alone", track_id,
+        )
+        return track_id.encode()[:COLLAPSE_ID_MAX_BYTES].decode(errors="ignore")
+    return f"{situation_id.encode()[:room].decode(errors='ignore')}:{track_id}"
+
+
 @dataclass(frozen=True)
 class Match:
     """One situation firing for one track -- everything the push needs."""
@@ -416,8 +444,18 @@ class Match:
     def collapse_id(self) -> str:
         """`<situation-id>:<track-id>` (plan §3 / §8). Same track's updates
         replace rather than stack; distinct tracks stay distinct notifications
-        by design."""
-        return f"{self.situation.id}:{self.track_id}"
+        by design.
+
+        Capped at APNs' 64-byte ceiling, which the relay also enforces by
+        truncating (`elsinore-push-relay` 4278bdf). Truncating from the right
+        would cut into the *track* id -- and two tracks whose ids no longer
+        differ are one notification replacing another, silently losing the
+        "two people arriving is two notifications" property. So the situation
+        id gives way instead: the track id is the part that has to survive
+        intact, and the result is still stable across a track's updates,
+        which is all a collapse id has to be.
+        """
+        return build_collapse_id(self.situation.id, self.track_id)
 
 
 def matches(

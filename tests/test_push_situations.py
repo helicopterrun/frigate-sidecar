@@ -11,8 +11,11 @@ from __future__ import annotations
 from frigate_sidecar.push.decision import parse_object_message, parse_review_message
 from frigate_sidecar.push.models import Device, ReviewEvent
 from frigate_sidecar.push.situations import (
+    COLLAPSE_ID_MAX_BYTES,
+    Match,
     Situation,
     TrackStore,
+    build_collapse_id,
     evaluate_device,
     in_time_window,
     parse_situations,
@@ -256,6 +259,37 @@ def test_object_message_sub_label_may_be_a_name_score_pair() -> None:
     }
     obj = parse_object_message(payload)
     assert obj is not None and obj.sub_label == "alice"
+
+
+# -- collapse ids ------------------------------------------------------------
+
+
+def test_collapse_id_is_situation_then_track() -> None:
+    assert build_collapse_id("at-the-door", "1785949902.99235-kqbwe9") == (
+        "at-the-door:1785949902.99235-kqbwe9"
+    )
+
+
+def test_a_long_situation_id_gives_way_so_the_track_id_survives() -> None:
+    """APNs truncates at 64 bytes and so does the relay. Losing the tail
+    would make two people at the door collapse into one notification."""
+    long_id = "a-situation-name-somebody-typed-out-in-full-because-they-could"
+    track_a, track_b = "1785949902.99235-kqbwe9", "1785949902.99235-zzzzzz"
+
+    a = build_collapse_id(long_id, track_a)
+    b = build_collapse_id(long_id, track_b)
+    assert len(a.encode()) <= COLLAPSE_ID_MAX_BYTES
+    assert a.endswith(track_a) and b.endswith(track_b)
+    assert a != b  # still two notifications, not one replacing the other
+
+
+def test_collapse_id_is_stable_across_a_tracks_updates() -> None:
+    """Whatever it trims to, it must trim to the same thing every time -- an
+    unstable collapse id stacks instead of replacing."""
+    m = Match(situation=Situation(id="x" * 90, name="X"), track_id="t1", dwell_s=1, label="person",
+              zone="porch")
+    assert m.collapse_id == m.collapse_id
+    assert len(m.collapse_id.encode()) <= COLLAPSE_ID_MAX_BYTES
 
 
 # -- the store's own housekeeping -------------------------------------------
