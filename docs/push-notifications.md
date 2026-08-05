@@ -69,6 +69,20 @@ restatement of the full spec — see that doc for the complete rationale
   make two people arriving 30s apart share a collapse id, and one
   notification would silently replace the other.
 
+  **Live Activities need a fourth relay route.** `/v1/relay/situation`
+  hardcodes `apns-push-type: alert` and `apns-topic: env.APNS_TOPIC`
+  (elsinore-push-relay `43c5209`). A live-activity push differs in all three
+  of the fields that matter — `apns-push-type: liveactivity`, the
+  `<APNS_TOPIC>.push-type.liveactivity` topic, and a token that is neither the
+  device's alert token nor the same one for start vs update — so
+  `send_live_activity` posts to `POST {relay_base_url}/v1/relay/liveactivity`
+  as `{device_token, environment, "apns-collapse-id", event, payload}`.
+  `event` is `start` | `update` | `end`, passed so the relay can validate the
+  shape (a `start` must carry `attributes` and `attributes-type`) rather than
+  letting Apple 400 it. **Not yet implemented in elsinore-push-relay** — until
+  it is, LA pushes 404 and Present-tier situations are silent on
+  LA-capable devices, while every Phase 1 path keeps working.
+
   **Test push needs a second relay route.** `send_test` posts
   `{device_token, environment}` to `POST {relay_base_url}/v1/relay/test`:
   `/v1/relay/push` validates `handle` as required and templates its text by
@@ -153,6 +167,49 @@ loses a push on upgrade.
   NSE fetches it from `GET /v1/push/thumbnail/{handle}` against an already-warm
   cache. The fetch runs *in parallel* with the send, never in series, and every
   failure path costs the notification its image rather than its existence.
+
+## Live Activities (Phase 2)
+
+Present-tier situations stop being silent and start living in a Live Activity:
+the object enters the zone, the Dynamic Island grows a snapshot and a timer,
+and only if the situation crosses its own escalation bar does anything buzz.
+
+**Three tokens, three purposes.** The alert token (Phase 1, the URL path of the
+registration) still carries alerts. `push_to_start_token` — one per app
+install, on the registration record — creates activities. A *per-activity*
+token, uploaded by the app once iOS mints it, carries updates and the end.
+
+**The stage machine** (`stage` on the per-track store, mirrored on the
+`push_activities` row):
+
+| Transition | Push | Token |
+|---|---|---|
+| conditions first match → `arriving` | start | push-to-start |
+| still dwelling → `present` | update (silent) | per-activity |
+| escalation trigger → `escalated` | **alert**, matching collapse id | alert |
+| zone exit / object end / 30s quiet → `ending` | end + `dismissal-date` | per-activity |
+
+- **The activity starts before the loiter threshold.** Loiter decides the
+  *interrupt*, not the activity — plan §3 has the LA appear at "0:04" and
+  escalate at five seconds.
+- **Escalation is one alert with the activity's own collapse id**, so iOS
+  routes it to the visible LA instead of stacking a banner. The alert also
+  carries `content_state` with `stage: "escalated"` so the app can move the
+  activity on the same transition.
+- **Only Present-tier situations run activities.** Interrupt-tier ones are
+  Phase 1, unchanged.
+- **Fallback:** a device with situations but no `push_to_start_token` gets
+  Phase 1-shape alert pushes for its Present-tier situations. "The app works
+  without Phase 2."
+- **Budgets:** LA pushes are metered separately (`activity_updates_per_hour`,
+  60) from the alert ceiling (10), and updates are coalesced to one per
+  activity per `activity_update_min_interval_s` (3s). Updates fire on
+  `frigate/events` observations, never on a timer — the only clock-driven job
+  is the resolution sweeper, which exclusively *ends* activities.
+- **Early fire** (`detection_tier_early_fire`): the activity also starts on a
+  `detection`-severity review, ~500ms ahead of the `alert` promotion, and the
+  severity pre-filter is relaxed for exactly those situations. One that never
+  promotes ends with a 10s tail instead of 30s.
 
 ### Loiter needs `frigate/events`, not `frigate/reviews`
 

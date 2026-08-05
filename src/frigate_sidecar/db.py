@@ -128,7 +128,11 @@ CREATE TABLE IF NOT EXISTS push_devices (
     -- Accepted and persisted, deliberately unread this phase (Phase 2/4).
     live_activity_token TEXT NOT NULL DEFAULT '',
     morning_digest TEXT,                      -- JSON
-    llm          TEXT                         -- JSON
+    llm          TEXT,                        -- JSON
+    -- Phase 2: one per app install, rotates on reinstall. Creates Live
+    -- Activities. Absent means "this device isn't ready for Live Activities"
+    -- and its Present-tier situations fall back to alert pushes.
+    push_to_start_token TEXT NOT NULL DEFAULT ''
 );
 
 -- Opaque, sidecar-minted, short-lived handles standing in for
@@ -188,6 +192,56 @@ CREATE TABLE IF NOT EXISTS push_suppressed (
     count        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (apns_token, situation_id)
 );
+
+-- One row per Live Activity the sidecar has asked iOS to create (Phase 2).
+-- `token` is the *per-activity* push token, which the app uploads via
+-- POST /v1/push/activity/token once iOS has created the activity and handed
+-- it over -- so a row exists in two states: started-but-tokenless (updates
+-- can't be sent yet) and tokened (updates and the end push can).
+--
+-- Keyed on activity_id because that is what the app knows; looked up by
+-- (apns_token, situation_id, track_id) because that is what the MQTT stream
+-- knows. `ended_at` is set when the end push goes out and the row is reaped
+-- a margin after the dismissal window.
+CREATE TABLE IF NOT EXISTS push_activities (
+    activity_id  TEXT PRIMARY KEY,
+    apns_token   TEXT NOT NULL,
+    situation_id TEXT NOT NULL,
+    track_id     TEXT NOT NULL,
+    camera       TEXT NOT NULL DEFAULT '',
+    token        TEXT NOT NULL DEFAULT '',   -- per-activity push token; '' until uploaded
+    collapse_id  TEXT NOT NULL DEFAULT '',
+    handle       TEXT NOT NULL DEFAULT '',
+    stage        TEXT NOT NULL DEFAULT 'arriving',
+    thumbnail_revision INTEGER NOT NULL DEFAULT 1,
+    -- Last dwell we told the device about. Held on the row so the resolution
+    -- sweeper can compose an end push without the MQTT event that is, by
+    -- definition, no longer arriving.
+    dwell_seconds INTEGER NOT NULL DEFAULT 0,
+    -- Early-fire bookkeeping (plan §4 lever 5): an activity started off a
+    -- `detection`-severity review that never promotes to `alert` is ended
+    -- early, with a shorter tail, rather than lingering as a false positive.
+    from_detection INTEGER NOT NULL DEFAULT 0,
+    promoted     INTEGER NOT NULL DEFAULT 0,
+    created_at   REAL NOT NULL,
+    last_push_at REAL NOT NULL DEFAULT 0,     -- for the 3s update coalescing
+    last_seen_at REAL NOT NULL DEFAULT 0,     -- last frigate/events observation
+    ended_at     REAL
+);
+CREATE INDEX IF NOT EXISTS idx_push_activity_lookup
+    ON push_activities(apns_token, situation_id, track_id);
+CREATE INDEX IF NOT EXISTS idx_push_activity_live
+    ON push_activities(ended_at, last_seen_at);
+
+-- Live Activity pushes sent, for the separate (higher) LA budget: iOS meters
+-- LA updates per hour, so these must not share the alert tier's 10/hour
+-- ceiling in either direction.
+CREATE TABLE IF NOT EXISTS push_activity_sends (
+    activity_id TEXT NOT NULL,
+    sent_at     REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_activity_sends
+    ON push_activity_sends(activity_id, sent_at);
 """
 
 # Columns added to `push_devices` / `push_handles` after those tables first
@@ -207,6 +261,7 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("live_activity_token", "TEXT NOT NULL DEFAULT ''"),  # Phase 2
         ("morning_digest", "TEXT"),  # JSON; Phase 4
         ("llm", "TEXT"),  # JSON; Phase 4
+        ("push_to_start_token", "TEXT NOT NULL DEFAULT ''"),  # Phase 2
     ],
     "push_handles": [
         ("situation_id", "TEXT NOT NULL DEFAULT ''"),

@@ -158,6 +158,26 @@ async def _push_subscriber_loop(app: FastAPI) -> None:
         logger.exception("push: mqtt subscriber loop crashed")
 
 
+async def _activity_sweep_loop(app: FastAPI) -> None:
+    """End Live Activities whose situation has gone quiet.
+
+    Resolution is the one transition nothing announces -- no message arrives
+    to say "the object stopped being reported" -- so it needs a sweep. This
+    only ever *ends* activities; it never refreshes one, so the rule that
+    stage transitions are the only thing minting an LA push still holds.
+    """
+    engine: PushEngine = app.state.push_engine
+    interval = app.state.settings.push.activity_sweep_interval_s
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await engine.sweep_activities()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("push: activity sweep failed")
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
@@ -191,6 +211,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             task = asyncio.create_task(_scrub_generation_loop(app))
 
     push_task: asyncio.Task[None] | None = None
+    sweep_task: asyncio.Task[None] | None = None
     if settings.push.enabled:
         server_id = settings.push.server_id or f"s_{id(app):x}"
         transport = _build_push_transport(settings)
@@ -208,6 +229,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             thumbnail_quality=settings.push.thumbnail_quality,
             thumbnail_timeout_s=settings.push.thumbnail_timeout_s,
             dwell_source=settings.push.dwell_source,
+            activity_update_min_interval_s=settings.push.activity_update_min_interval_s,
+            activity_resolution_s=settings.push.activity_resolution_s,
+            activity_dismissal_tail_s=settings.push.activity_dismissal_tail_s,
+            activity_updates_per_hour=settings.push.activity_updates_per_hour,
+            activity_reap_after_s=settings.push.activity_reap_after_s,
         )
         app.state.push_engine = engine
         subscriber = MqttReviewSubscriber(
@@ -215,11 +241,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.push_subscriber = subscriber
         push_task = asyncio.create_task(_push_subscriber_loop(app))
+        sweep_task = asyncio.create_task(_activity_sweep_loop(app))
 
     try:
         yield
     finally:
-        for pending in (task, probe_task, push_task):
+        for pending in (task, probe_task, push_task, sweep_task):
             if pending is not None:
                 pending.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

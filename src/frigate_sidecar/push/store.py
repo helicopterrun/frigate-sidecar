@@ -78,6 +78,7 @@ def _row_to_device(row: sqlite3.Row) -> Device:
         location=location,
         situations=situations,
         live_activity_token=str(_col(row, "live_activity_token", "") or ""),
+        push_to_start_token=str(_col(row, "push_to_start_token", "") or ""),
     )
 
 
@@ -103,6 +104,7 @@ def upsert_device(
     live_activity_token: str = "",
     morning_digest: dict[str, Any] | None = None,
     llm: dict[str, Any] | None = None,
+    push_to_start_token: str = "",
 ) -> str:
     """Idempotent PUT on the token (spec §1) -- overwrites filter state in
     place rather than accumulating duplicate rows that would double-fire
@@ -118,8 +120,8 @@ def upsert_device(
         "INSERT INTO push_devices "
         "(apns_token, device_id, bundle_id, environment, app_version, cameras, labels, "
         " min_severity, registered_at, updated_at, schema_version, timezone, location, "
-        " situations, live_activity_token, morning_digest, llm) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " situations, live_activity_token, morning_digest, llm, push_to_start_token) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(apns_token) DO UPDATE SET "
         "bundle_id=excluded.bundle_id, environment=excluded.environment, "
         "app_version=excluded.app_version, cameras=excluded.cameras, labels=excluded.labels, "
@@ -127,7 +129,12 @@ def upsert_device(
         "schema_version=excluded.schema_version, timezone=excluded.timezone, "
         "location=excluded.location, situations=excluded.situations, "
         "live_activity_token=excluded.live_activity_token, "
-        "morning_digest=excluded.morning_digest, llm=excluded.llm",
+        "morning_digest=excluded.morning_digest, llm=excluded.llm, "
+        # A re-registration that omits the token must not blank a working one:
+        # the app uploads it from an async token stream, so the first PUT after
+        # launch can legitimately race ahead of the token arriving.
+        "push_to_start_token=CASE WHEN excluded.push_to_start_token != '' "
+        " THEN excluded.push_to_start_token ELSE push_devices.push_to_start_token END",
         (
             apns_token, device_id, bundle_id, environment, app_version,
             json.dumps(cameras or []), json.dumps(labels or []), min_severity, now, now,
@@ -136,6 +143,7 @@ def upsert_device(
             json.dumps(situations or []), live_activity_token,
             json.dumps(morning_digest) if morning_digest is not None else None,
             json.dumps(llm) if llm is not None else None,
+            push_to_start_token,
         ),
     )
     return device_id
@@ -374,6 +382,190 @@ def prune_old_sends(
     now = time.time() if now is None else now
     cur = conn.execute("DELETE FROM push_sends WHERE sent_at <= ?", (now - older_than,))
     return cur.rowcount
+
+
+# -- Live Activities (Phase 2) ----------------------------------------------
+
+
+def open_activity(
+    conn: sqlite3.Connection,
+    *,
+    activity_id: str,
+    apns_token: str,
+    situation_id: str,
+    track_id: str,
+    camera: str,
+    collapse_id: str,
+    handle: str,
+    from_detection: bool = False,
+    now: float | None = None,
+) -> None:
+    """Record that a start push went out for this (device, situation, track).
+
+    The row exists before the app has a per-activity token: iOS creates the
+    activity, hands the app a token, and only then does the app upload it. In
+    between there is a live activity on screen the sidecar cannot yet update,
+    which is a normal state, not an error.
+    """
+    now = time.time() if now is None else now
+    conn.execute(
+        "INSERT INTO push_activities (activity_id, apns_token, situation_id, track_id, "
+        " camera, collapse_id, handle, stage, from_detection, created_at, last_seen_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'arriving', ?, ?, ?) "
+        "ON CONFLICT(activity_id) DO UPDATE SET last_seen_at=excluded.last_seen_at",
+        (activity_id, apns_token, situation_id, track_id, camera, collapse_id, handle,
+         int(from_detection), now, now),
+    )
+
+
+def attach_activity_token(
+    conn: sqlite3.Connection,
+    *,
+    activity_id: str,
+    apns_token: str,
+    situation_id: str,
+    track_id: str,
+    token: str,
+    now: float | None = None,
+) -> None:
+    """Bind the per-activity push token the app just observed.
+
+    Upsert rather than update: the app is the only source of `activity_id`, so
+    a token can arrive for an activity the sidecar started under a synthetic
+    id, or (with push-to-start) for one it started without knowing the id iOS
+    would assign.
+    """
+    now = time.time() if now is None else now
+    conn.execute(
+        "INSERT INTO push_activities (activity_id, apns_token, situation_id, track_id, "
+        " token, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(activity_id) DO UPDATE SET token=excluded.token, "
+        " situation_id=excluded.situation_id, track_id=excluded.track_id, "
+        " apns_token=excluded.apns_token, last_seen_at=excluded.last_seen_at",
+        (activity_id, apns_token, situation_id, track_id, token, now, now),
+    )
+
+
+def find_activity(
+    conn: sqlite3.Connection, *, apns_token: str, situation_id: str, track_id: str
+) -> sqlite3.Row | None:
+    """The live activity for this (device, situation, track), if any."""
+    return conn.execute(
+        "SELECT * FROM push_activities WHERE apns_token = ? AND situation_id = ? "
+        "AND track_id = ? AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1",
+        (apns_token, situation_id, track_id),
+    ).fetchone()
+
+
+def get_activity(conn: sqlite3.Connection, activity_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM push_activities WHERE activity_id = ?", (activity_id,)
+    ).fetchone()
+
+
+def touch_activity(
+    conn: sqlite3.Connection,
+    activity_id: str,
+    *,
+    stage: str | None = None,
+    pushed: bool = False,
+    seen: bool = True,
+    thumbnail_revision: int | None = None,
+    promoted: bool | None = None,
+    dwell_seconds: int | None = None,
+    now: float | None = None,
+) -> None:
+    now = time.time() if now is None else now
+    sets = []
+    args: list[Any] = []
+    if stage is not None:
+        sets.append("stage = ?")
+        args.append(stage)
+    if dwell_seconds is not None:
+        sets.append("dwell_seconds = ?")
+        args.append(dwell_seconds)
+    if pushed:
+        sets.append("last_push_at = ?")
+        args.append(now)
+    if seen:
+        sets.append("last_seen_at = ?")
+        args.append(now)
+    if thumbnail_revision is not None:
+        sets.append("thumbnail_revision = ?")
+        args.append(thumbnail_revision)
+    if promoted is not None:
+        sets.append("promoted = ?")
+        args.append(int(promoted))
+    if not sets:
+        return
+    args.append(activity_id)
+    conn.execute(f"UPDATE push_activities SET {', '.join(sets)} WHERE activity_id = ?", args)
+
+
+def close_activity(
+    conn: sqlite3.Connection, activity_id: str, *, now: float | None = None
+) -> None:
+    now = time.time() if now is None else now
+    conn.execute(
+        "UPDATE push_activities SET ended_at = ?, stage = 'ending' WHERE activity_id = ?",
+        (now, activity_id),
+    )
+
+
+def delete_activity(conn: sqlite3.Connection, activity_id: str) -> bool:
+    cur = conn.execute("DELETE FROM push_activities WHERE activity_id = ?", (activity_id,))
+    conn.execute("DELETE FROM push_activity_sends WHERE activity_id = ?", (activity_id,))
+    return cur.rowcount > 0
+
+
+def stale_activities(
+    conn: sqlite3.Connection, *, quiet_for: float, now: float | None = None
+) -> list[sqlite3.Row]:
+    """Live activities with no `frigate/events` observation for `quiet_for`.
+
+    This is resolution: the object stopped being reported, so the situation is
+    over. Frigate's own `end` message is the faster signal and the engine acts
+    on it directly; this catches the case where it never arrives.
+    """
+    now = time.time() if now is None else now
+    return conn.execute(
+        "SELECT * FROM push_activities WHERE ended_at IS NULL AND last_seen_at <= ?",
+        (now - quiet_for,),
+    ).fetchall()
+
+
+def reap_activities(
+    conn: sqlite3.Connection, *, older_than: float, now: float | None = None
+) -> int:
+    """Drop ended activities once their dismissal window has safely passed."""
+    now = time.time() if now is None else now
+    rows = conn.execute(
+        "SELECT activity_id FROM push_activities WHERE ended_at IS NOT NULL AND ended_at <= ?",
+        (now - older_than,),
+    ).fetchall()
+    for row in rows:
+        delete_activity(conn, row["activity_id"])
+    return len(rows)
+
+
+def count_activity_sends(
+    conn: sqlite3.Connection, *, activity_id: str, since: float
+) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM push_activity_sends WHERE activity_id = ? AND sent_at > ?",
+        (activity_id, since),
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def record_activity_send(
+    conn: sqlite3.Connection, *, activity_id: str, now: float | None = None
+) -> None:
+    now = time.time() if now is None else now
+    conn.execute(
+        "INSERT INTO push_activity_sends (activity_id, sent_at) VALUES (?, ?)",
+        (activity_id, now),
+    )
 
 
 def redeem_handle(

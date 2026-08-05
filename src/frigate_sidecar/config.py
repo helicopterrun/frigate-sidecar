@@ -429,6 +429,25 @@ class PushSection(BaseModel):
     # reason. Neither setting lets the object stream trigger a push on its own.
     dwell_source: str = "events"
 
+    # -- Live Activities (Phase 2) --
+    # Coalescing floor for update pushes -- one per activity per this many
+    # seconds however busy the object stream gets. iOS meters LA updates.
+    activity_update_min_interval_s: float = 3.0
+    # Quiet period after which a Present situation counts as resolved. The
+    # faster signal is Frigate's own object `end`, which the engine acts on
+    # directly; this catches the case where it never arrives.
+    activity_resolution_s: float = 30.0
+    # How long the activity lingers on screen after the end push.
+    activity_dismissal_tail_s: float = 30.0
+    # Separate from the alert tier's `rate_limit_per_hour`, in both
+    # directions: a chatty activity must not eat the budget a genuine
+    # interrupt needs, and a silent update is nothing like a buzz.
+    activity_updates_per_hour: int = 60
+    activity_reap_after_s: float = 300.0
+    # How often the resolution sweeper runs. Only ever *ends* activities, so
+    # it is not the clock-driven keep-alive the plan forbids.
+    activity_sweep_interval_s: float = 5.0
+
     @field_validator("dwell_source")
     @classmethod
     def _known_dwell_source(cls, v: str) -> str:

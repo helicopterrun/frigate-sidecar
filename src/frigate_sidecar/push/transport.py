@@ -74,6 +74,29 @@ class PushTransport(Protocol):
         """
         ...
 
+    async def send_live_activity(
+        self,
+        device: Device,
+        *,
+        token: str,
+        payload: dict[str, Any],
+        collapse_id: str,
+        event: str,
+    ) -> TransportResult:
+        """One Live Activity push: `start`, `update`, or `end` (Phase 2).
+
+        Three things make this not a `send_situation` with a different body,
+        which is why it is its own method rather than a flag:
+
+        * **A different token.** `start` goes to the device's push-to-start
+          token, `update`/`end` to the per-activity token iOS minted. Neither
+          is `device.apns_token`, so the token is passed in.
+        * **A different `apns-push-type`.** `liveactivity`, not `alert`.
+        * **A different `apns-topic`.** `<bundle-id>.push-type.liveactivity`.
+          Apple rejects a live-activity push sent to the plain app topic.
+        """
+        ...
+
     async def send_test(self, device: Device) -> TransportResult:
         """One fixed, self-contained test alert to a single device (spec §1).
 
@@ -145,6 +168,29 @@ class LogTransport:
             "handle=%s -- not delivered anywhere; set push.transport=relay for a real send",
             device.device_id, payload.get("situation_id"), collapse_id,
             alert.get("title"), alert.get("body"), payload.get("handle"),
+        )
+        return TransportResult(ok=True)
+
+    async def send_live_activity(
+        self, device: Device, *, token: str, payload: dict[str, Any],
+        collapse_id: str, event: str,
+    ) -> TransportResult:
+        record: dict[str, object] = {
+            "device_id": device.device_id,
+            "environment": device.environment,
+            "live_activity": True,
+            "event": event,
+            "token": token,
+            "payload": payload,
+            "collapse_id": collapse_id,
+        }
+        self.sent.append(record)
+        state = payload.get("aps", {}).get("content-state", {})
+        logger.info(
+            "push (mock transport): LA %s device=%s collapse_id=%s stage=%s dwell=%s "
+            "-- not delivered anywhere; set push.transport=relay for a real send",
+            event, device.device_id, collapse_id,
+            state.get("stage"), state.get("dwell_seconds"),
         )
         return TransportResult(ok=True)
 
@@ -296,6 +342,57 @@ class RelayTransport:
             "payload": payload,
         }
         url = f"{self.base_url}/v1/relay/situation"
+        try:
+            resp = await self._client.post(url, json=body)
+        except httpx.HTTPError as exc:
+            return TransportResult(ok=False, error=str(exc))
+        return self._result(resp)
+
+    async def send_live_activity(
+        self, device: Device, *, token: str, payload: dict[str, Any],
+        collapse_id: str, event: str,
+    ) -> TransportResult:
+        """POST a Live Activity push to `/v1/relay/liveactivity`.
+
+        **A fourth relay route, and it cannot be folded into
+        `/v1/relay/situation`.** That route hardcodes `apns-push-type: alert`
+        and `apns-topic: env.APNS_TOPIC` (verified against elsinore-push-relay
+        `43c5209`). A live-activity push needs `apns-push-type: liveactivity`
+        and the `<bundle-id>.push-type.liveactivity` topic; Apple rejects the
+        combination otherwise, and the token is not the device's alert token
+        either. All three differ, so it is a different request in every field
+        that matters.
+
+        Wire contract the relay needs to implement:
+
+            POST /v1/relay/liveactivity
+            {
+              "device_token":     "<per-activity or push-to-start token, hex>",
+              "environment":      "sandbox" | "production",
+              "apns-collapse-id": "<situation-id>:<track-id>",
+              "event":            "start" | "update" | "end",
+              "payload":          { …the APNs body, forwarded verbatim… }
+            }
+
+        The relay signs the same provider JWT, sets `apns-push-type:
+        liveactivity`, `apns-priority: 10`, and
+        `apns-topic: <APNS_TOPIC>.push-type.liveactivity`, then forwards
+        `payload` unchanged. `event` is passed so the relay can validate the
+        shape (`start` must carry `attributes` and `attributes-type`) rather
+        than letting Apple 400 it -- the same courtesy `/v1/relay/situation`
+        already does for oversized payloads.
+
+        Same content-free-at-rest rule: `content-state` transits in flight and
+        is never persisted, logged, or inspected.
+        """
+        body = {
+            "device_token": token,
+            "environment": self._environment(device),
+            "apns-collapse-id": collapse_id,
+            "event": event,
+            "payload": payload,
+        }
+        url = f"{self.base_url}/v1/relay/liveactivity"
         try:
             resp = await self._client.post(url, json=body)
         except httpx.HTTPError as exc:

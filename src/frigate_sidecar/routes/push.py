@@ -8,14 +8,17 @@ identity"). Nothing here is exempted in `auth.EXEMPT_PATHS`.
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from frigate_sidecar import db
 from frigate_sidecar.push import library, store
 from frigate_sidecar.push.situations import Situation
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/push", tags=["push"])
 
@@ -42,8 +45,13 @@ class DeviceRegistration(BaseModel):
     `situations` is what keeps that device on the v1 firing path.
 
     Unknown fields are ignored rather than rejected -- the app ships on its
-    own cadence and a newer build must not 422 against an older sidecar.
+    own cadence and a newer build must not 422 against an older sidecar. They
+    are *logged* though (names only, never values): silently dropping a field
+    the app believes it sent is how `push_to_start_token` spent a day looking
+    like an app-side bug when the sidecar simply hadn't learned the name yet.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     bundle_id: str
     # Not optional, not inferred (spec §1) -- sandbox and production APNs are
@@ -65,8 +73,13 @@ class DeviceRegistration(BaseModel):
     # [] is a request to clear them.
     snoozes: list[dict[str, Any]] | None = None
 
-    # Accepted, persisted, and deliberately unread this phase (handoff's
-    # "out of scope": Phase 2's Live Activities, Phase 4's digest and LLM).
+    # -- Phase 2 --
+    # One per app install, rotates on reinstall; creates Live Activities.
+    # Absent means this device isn't ready for them, and its Present-tier
+    # situations fall back to alert pushes.
+    push_to_start_token: str = ""
+
+    # Accepted, persisted, and deliberately unread (Phase 4's digest and LLM).
     live_activity_token: str = ""
     morning_digest: dict[str, Any] | None = None
     llm: dict[str, Any] | None = None
@@ -88,6 +101,22 @@ class SnoozeRequest(BaseModel):
 
 class SituationTestRequest(BaseModel):
     apns_token: str
+
+
+class ActivityTokenUpload(BaseModel):
+    """`POST /v1/push/activity/token` (Phase 2 plan, "Push tokens").
+
+    Carries both identities on purpose: `activity_id` is what the app knows
+    and what the delete endpoint addresses, while
+    `(apns_token, situation_id, track_id)` is what the MQTT stream can look an
+    activity up by when it has an update to send.
+    """
+
+    apns_token: str
+    situation_id: str
+    track_id: str
+    activity_id: str
+    token: str
 
 
 def _validate_scope(scope: str) -> str:
@@ -124,6 +153,13 @@ async def register_device(
     otherwise look enabled in the app and never fire.
     """
     settings = request.app.state.settings
+    extras = sorted(body.model_extra or ())
+    if extras:
+        logger.info(
+            "push: registration for %s carried field(s) this sidecar does not "
+            "know: %s -- accepted and dropped",
+            store.device_id_for_token(apns_token), ", ".join(extras),
+        )
     situations = [s for s in body.situations if isinstance(s, dict)]
     parsed = [s for s in (Situation.from_dict(s) for s in situations) if s is not None]
     schema_version = 2 if parsed else body.schema_version
@@ -146,17 +182,27 @@ async def register_device(
             live_activity_token=body.live_activity_token,
             morning_digest=body.morning_digest,
             llm=body.llm,
+            push_to_start_token=body.push_to_start_token,
         )
         if body.snoozes is not None:
             store.replace_snoozes(conn, apns_token=apns_token, snoozes=body.snoozes)
         conn.commit()
+        # Read back rather than echoing the request: a PUT that omits
+        # `push_to_start_token` keeps the one already stored, so the body alone
+        # can't answer "can this device run Live Activities".
+        stored = store.get_device(conn, apns_token)
     finally:
         conn.close()
+    # Echo back what the sidecar will actually do with this device, including
+    # whether Live Activities are available to it -- the app-side token flow is
+    # asynchronous, so "did my push-to-start token land" is a real question
+    # with no other way to answer it.
     return {
         "registered": True,
         "device_id": device_id,
         "schema_version": schema_version,
         "situations_accepted": len(parsed),
+        "live_activities": bool(stored and stored.can_live_activity),
     }
 
 
@@ -373,6 +419,65 @@ async def test_situation_push(
             },
         )
     return {"sent": True, "situation_id": situation_id}
+
+
+@router.post("/activity/token")
+async def upload_activity_token(
+    body: ActivityTokenUpload, request: Request
+) -> dict[str, Any]:
+    """The app hands over a Live Activity's own push token (Phase 2).
+
+    iOS mints this token *after* creating the activity from the start push, so
+    there is always a window where an activity is on screen that the sidecar
+    cannot yet update. That is normal: updates resume on the next observation
+    once this lands.
+
+    Keyed on `activity_id` (what the app knows) and looked up on
+    `(apns_token, situation_id, track_id)` (what the MQTT stream knows) --
+    which is why the body carries both.
+    """
+    settings = request.app.state.settings
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        if store.get_device(conn, body.apns_token) is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": _ERR_DEVICE_NOT_FOUND, "message": "token not registered"},
+            )
+        store.attach_activity_token(
+            conn,
+            activity_id=body.activity_id,
+            apns_token=body.apns_token,
+            situation_id=body.situation_id,
+            track_id=body.track_id,
+            token=body.token,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"accepted": True, "activity_id": body.activity_id}
+
+
+@router.delete("/activity/token/{activity_id}")
+async def delete_activity_token(
+    activity_id: Annotated[str, Path(min_length=1)], request: Request
+) -> dict[str, Any]:
+    """The app ended the activity locally (user swiped it away, or its own
+    lifecycle finished).
+
+    Drops the row outright rather than marking it ended: there is nothing left
+    to send an end push to, and leaving a tokened row behind would have the
+    sweeper try. Idempotent -- an unknown id is still a 200, since the end
+    state either way is "the sidecar isn't tracking that activity".
+    """
+    settings = request.app.state.settings
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        removed = store.delete_activity(conn, activity_id)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"deleted": True, "activity_id": activity_id, "was_tracked": removed}
 
 
 @router.get("/thumbnail/{handle}")

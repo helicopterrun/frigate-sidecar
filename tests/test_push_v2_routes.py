@@ -324,3 +324,18 @@ def test_thumbnail_requires_auth_like_every_other_v1_route(
     settings.sidecar.require_frigate_auth = True
     authed = TestClient(create_app(settings))
     assert authed.get("/v1/push/thumbnail/h_x").status_code in (401, 403)
+
+
+def test_unknown_registration_fields_are_logged_not_swallowed(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Silently dropping a field the app believes it sent is how a missing
+    `push_to_start_token` looks like an app-side bug for a day."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="frigate_sidecar.routes.push"):
+        r = _register(client, some_future_field={"a": 1}, another_one="x")
+    assert r.status_code == 200
+    assert "another_one, some_future_field" in caplog.text
+    # Names only -- a field the sidecar doesn't understand may still be a token.
+    assert "\"a\": 1" not in caplog.text

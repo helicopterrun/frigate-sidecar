@@ -99,7 +99,16 @@ class Device:
     timezone: str = ""  # IANA name; "" = fall back to the sidecar's clock
     location: tuple[float, float] | None = None  # (lat, lon); Phase 5
     situations: tuple[Situation, ...] = field(default_factory=tuple)
-    live_activity_token: str = ""  # Phase 2, persisted and unread
+    live_activity_token: str = ""  # superseded by push_to_start_token; unread
+    #: Phase 2: one per app install, creates Live Activities. Empty means this
+    #: device can't run them, and its Present-tier situations fall back to
+    #: alert pushes ("the app works without Phase 2").
+    push_to_start_token: str = ""
+
+    @property
+    def can_live_activity(self) -> bool:
+        """Whether Phase 2's Live Activity path is available to this device."""
+        return bool(self.push_to_start_token)
 
     @property
     def uses_situations(self) -> bool:

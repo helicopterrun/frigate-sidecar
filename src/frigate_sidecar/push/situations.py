@@ -62,8 +62,67 @@ logger = logging.getLogger(__name__)
 
 TIERS = ("ambient", "present", "interrupt")
 
-#: The only tier with a delivery surface this phase (plan §10, Phase 1).
-DELIVERABLE_TIERS = ("interrupt",)
+#: Tiers with a delivery surface. `interrupt` buzzes (Phase 1); `present`
+#: lives in a Live Activity (Phase 2). `ambient` is the widget surface and
+#: waits for Phase 3.
+DELIVERABLE_TIERS = ("interrupt", "present")
+
+#: Live Activity stages (Phase 2 plan, `ContentState.stage`). They drive the
+#: app's visual language, so the strings are a wire contract, not an internal
+#: enum: minimal while `arriving`, timer + snapshot at `present`, red-badged
+#: once `escalated`, fading at `ending`.
+STAGE_ARRIVING = "arriving"
+STAGE_PRESENT = "present"
+STAGE_ESCALATED = "escalated"
+STAGE_ENDING = "ending"
+STAGES = (STAGE_ARRIVING, STAGE_PRESENT, STAGE_ESCALATED, STAGE_ENDING)
+
+
+@dataclass(frozen=True)
+class Escalation:
+    """When a Present situation crosses the interrupt bar (plan §2).
+
+    `on` is one of the plan §8 forms:
+
+    * `loiter_exceeds:<seconds>` -- dwell reached the bar
+    * `audio_event`             -- one of the situation's `audio_events` fired
+    * `sub_label_unknown`       -- Frigate recognised no face/plate for the
+                                   track (Phase 5 owns the allow/deny lists;
+                                   this trigger is the plumbing landing early,
+                                   per the Phase 2 plan's own note)
+    """
+
+    from_tier: str = "present"
+    to_tier: str = "interrupt"
+    kind: str = ""  # "loiter_exceeds" | "audio_event" | "sub_label_unknown"
+    threshold: float = 0.0
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> Escalation | None:
+        if not isinstance(raw, dict):
+            return None
+        on = str(raw.get("on") or "").strip()
+        if not on:
+            return None
+        kind, _, value = on.partition(":")
+        kind = kind.strip()
+        if kind not in ("loiter_exceeds", "audio_event", "sub_label_unknown"):
+            logger.info("push: ignoring unrecognised escalation trigger %r", on)
+            return None
+        try:
+            threshold = float(value) if value else 0.0
+        except ValueError:
+            threshold = 0.0
+        return cls(
+            from_tier=str(raw.get("from_tier") or "present"),
+            to_tier=str(raw.get("to_tier") or "interrupt"),
+            kind=kind,
+            threshold=threshold,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        on = f"{self.kind}:{self.threshold:g}" if self.kind == "loiter_exceeds" else self.kind
+        return {"from_tier": self.from_tier, "to_tier": self.to_tier, "on": on}
 
 
 def _str_tuple(value: Any) -> tuple[str, ...]:
@@ -94,14 +153,18 @@ class Situation:
     time_of_day: tuple[int, int] | None = None
     sound: str = ""
 
-    # -- accepted and ignored in Phase 1 (see module docstring) --
+    #: Phase 2: when a Present-tier situation crosses the interrupt bar.
+    escalation: Escalation | None = None
+    #: Phase 2 (plan §4 lever 5): also start the activity on Frigate
+    #: `detection`-severity reviews, ~500ms ahead of the `alert` promotion.
+    detection_tier_early_fire: bool = False
+
+    # -- accepted and ignored (see module docstring) --
     require_stationary: bool = False
     sub_label_allow: tuple[str, ...] = ()
     sub_label_deny: tuple[str, ...] = ()
     night_tightening: bool = False
-    escalation: dict[str, Any] | None = None
     llm_enrich: bool = False
-    detection_tier_early_fire: bool = False
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Situation | None:
@@ -139,7 +202,6 @@ class Situation:
         except (TypeError, ValueError):
             loiter = 0.0
 
-        escalation = raw.get("escalation")
         return cls(
             id=sid,
             name=str(raw.get("name") or sid),
@@ -155,7 +217,7 @@ class Situation:
             sub_label_allow=_str_tuple(raw.get("sub_label_allow")),
             sub_label_deny=_str_tuple(raw.get("sub_label_deny")),
             night_tightening=bool(raw.get("night_tightening")),
-            escalation=escalation if isinstance(escalation, dict) else None,
+            escalation=Escalation.from_dict(raw.get("escalation")),
             llm_enrich=bool(raw.get("llm_enrich")),
             detection_tier_early_fire=bool(raw.get("detection_tier_early_fire")),
         )
@@ -184,7 +246,7 @@ class Situation:
                 "start_hour": self.time_of_day[0], "end_hour": self.time_of_day[1]
             }
         if self.escalation is not None:
-            out["escalation"] = self.escalation
+            out["escalation"] = self.escalation.to_dict()
         return out
 
 
@@ -239,6 +301,10 @@ class TrackState:
     #: intent -- "the same dwell doesn't fire twice" -- is preserved exactly,
     #: at the granularity that intent actually lives at.
     fired: set[tuple[str, str]] = field(default_factory=set)
+    #: `(apns_token, situation_id) -> stage`, for Present-tier situations with
+    #: a Live Activity in flight. Per device as well as per situation because
+    #: each device runs its own activity for the same real-world moment.
+    stages: dict[tuple[str, str], str] = field(default_factory=dict)
 
 
 class TrackStore:
@@ -377,6 +443,19 @@ class TrackStore:
     def has_fired(self, camera: str, track_id: str, apns_token: str, situation_id: str) -> bool:
         state = self._tracks.get((camera, track_id))
         return bool(state and (apns_token, situation_id) in state.fired)
+
+    def stage(self, camera: str, track_id: str, apns_token: str, situation_id: str) -> str | None:
+        state = self._tracks.get((camera, track_id))
+        if state is None:
+            return None
+        return state.stages.get((apns_token, situation_id))
+
+    def set_stage(
+        self, camera: str, track_id: str, apns_token: str, situation_id: str, stage: str
+    ) -> None:
+        state = self._tracks.get((camera, track_id))
+        if state is not None:
+            state.stages[(apns_token, situation_id)] = stage
 
     def reap(self, *, now: float) -> int:
         """Drop tracks untouched for `reap_after_s` (handoff item 8)."""
@@ -538,6 +617,92 @@ def matches(
     )
 
 
+def matches_conditions(
+    situation: Situation,
+    device: Device,
+    event: ReviewEvent,
+    track_id: str,
+    tracks: TrackStore,
+    *,
+    now: float,
+) -> Match | None:
+    """`matches()` without the loiter gate -- "is this situation *happening*".
+
+    A Present-tier situation starts its Live Activity the moment the object is
+    in the zone, not when it has dwelled long enough to be worth a buzz: plan
+    §3's `at-the-door` walkthrough has the LA appear at "0:04" and escalate at
+    five seconds. Loiter still decides the *interrupt*, which is what
+    `escalation_reached` answers.
+
+    Everything else -- camera, label, zone, live occupancy, time of day -- is
+    identical to `matches()`, so a situation that could never fire an alert
+    can never open an activity either.
+    """
+    if situation.cameras and event.camera not in situation.cameras:
+        return None
+
+    label = _first_match(situation.labels, event.labels)
+    if situation.labels and label is None:
+        return None
+
+    if not in_time_window(situation.time_of_day, now, device.timezone):
+        return None
+
+    audio = (
+        next((a for a in event.audio if a in situation.audio_events), None)
+        if situation.audio_events
+        else None
+    )
+
+    zone = _first_match(situation.zones, event.zones)
+    if situation.zones and zone is None:
+        return None if audio is None else Match(
+            situation=situation, track_id=track_id, dwell_s=0.0,
+            label=label or "", zone="", audio=audio,
+        )
+
+    origin = tracks.dwell_origin(event.camera, track_id, situation.zones)
+    if origin is None and situation.zones:
+        return None if audio is None else Match(
+            situation=situation, track_id=track_id, dwell_s=0.0,
+            label=label or "", zone="", audio=audio,
+        )
+
+    return Match(
+        situation=situation,
+        track_id=track_id,
+        dwell_s=0.0 if origin is None else max(0.0, now - origin),
+        label=label or (event.labels[0] if event.labels else ""),
+        zone=zone or "",
+        audio=audio or "",
+    )
+
+
+def escalation_reached(match: Match, *, sub_label: str = "") -> bool:
+    """Has this Present-tier situation crossed the interrupt bar?
+
+    Only ever true when the situation actually authored an `escalation`
+    block. A Present situation without one is a thing you watch, not a thing
+    that eventually buzzes -- which is the whole point of the tier, and the
+    plan's smallest-interrupt-surface non-negotiable would be violated by
+    inventing a trigger the user never asked for.
+    """
+    rule = match.situation.escalation
+    if rule is None:
+        return False
+    if rule.kind == "loiter_exceeds":
+        # An explicit threshold wins; falling back to the situation's own
+        # loiter keeps `{"on": "loiter_exceeds"}` meaningful rather than
+        # instantly true.
+        bar = rule.threshold or match.situation.loiter_seconds
+        return bool(bar) and match.dwell_s >= bar
+    if rule.kind == "audio_event":
+        return bool(match.audio)
+    if rule.kind == "sub_label_unknown":
+        return not sub_label
+    return False
+
+
 def _first_match(wanted: tuple[str, ...], present: tuple[str, ...]) -> str | None:
     """The first of `present` that `wanted` admits; None if none do. An empty
     `wanted` means "anything", answered with the first present value (or `""`
@@ -556,18 +721,25 @@ def evaluate_device(
     tracks: TrackStore,
     *,
     now: float,
+    tiers: tuple[str, ...] = ("interrupt",),
 ) -> list[Match]:
-    """Every situation of `device` that fires for `event`, one per track.
+    """Every situation of `device` that fires an *alert* for `event`.
 
     A review item can carry several tracked objects; each is evaluated
     separately so two people arriving 30s apart become two notifications
     rather than one collapsed blur (they have distinct track ids, hence
     distinct collapse ids).
+
+    `tiers` defaults to interrupt-only, which is the alert path. Present-tier
+    situations are normally driven by the Live Activity state machine instead
+    -- but a device with no push-to-start token has no activity to drive, and
+    the engine passes `("interrupt", "present")` to fall those back onto this
+    path (Phase 2 handoff item 9, "the app works without Phase 2").
     """
     found: list[Match] = []
     track_ids = event.track_ids or (event.review_id,)
     for situation in device.situations:
-        if situation.tier not in DELIVERABLE_TIERS:
+        if situation.tier not in tiers:
             continue
         for track_id in track_ids:
             if tracks.has_fired(event.camera, track_id, device.apns_token, situation.id):
@@ -578,8 +750,15 @@ def evaluate_device(
     return found
 
 
+def present_situations(device: Device) -> tuple[Situation, ...]:
+    """The device's Present-tier situations -- the ones Phase 2 runs Live
+    Activities for."""
+    return tuple(s for s in device.situations if s.tier == "present")
+
+
 def undeliverable_tiers(device: Device) -> tuple[str, ...]:
-    """Situation ids the device authored at a tier Phase 1 can't deliver.
+    """Situation ids the device authored at a tier with no delivery surface
+    yet -- `ambient`, whose surface is the Phase 3 widget.
 
     Surfaced so the sidecar can say so once per device instead of looking
     like it dropped the notification on the floor.

@@ -26,14 +26,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import sqlite3
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
 
+from frigate_sidecar.push import activity as activity_payload
 from frigate_sidecar.push import store
 from frigate_sidecar.push.decision import (
     devices_for_event,
@@ -43,7 +45,19 @@ from frigate_sidecar.push.decision import (
 )
 from frigate_sidecar.push.models import Device, ReviewEvent
 from frigate_sidecar.push.payload import build_payload
-from frigate_sidecar.push.situations import Match, Situation, TrackStore, evaluate_device
+from frigate_sidecar.push.situations import (
+    STAGE_ARRIVING,
+    STAGE_ENDING,
+    STAGE_ESCALATED,
+    STAGE_PRESENT,
+    Match,
+    Situation,
+    TrackStore,
+    escalation_reached,
+    evaluate_device,
+    matches_conditions,
+    present_situations,
+)
 from frigate_sidecar.push.thumbnails import fetch_thumbnail
 from frigate_sidecar.push.transport import PushTransport, TransportResult
 
@@ -83,6 +97,22 @@ class PushEngine:
     #: kept switchable, but see `push.situations` for why it does not fire on
     #: a real deployment.
     dwell_source: str = "events"
+
+    # -- Phase 2: Live Activities --
+    #: Coalescing floor for update pushes: no more than one per activity per
+    #: this many seconds, however busy the object stream is.
+    activity_update_min_interval_s: float = 3.0
+    #: Quiet period after which a Present situation is considered resolved.
+    activity_resolution_s: float = 30.0
+    #: How long the activity lingers on screen after the end push.
+    activity_dismissal_tail_s: float = 30.0
+    #: The separate, higher LA budget -- iOS meters these independently of
+    #: alerts, and a silent update is nothing like a buzz.
+    activity_updates_per_hour: int = 60
+    #: How long an ended activity's row survives before reaping, measured past
+    #: its dismissal so a late token upload still finds something.
+    activity_reap_after_s: float = 300.0
+
     _http: httpx.AsyncClient | None = None
     _warned_undeliverable: set[str] = field(default_factory=set)
     _last_gc: float = 0.0
@@ -92,6 +122,10 @@ class PushEngine:
     #: between review messages -- which is the normal case, since a person
     #: standing still generates no review traffic -- can still be noticed.
     _pending: dict[tuple[str, str], ReviewEvent] = field(default_factory=dict)
+    #: Latest `sub_label` seen per `(camera, track_id)` off `frigate/events`.
+    #: Feeds the `sub_label_unknown` escalation trigger; Phase 5 owns the
+    #: allow/deny lists that will use the same input.
+    _sub_labels: dict[tuple[str, str], str] = field(default_factory=dict)
 
     def _conn(self) -> sqlite3.Connection:
         from frigate_sidecar import db
@@ -118,6 +152,7 @@ class PushEngine:
             logger.info("push: clearing %d track(s) after mqtt reconnect", len(self.tracks))
         self.tracks.clear()
         self._pending.clear()
+        self._sub_labels.clear()
 
     async def handle_object_payload(self, payload: dict[str, Any]) -> int:
         """Dwell input from one `frigate/events` message.
@@ -137,12 +172,21 @@ class PushEngine:
         key = (obj.camera, obj.track_id)
 
         if obj.msg_type == "end":
+            # Frigate says the object is gone. That is resolution, and a
+            # faster signal than waiting out the quiet timeout -- but the
+            # activities have to be ended before the track state they are
+            # keyed on is dropped.
+            ended = await self._end_activities_for_track(obj.camera, obj.track_id)
             self.tracks.forget(obj.camera, obj.track_id)
             self._pending.pop(key, None)
-            return 0
+            self._sub_labels.pop(key, None)
+            return ended
 
         now = time.time()
         self.tracks.observe_object(obj.camera, obj.track_id, obj.current_zones, now=now)
+        if obj.sub_label:
+            self._sub_labels[key] = obj.sub_label
+        self._touch_activities(obj.camera, obj.track_id, now=now)
         # Housekeeping hangs off this topic as well as the review one: review
         # messages are rare enough on a quiet house (4 in 20 minutes, measured)
         # that hanging GC off them alone would leave handles and send records
@@ -197,6 +241,11 @@ class PushEngine:
                     self._pending[(event.camera, track_id)] = event
             else:
                 self.tracks.observe(event, now=now)
+            if event.severity == "alert":
+                # An early-fire activity started off a `detection` review has
+                # now earned its place; record it so resolution gives it the
+                # full tail rather than the short one (handoff item 8).
+                self._mark_promoted(event)
             sent += await self._dispatch_situations(v2, event, now=now)
 
         self._maybe_gc(now)
@@ -240,6 +289,26 @@ class PushEngine:
 
     # -- v2 path: situation evaluation --------------------------------------
 
+    def _passes_prefilter(self, device: Device, event: ReviewEvent) -> bool:
+        """Handoff (Phase 1) item 7: the v1 filters survive as a cheap
+        pre-filter, so a device that only cares about the doorbell never pays
+        situation evaluation for the garden camera.
+
+        One Phase 2 exception. `detection_tier_early_fire` exists to start an
+        activity on the `detection` review that arrives ~500ms before the
+        `alert` promotion (plan §4 lever 5); a device sitting at the default
+        `min_severity: "alert"` would have that review dropped here, and the
+        opt-in could never do anything. Camera and label still apply.
+        """
+        if matches(device, event):
+            return True
+        if event.severity != "detection":
+            return False
+        if not any(s.detection_tier_early_fire for s in present_situations(device)):
+            return False
+        relaxed = replace(device, min_severity="detection")
+        return matches(relaxed, event)
+
     async def _dispatch_situations(
         self, devices: list[Device], event: ReviewEvent, *, now: float
     ) -> int:
@@ -248,15 +317,19 @@ class PushEngine:
         # same moment, and warming the same JPEG twice would only add latency
         # to the second one.
         groups: dict[tuple[str, str], list[tuple[Device, Match]]] = defaultdict(list)
+        live_activity: list[Device] = []
         for device in devices:
-            # Handoff item 7: the v1 filters survive as a cheap pre-filter, so
-            # a device that only cares about the doorbell never pays situation
-            # evaluation for the garden camera. They no longer fire anything
-            # by themselves.
-            if not matches(device, event):
+            if not self._passes_prefilter(device, event):
                 continue
             self._warn_undeliverable(device)
-            for hit in evaluate_device(device, event, self.tracks, now=now):
+            if device.can_live_activity:
+                live_activity.append(device)
+            # Present-tier situations are the Live Activity path -- unless this
+            # device can't run one, in which case they fall back to an alert
+            # push exactly as an interrupt-tier situation would (Phase 2
+            # handoff item 9: "the app works without Phase 2").
+            tiers = ("interrupt",) if device.can_live_activity else ("interrupt", "present")
+            for hit in evaluate_device(device, event, self.tracks, now=now, tiers=tiers):
                 # Claim the dwell here, while nothing has awaited yet, rather
                 # than after the send returns. Object messages arrive every few
                 # hundred milliseconds and a send takes longer than that, so a
@@ -268,12 +341,11 @@ class PushEngine:
                 )
                 groups[(hit.situation.id, hit.track_id)].append((device, hit))
 
-        if not groups:
-            return 0
-
         sent = 0
         for (situation_id, track_id), items in groups.items():
             sent += await self._fire_group(event, situation_id, track_id, items, now=now)
+        for device in live_activity:
+            sent += await self._drive_activities(device, event, now=now)
         return sent
 
     async def _fire_group(
@@ -411,6 +483,516 @@ class PushEngine:
         finally:
             conn.close()
 
+    # -- Phase 2: Live Activities -------------------------------------------
+
+    async def _drive_activities(
+        self, device: Device, event: ReviewEvent, *, now: float
+    ) -> int:
+        """Run the stage machine for one device's Present-tier situations.
+
+        Called on every message that reaches situation evaluation -- reviews
+        and `frigate/events` alike -- because an activity's whole job is to
+        track something that is still happening. Emits at most one push per
+        (situation, track) per call, and the coalescing window keeps that from
+        becoming a stream.
+        """
+        sent = 0
+        track_ids = event.track_ids or (event.review_id,)
+        for situation in present_situations(device):
+            for track_id in track_ids:
+                sent += await self._drive_one(device, situation, event, track_id, now=now)
+        return sent
+
+    async def _drive_one(
+        self, device: Device, situation: Situation, event: ReviewEvent,
+        track_id: str, *, now: float,
+    ) -> int:
+        stage = self.tracks.stage(event.camera, track_id, device.apns_token, situation.id)
+        hit = matches_conditions(situation, device, event, track_id, self.tracks, now=now)
+
+        if hit is None:
+            # The conditions stopped holding -- the object left the zone, or
+            # the time window closed. Plan §3: "They leave -> LA ends with 30s
+            # tail." Leaving is resolution, and a faster signal than waiting
+            # out the quiet timeout.
+            if stage is not None and stage != STAGE_ENDING:
+                await self._end_activity(
+                    device, situation, event.camera, track_id, reason="left", now=now
+                )
+            return 0
+
+        if stage is None:
+            return await self._start_activity(device, hit, event, now=now)
+
+        if stage == STAGE_ENDING:
+            return 0
+
+        sub_label = self._sub_labels.get((event.camera, track_id), "")
+        if stage != STAGE_ESCALATED and escalation_reached(hit, sub_label=sub_label):
+            return await self._escalate(device, hit, event, now=now)
+
+        return await self._update_activity(device, hit, event, stage=stage, now=now)
+
+    async def _start_activity(
+        self, device: Device, match: Match, event: ReviewEvent, *, now: float
+    ) -> int:
+        """Ask iOS to create the activity, via the device's push-to-start token."""
+        conn = self._conn()
+        try:
+            handle = store.mint_handle(
+                conn, camera=event.camera, event_id=event.event_id,
+                review_id=event.review_id, ttl_s=self.situation_handle_ttl_s,
+                situation_id=match.situation.id, track_id=match.track_id,
+            )
+            snoozed = store.active_snoozes(conn, device.apns_token, now=now)
+            conn.commit()
+        finally:
+            conn.close()
+
+        # A snoozed situation should not sprout a Live Activity either. The
+        # user asked for quiet, and an LA is still a thing appearing on their
+        # lock screen.
+        if (
+            "global" in snoozed
+            or f"situation:{match.situation.id}" in snoozed
+            or f"camera:{event.camera}" in snoozed
+        ):
+            return 0
+
+        # Same parallel warm-up as the alert path: the widget fetches this
+        # thumbnail by handle exactly as the NSE does.
+        warm = asyncio.create_task(
+            self.prewarm_thumbnail(handle, camera=event.camera, event_id=event.event_id)
+        )
+        # The sidecar has no activity id until the app uploads one; it needs a
+        # key now, so it mints its own and the app's `activity_id` is reconciled
+        # onto the same (device, situation, track) tuple when it arrives.
+        activity_id = f"a_{secrets.token_urlsafe(8)}"
+        from_detection = event.severity == "detection"
+        try:
+            payload = activity_payload.build_start(
+                match, handle=handle, camera=event.camera,
+                server_id=self.server_id, now=now,
+            )
+            result = await self.transport.send_live_activity(
+                device, token=device.push_to_start_token, payload=payload,
+                collapse_id=match.collapse_id, event="start",
+            )
+        finally:
+            with __import__("contextlib").suppress(Exception):
+                await warm
+
+        if not result.ok:
+            logger.warning(
+                "push: LA start failed for device %s situation %s: %s",
+                device.device_id, match.situation.id, result.error,
+            )
+            return 0
+
+        conn = self._conn()
+        try:
+            store.open_activity(
+                conn, activity_id=activity_id, apns_token=device.apns_token,
+                situation_id=match.situation.id, track_id=match.track_id,
+                camera=event.camera, collapse_id=match.collapse_id, handle=handle,
+                from_detection=from_detection, now=now,
+            )
+            store.touch_activity(
+                conn, activity_id, pushed=True, dwell_seconds=int(match.dwell_s), now=now
+            )
+            store.record_activity_send(conn, activity_id=activity_id, now=now)
+            conn.commit()
+        finally:
+            conn.close()
+        self.tracks.set_stage(
+            event.camera, match.track_id, device.apns_token, match.situation.id,
+            STAGE_ARRIVING,
+        )
+        logger.info(
+            "push: LA start situation=%s track=%s device=%s activity=%s%s",
+            match.situation.id, match.track_id, device.device_id, activity_id,
+            " (early-fire off a detection review)" if from_detection else "",
+        )
+        return 1
+
+    async def _update_activity(
+        self, device: Device, match: Match, event: ReviewEvent, *, stage: str, now: float
+    ) -> int:
+        """A silent state change on the per-activity token."""
+        conn = self._conn()
+        try:
+            row = store.find_activity(
+                conn, apns_token=device.apns_token,
+                situation_id=match.situation.id, track_id=match.track_id,
+            )
+        finally:
+            conn.close()
+        if row is None or not row["token"]:
+            # iOS hasn't handed the app a per-activity token yet (or the app
+            # hasn't uploaded it). The activity is on screen and will catch up
+            # on the next observation; there is nothing to send it to now.
+            return 0
+
+        next_stage = STAGE_PRESENT if stage == STAGE_ARRIVING else stage
+        # Coalesce: item 5 caps this at one push per 3s per activity. Without
+        # it a busy track would emit five pushes a second against an iOS
+        # budget that is not generous.
+        if now - float(row["last_push_at"] or 0) < self.activity_update_min_interval_s:
+            return 0
+        if next_stage == stage and int(match.dwell_s) == int(row["dwell_seconds"]):
+            # Nothing the device doesn't already show.
+            return 0
+        if not self._activity_budget_ok(row["activity_id"], now=now):
+            return 0
+
+        payload = activity_payload.build_update(
+            match, stage=next_stage,
+            thumbnail_revision=int(row["thumbnail_revision"]), now=now,
+        )
+        result = await self.transport.send_live_activity(
+            device, token=row["token"], payload=payload,
+            collapse_id=match.collapse_id, event="update",
+        )
+        if not result.ok:
+            self._handle_activity_failure(row, result)
+            return 0
+
+        conn = self._conn()
+        try:
+            store.touch_activity(
+                conn, row["activity_id"], stage=next_stage, pushed=True,
+                dwell_seconds=int(match.dwell_s), now=now,
+            )
+            store.record_activity_send(conn, activity_id=row["activity_id"], now=now)
+            conn.commit()
+        finally:
+            conn.close()
+        self.tracks.set_stage(
+            event.camera, match.track_id, device.apns_token, match.situation.id, next_stage
+        )
+        return 1
+
+    async def _escalate(
+        self, device: Device, match: Match, event: ReviewEvent, *, now: float
+    ) -> int:
+        """The Present situation crossed the interrupt bar.
+
+        Exactly one alert push, carrying the *same* `apns-collapse-id` the
+        activity was started with, so iOS routes it to the visible activity
+        instead of stacking a new banner -- one thing evolving, not two events
+        (plan §2). The alert also carries the new `content_state` so the app
+        can move the activity to `.escalated` on the same transition rather
+        than waiting for a follow-up push.
+        """
+        conn = self._conn()
+        try:
+            row = store.find_activity(
+                conn, apns_token=device.apns_token,
+                situation_id=match.situation.id, track_id=match.track_id,
+            )
+        finally:
+            conn.close()
+
+        # Consume the transition *before* gating. Object messages arrive
+        # several times a second, so an escalation left retryable would call
+        # `_gate` on every one of them -- and each rate-limited call bumps the
+        # suppressed counter, turning "+1 more" into "+2000 more" for a single
+        # situation that buzzed once. Phase 1 avoids this by claiming the dwell
+        # before the gate; this is the same move at the stage level.
+        self.tracks.set_stage(
+            event.camera, match.track_id, device.apns_token, match.situation.id,
+            STAGE_ESCALATED,
+        )
+        self.tracks.mark_fired(
+            event.camera, match.track_id, device.apns_token, match.situation.id
+        )
+
+        gate = self._gate(device, match, event, now=now)
+        if gate is None:
+            return 0
+
+        revision = int(row["thumbnail_revision"]) + 1 if row else 1
+        handle = row["handle"] if row else ""
+        if not handle:
+            conn = self._conn()
+            try:
+                handle = store.mint_handle(
+                    conn, camera=event.camera, event_id=event.event_id,
+                    review_id=event.review_id, ttl_s=self.situation_handle_ttl_s,
+                    situation_id=match.situation.id, track_id=match.track_id,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            await self.prewarm_thumbnail(
+                handle, camera=event.camera, event_id=event.event_id
+            )
+
+        payload = build_payload(
+            match, handle=handle, server_id=self.server_id, suppressed=gate, now=now
+        )
+        payload["content_state"] = activity_payload.content_state(
+            match, stage=STAGE_ESCALATED, thumbnail_revision=revision
+        )
+        result = await self.transport.send_situation(
+            device, payload=payload, collapse_id=match.collapse_id
+        )
+        if not result.ok:
+            to_prune: list[str] = []
+            self._account(device, result, to_prune)
+            if to_prune:
+                self._prune(to_prune)
+            elif not result.unregistered:
+                # A transport blip is the one failure worth retrying: hand the
+                # transition back so the next observation tries again. Snooze
+                # and the rate limit, above, stay consumed.
+                self.tracks.set_stage(
+                    event.camera, match.track_id, device.apns_token,
+                    match.situation.id, STAGE_PRESENT,
+                )
+                self.tracks.unmark_fired(
+                    event.camera, match.track_id, device.apns_token, match.situation.id
+                )
+            return 0
+
+        self._record_sent(device, match, now=now)
+        if row is not None:
+            conn = self._conn()
+            try:
+                store.touch_activity(
+                    conn, row["activity_id"], stage=STAGE_ESCALATED,
+                    thumbnail_revision=revision, dwell_seconds=int(match.dwell_s), now=now,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        logger.info(
+            "push: LA escalation situation=%s track=%s device=%s collapse_id=%s",
+            match.situation.id, match.track_id, device.device_id, match.collapse_id,
+        )
+        return 1
+
+    async def _end_activity(
+        self,
+        device: Device,
+        situation: Situation,
+        camera: str,
+        track_id: str,
+        *,
+        reason: str,
+        now: float,
+        row: Any = None,
+    ) -> int:
+        """Resolution: end the activity with a tail so it fades rather than
+        vanishing."""
+        if row is None:
+            conn = self._conn()
+            try:
+                row = store.find_activity(
+                    conn, apns_token=device.apns_token,
+                    situation_id=situation.id, track_id=track_id,
+                )
+            finally:
+                conn.close()
+        self.tracks.set_stage(camera, track_id, device.apns_token, situation.id, STAGE_ENDING)
+        if row is None:
+            return 0
+
+        # An early-fire activity that never earned its alert promotion gets a
+        # shorter tail: it was a guess, and it should leave quickly once the
+        # guess doesn't pan out (handoff item 8).
+        unpromoted = bool(row["from_detection"]) and not bool(row["promoted"])
+        tail = (
+            activity_payload.UNPROMOTED_DISMISSAL_TAIL_S if unpromoted
+            else self.activity_dismissal_tail_s
+        )
+
+        sent = 0
+        if row["token"]:
+            match = Match(
+                situation=situation, track_id=track_id,
+                dwell_s=float(row["dwell_seconds"] or 0), label="", zone="",
+            )
+            payload = activity_payload.build_end(
+                match, thumbnail_revision=int(row["thumbnail_revision"]),
+                tail_s=tail, now=now,
+            )
+            result = await self.transport.send_live_activity(
+                device, token=row["token"], payload=payload,
+                collapse_id=row["collapse_id"], event="end",
+            )
+            if result.ok:
+                sent = 1
+            else:
+                logger.warning(
+                    "push: LA end failed for activity %s: %s",
+                    row["activity_id"], result.error,
+                )
+
+        conn = self._conn()
+        try:
+            store.close_activity(conn, row["activity_id"], now=now)
+            conn.commit()
+        finally:
+            conn.close()
+        logger.info(
+            "push: LA end situation=%s track=%s activity=%s reason=%s tail=%.0fs%s",
+            situation.id, track_id, row["activity_id"], reason, tail,
+            " (unpromoted early-fire)" if unpromoted else "",
+        )
+        return sent
+
+    def _mark_promoted(self, event: ReviewEvent) -> None:
+        conn = self._conn()
+        try:
+            changed = False
+            for track_id in event.track_ids or (event.review_id,):
+                cur = conn.execute(
+                    "UPDATE push_activities SET promoted = 1 WHERE camera = ? AND track_id = ? "
+                    "AND ended_at IS NULL AND from_detection = 1 AND promoted = 0",
+                    (event.camera, track_id),
+                )
+                changed = changed or cur.rowcount > 0
+            if changed:
+                conn.commit()
+        finally:
+            conn.close()
+
+    def _touch_activities(self, camera: str, track_id: str, *, now: float) -> None:
+        """Mark this track's activities as still-being-observed.
+
+        What keeps the resolution sweeper from ending an activity while the
+        object is plainly still there -- and, equally, what lets it end one the
+        moment the observations stop.
+        """
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT activity_id FROM push_activities WHERE camera = ? AND track_id = ? "
+                "AND ended_at IS NULL", (camera, track_id),
+            ).fetchall()
+            for row in rows:
+                store.touch_activity(conn, row["activity_id"], seen=True, now=now)
+            if rows:
+                conn.commit()
+        finally:
+            conn.close()
+
+    async def _end_activities_for_track(self, camera: str, track_id: str) -> int:
+        """End every open activity for a track Frigate just closed."""
+        now = time.time()
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM push_activities WHERE camera = ? AND track_id = ? "
+                "AND ended_at IS NULL", (camera, track_id),
+            ).fetchall()
+            devices = {d.apns_token: d for d in store.list_devices(conn)} if rows else {}
+        finally:
+            conn.close()
+
+        sent = 0
+        for row in rows:
+            device = devices.get(row["apns_token"])
+            if device is None:
+                continue
+            situation = next(
+                (s for s in device.situations if s.id == row["situation_id"]),
+                Situation(id=row["situation_id"], name=row["situation_id"]),
+            )
+            sent += await self._end_activity(
+                device, situation, camera, track_id, reason="object-ended", now=now, row=row
+            )
+        return sent
+
+    async def sweep_activities(self, *, now: float | None = None) -> int:
+        """End activities whose situation has gone quiet (handoff item 7).
+
+        Resolution is the one transition no incoming message announces --
+        nothing arrives to say "the object stopped being reported" -- so it
+        needs a sweep. Deliberately *not* a keep-alive: this only ever ends
+        activities, never refreshes them, so the non-negotiable that stage
+        transitions are the only thing minting an LA push still holds.
+        """
+        now = time.time() if now is None else now
+        conn = self._conn()
+        try:
+            stale = store.stale_activities(
+                conn, quiet_for=self.activity_resolution_s, now=now
+            )
+            devices = {d.apns_token: d for d in store.list_devices(conn)}
+        finally:
+            conn.close()
+
+        sent = 0
+        for row in stale:
+            device = devices.get(row["apns_token"])
+            if device is None:
+                conn = self._conn()
+                try:
+                    store.delete_activity(conn, row["activity_id"])
+                    conn.commit()
+                finally:
+                    conn.close()
+                continue
+            situation = next(
+                (s for s in device.situations if s.id == row["situation_id"]), None
+            )
+            if situation is None:
+                situation = Situation(id=row["situation_id"], name=row["situation_id"])
+            sent += await self._end_activity(
+                device, situation, row["camera"], row["track_id"],
+                reason="quiet", now=now, row=row,
+            )
+        return sent
+
+    def _activity_budget_ok(self, activity_id: str, *, now: float) -> bool:
+        """The separate, higher LA budget (handoff: 60/hour/activity).
+
+        Kept apart from the alert tier's 10/hour in both directions: a chatty
+        activity must not eat the budget that a genuine interrupt needs, and a
+        silent update is nothing like a buzz.
+        """
+        conn = self._conn()
+        try:
+            count = store.count_activity_sends(
+                conn, activity_id=activity_id, since=now - self.rate_limit_window_s
+            )
+        finally:
+            conn.close()
+        if count >= self.activity_updates_per_hour:
+            logger.info(
+                "push: LA update budget reached for activity %s (%d in the window)",
+                activity_id, count,
+            )
+            return False
+        return True
+
+    def _handle_activity_failure(self, row: Any, result: TransportResult) -> None:
+        """A dead *activity* token is not a dead device.
+
+        410/`BadDeviceToken` on an update means iOS has torn this activity
+        down -- the user swiped it away, or it aged out. Pruning the device row
+        for that (the alert path's response to the same status) would
+        unregister a perfectly good phone.
+        """
+        if result.unregistered:
+            logger.info(
+                "push: activity %s token is dead (%s) -- closing the activity, "
+                "device row untouched", row["activity_id"], result.error,
+            )
+            conn = self._conn()
+            try:
+                store.close_activity(conn, row["activity_id"])
+                conn.commit()
+            finally:
+                conn.close()
+        else:
+            logger.warning(
+                "push: LA update failed for activity %s: %s",
+                row["activity_id"], result.error,
+            )
+
     async def prewarm_thumbnail(self, handle: str, *, camera: str, event_id: str) -> bool:
         """Fetch, shrink, and park the snapshot under `handle` (plan §4 lever 1).
 
@@ -504,6 +1086,8 @@ class PushEngine:
         # `end` -- drop those with the track they were waiting on.
         for key in [k for k in self._pending if k not in self.tracks]:
             del self._pending[key]
+        for key in [k for k in self._sub_labels if k not in self.tracks]:
+            del self._sub_labels[key]
         conn = self._conn()
         try:
             handles = store.prune_expired_handles(conn, now=now)
@@ -511,13 +1095,19 @@ class PushEngine:
             # Kept a window past the rate limiter's own so a restart mid-window
             # can still see the sends that came before it.
             sends = store.prune_old_sends(conn, older_than=self.rate_limit_window_s * 2, now=now)
+            # Ended activities outlive their dismissal window by a margin, so a
+            # token upload that arrives just after the end still lands on a row
+            # rather than resurrecting one.
+            activities = store.reap_activities(
+                conn, older_than=self.activity_reap_after_s, now=now
+            )
             conn.commit()
         finally:
             conn.close()
-        if handles or reaped or snoozes or sends:
+        if handles or reaped or snoozes or sends or activities:
             logger.debug(
-                "push: gc dropped %d handle(s), %d track(s), %d snooze(s), %d send record(s)",
-                handles, reaped, snoozes, sends,
+                "push: gc dropped %d handle(s), %d track(s), %d snooze(s), %d send record(s), "
+                "%d activity row(s)", handles, reaped, snoozes, sends, activities,
             )
 
     # -- test pushes ---------------------------------------------------------

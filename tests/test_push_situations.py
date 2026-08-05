@@ -70,9 +70,14 @@ def test_situation_parses_full_section_8_shape() -> None:
     assert (s.id, s.tier, s.loiter_seconds) == ("at-the-door", "interrupt", 5.0)
     assert s.zones == ("porch",) and s.audio_events == ("doorbell",)
     assert s.time_of_day == (22, 7)
-    # Accepted and carried even though this phase never reads them.
+    # Accepted and carried even though nothing reads them yet.
     assert s.night_tightening is True and s.llm_enrich is True
-    assert s.escalation == raw["escalation"]
+    # Phase 2 parses the escalation block rather than carrying the raw dict.
+    assert s.escalation is not None
+    assert s.escalation.kind == "loiter_exceeds" and s.escalation.threshold == 5.0
+    assert s.escalation.to_tier == "interrupt"
+    # Round-trips back to the §8 wire spelling for the starter library.
+    assert s.to_dict()["escalation"]["on"] == "loiter_exceeds:5"
 
 
 def test_situation_without_id_is_dropped_not_fatal() -> None:
