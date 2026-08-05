@@ -26,7 +26,7 @@ NOW = 1_785_000_000.0
 AT_THE_DOOR: dict[str, Any] = {
     "id": "at-the-door", "name": "At the door", "tier": "interrupt",
     "cameras": ["doorbell"], "labels": ["person"], "zones": ["porch"],
-    "loiter_seconds": 5, "sound": "chime",
+    "loiter_seconds": 5, "sound": "at-the-door",
 }
 NEAR_MY_CAR: dict[str, Any] = {
     "id": "near-my-car", "name": "Near my car", "tier": "interrupt",
@@ -143,7 +143,7 @@ def test_dwell_threshold_fires_exactly_one_push(tmp_path: Path) -> None:
     assert payload["aps"]["thread-id"] == "at-the-door"
     assert payload["aps"]["interruption-level"] == "time-sensitive"
     assert payload["aps"]["mutable-content"] == 1
-    assert payload["aps"]["sound"] == "chime.caf"
+    assert payload["aps"]["sound"] == "at-the-door.caf"
     assert payload["handle"].startswith("h_")
     # Collapse id is a header value, keyed on situation + track (plan §8).
     assert transport.sent[0]["collapse_id"] == "at-the-door:t1"

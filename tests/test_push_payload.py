@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 
-from frigate_sidecar.push.library import sound_catalog, sound_file
+from frigate_sidecar.push.library import FALLBACK_SOUND, sound_catalog, sound_file
 from frigate_sidecar.push.payload import (
     APNS_MAX_PAYLOAD_BYTES,
     body_text,
@@ -16,7 +16,7 @@ from frigate_sidecar.push.thumbnails import resize_jpeg
 
 AT_THE_DOOR = Situation(
     id="at-the-door", name="At the door", labels=("person",), zones=("porch",),
-    loiter_seconds=5.0, sound="chime",
+    loiter_seconds=5.0, sound="at-the-door",
 )
 
 
@@ -51,7 +51,7 @@ def test_every_situation_path_stamps_sent_at() -> None:
 def test_payload_matches_section_8() -> None:
     p = build_payload(_match(), handle="h_9f3a", server_id="s_a1b2")
     assert p["aps"]["alert"] == {"title": "At the door", "body": "Person, 6s"}
-    assert p["aps"]["sound"] == "chime.caf"
+    assert p["aps"]["sound"] == "at-the-door.caf"
     assert p["aps"]["thread-id"] == "at-the-door"
     assert p["aps"]["interruption-level"] == "time-sensitive"
     assert p["aps"]["mutable-content"] == 1
@@ -92,13 +92,25 @@ def test_body_carries_the_suppressed_count(  ) -> None:
     assert body_text(_match(), suppressed=30) == "Person, 6s · +30 more"
 
 
-def test_unknown_sound_falls_back_to_the_system_default() -> None:
-    """A missing `.caf` delivers the notification *silently*, which is
-    indistinguishable from a bug at the worst possible moment."""
-    assert sound_file("chime") == "chime.caf"
-    assert sound_file("no-such-sound") == "default"
-    assert sound_file("") == "default"
-    assert sound_file("default") == "default"
+def test_unknown_sound_falls_back_to_a_file_the_app_actually_ships() -> None:
+    """A `.caf` iOS can't resolve delivers the notification *silently* -- the
+    user told nothing at the moment they most need telling, and nothing
+    anywhere reporting a failure. `general` is a real bundled asset."""
+    assert sound_file("at-the-door") == "at-the-door.caf"
+    assert sound_file("no-such-sound") == "general.caf"
+    assert sound_file("") == "general.caf"
+    # Retired ids from the pre-e5b0fe1 catalog fall back rather than naming a
+    # file that isn't there.
+    assert sound_file("chime") == "general.caf"
+
+
+def test_sound_catalog_is_the_apps_bundled_set() -> None:
+    ids = [s["id"] for s in sound_catalog()]
+    assert ids == [
+        "at-the-door", "package-delivery", "watch", "investigate",
+        "general", "elevated", "urgent", "confirmation",
+    ]
+    assert FALLBACK_SOUND in ids
 
 
 def test_sound_catalog_is_stable_for_unknown_app_versions() -> None:

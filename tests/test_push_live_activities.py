@@ -30,7 +30,7 @@ PTS = "push-to-start-token"
 PACKAGE_DELIVERY: dict[str, Any] = {
     "id": "package-delivery", "name": "Package delivery", "tier": "present",
     "cameras": ["doorbell"], "labels": ["person"], "zones": ["porch"],
-    "loiter_seconds": 3, "sound": "marimba",
+    "loiter_seconds": 3, "sound": "package-delivery",
     "escalation": {"from_tier": "present", "to_tier": "interrupt",
                    "on": "loiter_exceeds:5"},
 }
@@ -377,7 +377,7 @@ def test_escalation_is_one_live_activity_push_that_also_buzzes(tmp_path: Path) -
     aps = push["payload"]["aps"]
     assert aps["content-state"]["stage"] == "escalated"
     assert aps["alert"]["title"] == "Package delivery"
-    assert aps["sound"] == "marimba.caf"  # the situation's own sound
+    assert aps["sound"] == "package-delivery.caf"  # the situation's own sound
     assert aps["interruption-level"] == "time-sensitive"
     # The old alert-shape escalation is gone.
     assert _alert_shape(transport) == []

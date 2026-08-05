@@ -25,7 +25,7 @@ TOKEN = "tok-abc123"
 AT_THE_DOOR: dict[str, Any] = {
     "id": "at-the-door", "name": "At the door", "tier": "interrupt",
     "cameras": ["doorbell"], "labels": ["person"], "zones": ["porch"],
-    "loiter_seconds": 5, "sound": "chime",
+    "loiter_seconds": 5, "sound": "at-the-door",
 }
 
 
