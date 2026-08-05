@@ -32,6 +32,7 @@ from frigate_sidecar.push.payload import APNS_MAX_PAYLOAD_BYTES, body_text, pret
 from frigate_sidecar.push.situations import (
     STAGE_ARRIVING,
     STAGE_ENDING,
+    STAGE_ESCALATED,
     Match,
 )
 
@@ -138,6 +139,46 @@ def build_update(
             "content-state": content_state(
                 match, stage=stage, thumbnail_revision=thumbnail_revision
             ),
+        },
+        "sent_at": round(sent_at, 3),
+    }
+    return _fit(payload)
+
+
+def build_escalation(
+    match: Match,
+    *,
+    sound: str,
+    thumbnail_revision: int = 1,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """The escalation: one push that advances the activity *and* buzzes.
+
+    An `update`-shaped live-activity push carrying an `alert` sub-key at the
+    `aps` level. iOS 17.2+ delivers this as a single event -- the ContentState
+    moves to `.escalated`, the banner shows, the sound plays -- which is what
+    "one thing evolving, not two events" has to mean in practice.
+
+    This replaces the Phase 1-shape alert push the sidecar used to send here.
+    An alert push with a matching `apns-collapse-id` collapses in Notification
+    Center but *cannot* advance a Live Activity's ContentState, so the two
+    surfaces would have drifted apart: a banner saying the situation escalated
+    over an activity still rendering `.present`.
+    """
+    sent_at = time.time() if now is None else now
+    state = content_state(match, stage=STAGE_ESCALATED, thumbnail_revision=thumbnail_revision)
+    payload = {
+        "aps": {
+            "timestamp": int(sent_at),
+            "event": "update",
+            "content-state": state,
+            # The two keys that make this one different from a silent update.
+            "alert": {"title": state["title"], "body": state["subtitle"]},
+            "sound": sound,
+            # Not in the amended plan, kept from plan §3: `.timeSensitive` is
+            # what lets an escalation break through a Focus mode, and an
+            # escalation the user configured is exactly the thing that should.
+            "interruption-level": "time-sensitive",
         },
         "sent_at": round(sent_at, 3),
     }

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from frigate_sidecar.push.situations import Situation
+from frigate_sidecar.push.situations import Escalation, Situation
 
 # Zones and cameras below are *placeholders*, using the plan's own example
 # names (§1). The app's situation editor replaces them with real ones read
@@ -32,12 +32,27 @@ STARTER_SITUATIONS: tuple[Situation, ...] = (
     Situation(
         id="at-the-door",
         name="At the door",
-        tier="interrupt",
+        # Present, not Interrupt, as of Phase 2 -- and this one is the reason
+        # the tier exists. Somebody walking up to the door becomes a Live
+        # Activity with a snapshot and a timer; only if they are still there
+        # five seconds later does it escalate into a buzz. Plan §3's
+        # walkthrough is exactly this situation, and it can't be that while
+        # authored at Interrupt, which fires once and is over.
+        #
+        # Retiering a shipped starter does change behaviour for anyone who had
+        # it enabled: they get a Live Activity where they used to get a banner
+        # at the same five-second mark, and no banner at all if their device
+        # can't run activities... except that the fallback rule covers exactly
+        # that, so those devices keep the old behaviour unchanged.
+        tier="present",
         cameras=("doorbell",),
         labels=("person",),
         zones=("porch",),
         loiter_seconds=5.0,
         audio_events=("doorbell",),
+        escalation=Escalation(
+            from_tier="present", to_tier="escalated", kind="loiter_exceeds", threshold=5.0
+        ),
         sound="chime",
     ),
     Situation(

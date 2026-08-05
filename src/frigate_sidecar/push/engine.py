@@ -43,6 +43,7 @@ from frigate_sidecar.push.decision import (
     parse_object_message,
     parse_review_message,
 )
+from frigate_sidecar.push.library import sound_file
 from frigate_sidecar.push.models import Device, ReviewEvent
 from frigate_sidecar.push.payload import build_payload
 from frigate_sidecar.push.situations import (
@@ -677,12 +678,21 @@ class PushEngine:
     ) -> int:
         """The Present situation crossed the interrupt bar.
 
-        Exactly one alert push, carrying the *same* `apns-collapse-id` the
-        activity was started with, so iOS routes it to the visible activity
-        instead of stacking a new banner -- one thing evolving, not two events
-        (plan §2). The alert also carries the new `content_state` so the app
-        can move the activity to `.escalated` on the same transition rather
-        than waiting for a follow-up push.
+        One `update`-shaped live-activity push carrying an `alert` sub-key and
+        a sound at the `aps` level. iOS 17.2+ delivers that as a single event:
+        the ContentState advances to `.escalated`, the banner shows, the sound
+        plays.
+
+        It is deliberately *not* a Phase 1 alert push any more. An alert with a
+        matching `apns-collapse-id` collapses in Notification Center but cannot
+        advance a Live Activity's ContentState, so the two surfaces drift --
+        a banner announcing the escalation over an activity still rendering
+        `.present` (plan amended, Elsinore `98e447e`).
+
+        The alert shape survives as the fallback for a device that has no
+        activity to escalate: the start push failed, or iOS hasn't handed the
+        app a per-activity token yet. Buzzing without advancing an activity
+        beats not buzzing at all.
         """
         conn = self._conn()
         try:
@@ -724,19 +734,39 @@ class PushEngine:
                 conn.commit()
             finally:
                 conn.close()
-            await self.prewarm_thumbnail(
-                handle, camera=event.camera, event_id=event.event_id
-            )
 
-        payload = build_payload(
-            match, handle=handle, server_id=self.server_id, suppressed=gate, now=now
-        )
-        payload["content_state"] = activity_payload.content_state(
-            match, stage=STAGE_ESCALATED, thumbnail_revision=revision
-        )
-        result = await self.transport.send_situation(
-            device, payload=payload, collapse_id=match.collapse_id
-        )
+        # Refresh the image behind the *existing* handle rather than minting a
+        # new one. `handle` is on the activity's static attributes and cannot
+        # change mid-activity, so a fresh snapshot has to arrive under the same
+        # key -- which is exactly what `thumbnail_revision` is for: the widget
+        # refetches the same URL and gets the newer bytes.
+        await self.prewarm_thumbnail(handle, camera=event.camera, event_id=event.event_id)
+
+        if row is not None and row["token"]:
+            payload = activity_payload.build_escalation(
+                match, sound=sound_file(match.situation.sound),
+                thumbnail_revision=revision, now=now,
+            )
+            result = await self.transport.send_live_activity(
+                device, token=row["token"], payload=payload,
+                collapse_id=match.collapse_id, event="update",
+            )
+        else:
+            # No activity to advance -- the start failed, or iOS hasn't handed
+            # the app a per-activity token yet. Fall back to the alert shape so
+            # the user is still told.
+            logger.info(
+                "push: escalating %s for device %s without a live activity "
+                "(%s) -- falling back to an alert push",
+                match.situation.id, device.device_id,
+                "no activity row" if row is None else "token not uploaded yet",
+            )
+            payload = build_payload(
+                match, handle=handle, server_id=self.server_id, suppressed=gate, now=now
+            )
+            result = await self.transport.send_situation(
+                device, payload=payload, collapse_id=match.collapse_id
+            )
         if not result.ok:
             to_prune: list[str] = []
             self._account(device, result, to_prune)
@@ -755,14 +785,19 @@ class PushEngine:
                 )
             return 0
 
+        # Charged against the alert ceiling either way: this is the thing that
+        # buzzes, and that budget is what protects the user from interrupt
+        # spam regardless of which wire shape carried it.
         self._record_sent(device, match, now=now)
         if row is not None:
             conn = self._conn()
             try:
                 store.touch_activity(
-                    conn, row["activity_id"], stage=STAGE_ESCALATED,
+                    conn, row["activity_id"], stage=STAGE_ESCALATED, pushed=True,
                     thumbnail_revision=revision, dwell_seconds=int(match.dwell_s), now=now,
                 )
+                if row["token"]:
+                    store.record_activity_send(conn, activity_id=row["activity_id"], now=now)
                 conn.commit()
             finally:
                 conn.close()

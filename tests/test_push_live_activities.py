@@ -334,8 +334,28 @@ def test_update_budget_is_separate_from_the_alert_ceiling(tmp_path: Path) -> Non
 # -- escalation --------------------------------------------------------------
 
 
-def test_escalation_is_one_alert_with_the_activitys_collapse_id(tmp_path: Path) -> None:
-    """The non-negotiable: one thing evolving, not two events."""
+def _escalations(transport: LogTransport) -> list[dict]:
+    """LA pushes that also buzz -- an `alert` sub-key on an update shape."""
+    return [
+        s for s in transport.sent
+        if s.get("live_activity") and "alert" in s["payload"]["aps"]
+        and s["payload"]["aps"]["event"] == "update"
+    ]
+
+
+def _alert_shape(transport: LogTransport) -> list[dict]:
+    return [s for s in transport.sent if not s.get("live_activity") and "payload" in s]
+
+
+def test_escalation_is_one_live_activity_push_that_also_buzzes(tmp_path: Path) -> None:
+    """The non-negotiable: one thing evolving, not two events.
+
+    An alert push with a matching collapse-id collapses in Notification Center
+    but cannot advance a Live Activity's ContentState, so the escalation goes
+    out as an update-shaped LA push carrying `alert` + `sound` at the aps
+    level -- one event that moves the activity, shows the banner, plays the
+    sound.
+    """
     db_path = tmp_path / "sidecar.db"
     _register(db_path, "tok", situations=[PACKAGE_DELIVERY], schema_version=2,
               push_to_start_token=PTS)
@@ -349,14 +369,66 @@ def test_escalation_is_one_alert_with_the_activitys_collapse_id(tmp_path: Path) 
     _backdate(engine, 6)  # past the loiter_exceeds:5 bar
     _run(engine.handle_object_payload(_object()))
 
-    alerts = [s for s in transport.sent if not s.get("live_activity") and "payload" in s]
-    assert len(alerts) == 1
-    assert alerts[0]["collapse_id"] == start_collapse
-    assert alerts[0]["payload"]["content_state"]["stage"] == "escalated"
+    escalations = _escalations(transport)
+    assert len(escalations) == 1
+    push = escalations[0]
+    assert push["token"] == "act-token"  # the per-activity token, not the alert one
+    assert push["collapse_id"] == start_collapse
+    aps = push["payload"]["aps"]
+    assert aps["content-state"]["stage"] == "escalated"
+    assert aps["alert"]["title"] == "Package delivery"
+    assert aps["sound"] == "marimba.caf"  # the situation's own sound
+    assert aps["interruption-level"] == "time-sensitive"
+    # The old alert-shape escalation is gone.
+    assert _alert_shape(transport) == []
 
     # And it does not fire again on the next observation.
     _run(engine.handle_object_payload(_object()))
-    assert len([s for s in transport.sent if not s.get("live_activity") and "payload" in s]) == 1
+    assert len(_escalations(transport)) == 1
+
+
+def test_escalation_bumps_the_thumbnail_revision(tmp_path: Path) -> None:
+    """`handle` is static on the activity's attributes and can't change
+    mid-activity, so a fresher snapshot arrives under the same key and the
+    revision is what tells the widget to refetch."""
+    db_path = tmp_path / "sidecar.db"
+    _register(db_path, "tok", situations=[PACKAGE_DELIVERY], schema_version=2,
+              push_to_start_token=PTS)
+    transport = LogTransport()
+    engine = _engine(db_path, transport)
+
+    _arrive(engine, transport)
+    _attach_token(db_path, engine)
+    assert _sent(transport, "start")[0]["payload"]["aps"]["content-state"][
+        "thumbnail_revision"] == 1
+
+    _backdate(engine, 6)
+    _run(engine.handle_object_payload(_object()))
+    assert _escalations(transport)[0]["payload"]["aps"]["content-state"][
+        "thumbnail_revision"] == 2
+
+
+def test_escalation_falls_back_to_an_alert_without_an_activity_token(
+    tmp_path: Path,
+) -> None:
+    """iOS mints the per-activity token after the start push. If the bar is
+    crossed before it lands, buzzing without advancing the activity beats not
+    buzzing at all."""
+    db_path = tmp_path / "sidecar.db"
+    _register(db_path, "tok", situations=[PACKAGE_DELIVERY], schema_version=2,
+              push_to_start_token=PTS)
+    transport = LogTransport()
+    engine = _engine(db_path, transport)
+
+    _arrive(engine, transport)  # no _attach_token: the upload hasn't happened
+    _backdate(engine, 6)
+    _run(engine.handle_object_payload(_object()))
+
+    assert _escalations(transport) == []
+    alerts = _alert_shape(transport)
+    assert len(alerts) == 1
+    assert alerts[0]["payload"]["situation_id"] == "package-delivery"
+    assert alerts[0]["collapse_id"] == _sent(transport, "start")[0]["collapse_id"]
 
 
 def test_no_escalation_without_an_escalation_block(tmp_path: Path) -> None:
@@ -375,7 +447,7 @@ def test_no_escalation_without_an_escalation_block(tmp_path: Path) -> None:
     _backdate(engine, 60)
     _run(engine.handle_object_payload(_object()))
 
-    assert [s for s in transport.sent if not s.get("live_activity")] == []
+    assert _escalations(transport) == [] and _alert_shape(transport) == []
 
 
 def test_audio_event_escalation(tmp_path: Path) -> None:
@@ -393,8 +465,7 @@ def test_audio_event_escalation(tmp_path: Path) -> None:
     _attach_token(db_path, engine)
     _run(engine.handle_event(_review(audio=("doorbell",))))
 
-    alerts = [s for s in transport.sent if not s.get("live_activity") and "payload" in s]
-    assert len(alerts) == 1
+    assert len(_escalations(transport)) == 1
 
 
 def test_sub_label_unknown_escalation(tmp_path: Path) -> None:
@@ -413,13 +484,13 @@ def test_sub_label_unknown_escalation(tmp_path: Path) -> None:
     _attach_token(db_path, engine)
     _backdate(engine, 2)
     _run(engine.handle_object_payload(_object(sub_label="alice")))
-    assert [s for s in transport.sent if not s.get("live_activity")] == []
+    assert _escalations(transport) == []
 
     # ...an unrecognised one does not.
     engine._sub_labels.clear()  # noqa: SLF001
     _backdate(engine, 2)
     _run(engine.handle_object_payload(_object()))
-    assert len([s for s in transport.sent if not s.get("live_activity")]) == 1
+    assert len(_escalations(transport)) == 1
 
 
 # -- resolution --------------------------------------------------------------
@@ -746,7 +817,7 @@ def test_rate_limited_escalation_is_consumed_not_retried(tmp_path: Path) -> None
     for _ in range(25):
         _run(engine.handle_object_payload(_object()))
 
-    assert [s for s in transport.sent if not s.get("live_activity")] == []
+    assert _escalations(transport) == [] and _alert_shape(transport) == []
     conn = db.open_sidecar(db_path)
     suppressed = store.take_suppressed(
         conn, apns_token="tok", situation_id="package-delivery"

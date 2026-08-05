@@ -186,18 +186,25 @@ token, uploaded by the app once iOS mints it, carries updates and the end.
 |---|---|---|
 | conditions first match → `arriving` | start | push-to-start |
 | still dwelling → `present` | update (silent) | per-activity |
-| escalation trigger → `escalated` | **alert**, matching collapse id | alert |
+| escalation trigger → `escalated` | **update-shape LA push + `alert` + `sound`** | per-activity |
 | zone exit / object end / 30s quiet → `ending` | end + `dismissal-date` | per-activity |
 
 - **The activity starts before the loiter threshold.** Loiter decides the
   *interrupt*, not the activity — plan §3 has the LA appear at "0:04" and
   escalate at five seconds.
-- **Escalation is one alert with the activity's own collapse id**, so iOS
-  routes it to the visible LA instead of stacking a banner. The alert also
-  carries `content_state` with `stage: "escalated"` so the app can move the
-  activity on the same transition.
+- **Escalation is one live-activity push that also buzzes** — an `update`
+  shape carrying `alert` and `sound` at the `aps` level, which iOS 17.2+
+  delivers as a single event: ContentState advances, banner shows, sound
+  plays. It is *not* an alert push with a matching collapse id: that collapses
+  in Notification Center but cannot advance a Live Activity's ContentState, so
+  the banner and the activity would drift apart (plan amended, Elsinore
+  `98e447e`). The alert shape survives only as the fallback for a device with
+  no activity to advance — start failed, or the per-activity token hasn't been
+  uploaded yet. Buzzing without advancing beats not buzzing.
 - **Only Present-tier situations run activities.** Interrupt-tier ones are
-  Phase 1, unchanged.
+  Phase 1, unchanged. As of Phase 2 the `at-the-door` starter ships as Present
+  with `escalation: loiter_exceeds:5` — the LA experience's poster child, and
+  it cannot be that while authored at Interrupt, which fires once and is over.
 - **Fallback:** a device with situations but no `push_to_start_token` gets
   Phase 1-shape alert pushes for its Present-tier situations. "The app works
   without Phase 2."

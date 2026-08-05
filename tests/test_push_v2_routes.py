@@ -339,3 +339,28 @@ def test_unknown_registration_fields_are_logged_not_swallowed(
     assert "another_one, some_future_field" in caplog.text
     # Names only -- a field the sidecar doesn't understand may still be a token.
     assert "\"a\": 1" not in caplog.text
+
+
+def test_at_the_door_is_a_present_tier_starter_that_escalates(client: TestClient) -> None:
+    """Phase 2 retiers the poster-child starter: a Live Activity when someone
+    walks up, a buzz only if they are still there five seconds later."""
+    lib = {s["id"]: s for s in client.get("/v1/push/situations/library").json()}
+    door = lib["at-the-door"]
+    assert door["tier"] == "present"
+    assert door["escalation"] == {
+        "from_tier": "present", "to_tier": "escalated", "on": "loiter_exceeds:5",
+    }
+    assert door["loiter_seconds"] == 5.0
+
+
+def test_every_present_starter_declares_how_it_escalates_or_stays_quiet(
+    client: TestClient,
+) -> None:
+    """A Present starter with no escalation block never buzzes -- fine, but it
+    should be a decision rather than an oversight, so this pins which is which."""
+    lib = {s["id"]: s for s in client.get("/v1/push/situations/library").json()}
+    escalating = {k for k, v in lib.items() if v.get("escalation")}
+    assert escalating == {"at-the-door"}
+    assert {k for k, v in lib.items() if v["tier"] == "present"} == {
+        "at-the-door", "package-delivery", "unknown-vehicle-parked",
+    }
