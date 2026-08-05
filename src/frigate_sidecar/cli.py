@@ -609,7 +609,7 @@ def scrub_verify(
 @scrub_app.command("prune")
 def scrub_prune(
     camera: str | None = typer.Option(None, "--camera"),
-    drop_interval: list[float] = typer.Option(
+    drop_interval: list[float] = typer.Option(  # noqa: B008 -- typer's list-option idiom
         [],
         "--drop-interval",
         help="Unconditionally delete every bucket/sheet at exactly this interval_s, "
