@@ -13,6 +13,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install ffmpeg
+        # The scrub-generator tests probe GOP cadence with ffprobe; without it
+        # they fail with KeyError on profile.gop_s.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Install
         run: pip install -e .[dev]
       - name: Lint
