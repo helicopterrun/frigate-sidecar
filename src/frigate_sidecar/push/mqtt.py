@@ -143,6 +143,26 @@ class MqttReviewSubscriber:
             return
         asyncio.run_coroutine_threadsafe(self.engine.handle_review_payload(payload), loop)
 
+    def _handle_events_message(self, payload_bytes: bytes) -> None:
+        """`frigate/events` -- dwell input only, never a push trigger.
+
+        Deliberately does *not* touch `last_seen`: this topic is chatty enough
+        (thousands of messages an hour) that letting it feed the staleness
+        clock would mask a `frigate/reviews` subscription that had silently
+        stopped delivering, which is exactly the outage the backfill exists to
+        catch.
+        """
+        try:
+            payload = json.loads(payload_bytes)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        loop = self._loop
+        if loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(self.engine.handle_object_payload(payload), loop)
+
     def _handle_available_message(self, payload_bytes: bytes) -> None:
         self.last_seen = time.time()
         text = payload_bytes.decode("utf-8", errors="replace").strip()
@@ -154,6 +174,8 @@ class MqttReviewSubscriber:
     def on_message(self, _client: Any, _userdata: Any, msg: mqtt.MQTTMessage) -> None:
         if msg.topic == self.settings.mqtt_topic_reviews:
             self._handle_reviews_message(msg.payload)
+        elif msg.topic == self.settings.mqtt_topic_events:
+            self._handle_events_message(msg.payload)
         elif msg.topic == self.settings.mqtt_topic_available:
             self._handle_available_message(msg.payload)
 
@@ -185,7 +207,13 @@ class MqttReviewSubscriber:
         def _on_connect(c: Any, _u: Any, _f: Any, _rc: Any, _props: Any = None) -> None:
             c.subscribe(self.settings.mqtt_topic_reviews)
             c.subscribe(self.settings.mqtt_topic_available)
+            if self.settings.dwell_source == "events":
+                c.subscribe(self.settings.mqtt_topic_events)
             self.last_seen = time.time()
+            # Track ids are per-Frigate-lifetime: a disconnect may well have
+            # been Frigate restarting, and held dwell state would then be
+            # attributed to whatever object inherits the id (handoff item 8).
+            self.engine.reset_tracks()
 
         client.on_connect = _on_connect
         self._client = client

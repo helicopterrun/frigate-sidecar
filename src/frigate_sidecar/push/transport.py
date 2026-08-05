@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -53,6 +53,26 @@ class PushTransport(Protocol):
         severity: str,
         collapse_id: str,
     ) -> TransportResult: ...
+
+    async def send_situation(
+        self,
+        device: Device,
+        *,
+        payload: dict[str, Any],
+        collapse_id: str,
+    ) -> TransportResult:
+        """One Interrupt-tier situation push (plan §8).
+
+        Distinct from `send()` because the payload is built *here*, not at the
+        relay: a situation's title is its user-authored name and its body
+        names the label and dwell, none of which a fixed severity-keyed
+        template can produce. Plan §8's "Relay boundary" paragraph settles
+        what that means for the privacy line -- the relay forwards these bytes
+        to APNs in flight without persisting, logging, or inspecting them,
+        which is what "content-free **at rest**" has always meant and is how
+        every push service works. The snapshot still never transits it.
+        """
+        ...
 
     async def send_test(self, device: Device) -> TransportResult:
         """One fixed, self-contained test alert to a single device (spec §1).
@@ -107,6 +127,27 @@ class LogTransport:
         )
         return TransportResult(ok=True)
 
+    async def send_situation(
+        self, device: Device, *, payload: dict[str, Any], collapse_id: str
+    ) -> TransportResult:
+        record: dict[str, object] = {
+            "device_id": device.device_id,
+            "environment": device.environment,
+            "payload": payload,
+            "collapse_id": collapse_id,
+            "situation_id": payload.get("situation_id", ""),
+            "handle": payload.get("handle", ""),
+        }
+        self.sent.append(record)
+        alert = payload.get("aps", {}).get("alert", {})
+        logger.info(
+            "push (mock transport): device=%s situation=%s collapse_id=%s title=%r body=%r "
+            "handle=%s -- not delivered anywhere; set push.transport=relay for a real send",
+            device.device_id, payload.get("situation_id"), collapse_id,
+            alert.get("title"), alert.get("body"), payload.get("handle"),
+        )
+        return TransportResult(ok=True)
+
     async def send_test(self, device: Device) -> TransportResult:
         record: dict[str, object] = {
             "device_id": device.device_id,
@@ -144,6 +185,15 @@ class RelayTransport:
     #: invisible so far only because deployments run the mock transport.
     _RELAY_ENVIRONMENT = {"prod": "production", "sandbox": "sandbox"}
 
+    #: How long an idle connection to the relay is kept for reuse. Handoff
+    #: item 15: one long-lived connection per sidecar process, so the first
+    #: push after a quiet hour doesn't pay TLS setup on the interrupt path.
+    #: Cloudflare closes idle edge connections on its own schedule, so this is
+    #: a ceiling on our side, not a guarantee -- and the relay -> APNs hop is
+    #: explicitly not ours to keep warm (Workers don't guarantee outbound
+    #: reuse across isolates).
+    _KEEPALIVE_EXPIRY_S = 600.0
+
     def __init__(
         self,
         base_url: str,
@@ -152,8 +202,27 @@ class RelayTransport:
         timeout: float = 10.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self._client = client or httpx.AsyncClient(timeout=timeout)
+        self._client = client or self._build_client(timeout)
         self._owns_client = client is None
+
+    @classmethod
+    def _build_client(cls, timeout: float) -> httpx.AsyncClient:
+        limits = httpx.Limits(
+            max_keepalive_connections=4, max_connections=8,
+            keepalive_expiry=cls._KEEPALIVE_EXPIRY_S,
+        )
+        try:
+            return httpx.AsyncClient(timeout=timeout, limits=limits, http2=True)
+        except ImportError:
+            # `httpx[http2]` (the `h2` package) isn't installed. HTTP/1.1
+            # keep-alive still reuses the connection, which is where nearly
+            # all of the saving in handoff item 15 comes from -- multiplexing
+            # buys a single-request-at-a-time sender very little.
+            logger.info(
+                "push: h2 not installed, relay connection is HTTP/1.1 keep-alive "
+                "(install frigate-sidecar with the http2 extra for HTTP/2)"
+            )
+            return httpx.AsyncClient(timeout=timeout, limits=limits)
 
     @classmethod
     def _environment(cls, device: Device) -> str:
@@ -186,6 +255,59 @@ class RelayTransport:
         except httpx.HTTPError as exc:
             return TransportResult(ok=False, error=str(exc))
 
+        return self._result(resp)
+
+    async def send_situation(
+        self, device: Device, *, payload: dict[str, Any], collapse_id: str
+    ) -> TransportResult:
+        """POST a fully-built situation payload to `/v1/relay/situation`.
+
+        **A new relay route, and deliberately not `/v1/relay/push`.** That one
+        takes `{handle, severity}` and *builds* the alert text from a fixed
+        severity-keyed template; handing it a situation would deliver a
+        generic "New alert" banner while reporting success -- the failure mode
+        where the wrong thing arrives and nothing says so. A distinct route
+        404s cleanly until the relay ships the matching version, which shows
+        up in the logs and in the app's test button as a plain failure.
+
+        Wire contract the relay must implement:
+
+            POST /v1/relay/situation
+            {
+              "device_token": "<hex>",
+              "environment": "sandbox" | "production",
+              "bundle_id":   "com.houseofpaimon.Elsinore",
+              "payload":     { …the APNs body, forwarded verbatim… },
+              "headers": {
+                "apns-collapse-id": "<situation-id>:<track-id>",
+                "apns-priority":    "10",
+                "apns-push-type":   "alert"
+              }
+            }
+
+        The relay signs the provider JWT, sets `apns-topic` from `bundle_id`,
+        forwards `payload` unchanged, and returns APNs' status (200, or
+        410/400 for a dead token). It does not persist, log, or inspect the
+        payload body -- plan §8's relay boundary.
+        """
+        body = {
+            "device_token": device.apns_token,
+            "environment": self._environment(device),
+            "bundle_id": device.bundle_id,
+            "payload": payload,
+            "headers": {
+                "apns-collapse-id": collapse_id,
+                # Immediate delivery -- these are security alerts, never
+                # battery-deferred background refreshes (plan §3).
+                "apns-priority": "10",
+                "apns-push-type": "alert",
+            },
+        }
+        url = f"{self.base_url}/v1/relay/situation"
+        try:
+            resp = await self._client.post(url, json=body)
+        except httpx.HTTPError as exc:
+            return TransportResult(ok=False, error=str(exc))
         return self._result(resp)
 
     async def send_test(self, device: Device) -> TransportResult:

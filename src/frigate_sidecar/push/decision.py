@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from frigate_sidecar.push.models import SEVERITIES, Device, ReviewEvent
+from frigate_sidecar.push.models import SEVERITIES, Device, ReviewEvent, TrackedObject
 
 _SEVERITY_RANK = {name: rank for rank, name in enumerate(SEVERITIES)}
 
@@ -50,11 +50,16 @@ def parse_review_message(payload: dict[str, Any]) -> ReviewEvent | None:
         return None
 
     data = after.get("data") or {}
-    objects = data.get("objects") or []
-    labels = tuple(str(o) for o in objects if o)
+    if not isinstance(data, dict):
+        data = {}
+    labels = _strings(data.get("objects"))
+    track_ids = _strings(data.get("detections"))
+    event_id = track_ids[0] if track_ids else str(review_id)
 
-    detections = data.get("detections") or []
-    event_id = str(detections[0]) if detections else str(review_id)
+    try:
+        start_time = float(after.get("start_time") or 0.0)
+    except (TypeError, ValueError):
+        start_time = 0.0
 
     return ReviewEvent(
         review_id=str(review_id),
@@ -63,7 +68,53 @@ def parse_review_message(payload: dict[str, Any]) -> ReviewEvent | None:
         labels=labels,
         msg_type=str(msg_type),
         event_id=event_id,
+        zones=_strings(data.get("zones")),
+        track_ids=track_ids,
+        audio=_strings(data.get("audio")),
+        sub_labels=_strings(data.get("sub_labels")),
+        start_time=start_time,
     )
+
+
+def parse_object_message(payload: dict[str, Any]) -> TrackedObject | None:
+    """Parse one `frigate/events` message into dwell input.
+
+    Returns None for anything unusable rather than raising -- this topic is
+    high-rate (thousands of messages an hour on a live house) and a single odd
+    message must never cost the subscriber loop.
+    """
+    msg_type = payload.get("type")
+    if msg_type not in ("new", "update", "end"):
+        return None
+    after = payload.get("after") or payload.get("before") or {}
+    if not isinstance(after, dict):
+        return None
+    track_id = after.get("id")
+    camera = after.get("camera")
+    if not track_id or not camera:
+        return None
+    sub_label = after.get("sub_label")
+    if isinstance(sub_label, (list, tuple)):  # Frigate sends [name, score]
+        sub_label = sub_label[0] if sub_label else ""
+    return TrackedObject(
+        track_id=str(track_id),
+        camera=str(camera),
+        label=str(after.get("label") or ""),
+        current_zones=_strings(after.get("current_zones")),
+        entered_zones=_strings(after.get("entered_zones")),
+        msg_type=str(msg_type),
+        stationary=bool(after.get("stationary")),
+        sub_label=str(sub_label or ""),
+    )
+
+
+def _strings(value: Any) -> tuple[str, ...]:
+    """A `data.*` list reduced to non-empty strings. Frigate sends `[]` for the
+    ones that don't apply and `null` for a few, so both have to be tolerated
+    without dropping the message."""
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(v) for v in value if v not in (None, ""))
 
 
 def matches(device: Device, event: ReviewEvent) -> bool:

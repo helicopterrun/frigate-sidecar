@@ -44,6 +44,23 @@ restatement of the full spec — see that doc for the complete rationale
   could ever have been notified — invisible only while the mock transport is
   in use.
 
+  **Situation pushes need a third relay route.** A situation's title is its
+  user-authored name and its body names the label and dwell, none of which a
+  fixed severity-keyed template can produce — so the sidecar builds the whole
+  APNs body and `send_situation` posts it to `POST
+  {relay_base_url}/v1/relay/situation` as
+  `{device_token, environment, bundle_id, payload, headers}` for the relay to
+  sign and forward verbatim. Deliberately *not* `/v1/relay/push`: that route
+  templates its own text, so handing it a situation would deliver a generic
+  "New alert" banner while reporting success. A separate route 404s cleanly
+  until the relay ships the matching version. **Not yet implemented in
+  elsinore-push-relay** — until it is, situation-tier pushes fail visibly
+  (logged send failure; `502 test_send_failed` from the app's test button)
+  while v1-shape pushes keep working. Plan §8's relay boundary governs: the
+  relay forwards these bytes to APNs in flight without persisting, logging, or
+  inspecting them, which is what "content-free *at rest*" has always meant.
+  Snapshots still never transit it.
+
   **Test push needs a second relay route.** `send_test` posts
   `{device_token, environment}` to `POST {relay_base_url}/v1/relay/test`:
   `/v1/relay/push` validates `handle` as required and templates its text by
@@ -77,6 +94,71 @@ restatement of the full spec — see that doc for the complete rationale
   - Any transport/network error that *isn't* a 410/400 is logged and left
     for the next live event — no retry queue in this version, matching the
     spec's "degrades to no notifications, not a crash" framing.
+
+## Situations (notification-experience plan, Phase 1)
+
+Implements Phase 1 of Elsinore's `notification-experience-plan-2026-08-05.md`:
+the notification primitive moves from "a review item fired" to "a situation is
+happening" — a user-authored rule over camera + label + zone + loiter +
+time-of-day. Everything not matching a situation is silent as far as *push* is
+concerned; the reel and the digests are unaffected.
+
+**Two paths, one deploy.** A device with no `situations` keeps firing exactly
+what it fires today (everything above this section). A device with a non-empty
+`situations` array switches to situation-only evaluation, its v1
+`cameras`/`labels`/`min_severity` surviving as a cheap pre-filter. No phone
+loses a push on upgrade.
+
+- **Registration (v2):** `PUT /v1/push/devices/{token}` additionally accepts
+  `schema_version`, `timezone`, `location`, `situations`, `snoozes`,
+  `live_activity_token`, `morning_digest`, `llm`. The last three are persisted
+  and deliberately unread until Phase 2/4. The response echoes the
+  `schema_version` the sidecar will actually evaluate the device under, plus
+  `situations_accepted` — a rule the sidecar couldn't parse would otherwise
+  look enabled in the app and never fire. Omitting `snoozes` leaves existing
+  ones alone (the app re-registers on every launch; a launch must not cancel a
+  snooze the user set an hour ago). An explicit `[]` clears them.
+- **Evaluation:** `push/situations.py` — pure, dependency-free. Only the
+  `interrupt` tier has a delivery surface this phase; `present` and `ambient`
+  situations parse, persist, and evaluate but do not send, since Live
+  Activities (Phase 2) and widgets (Phase 3) are what deliver them. The
+  sidecar logs once per device rather than dropping them silently.
+- **New endpoints:** `GET /v1/push/situations/library` (starter situations),
+  `GET /v1/push/sounds`, `POST /v1/push/snooze`, `DELETE
+  /v1/push/snooze/{scope}`, `POST /v1/push/test/{situation_id}`, `GET
+  /v1/push/thumbnail/{handle}`.
+- **Rate limiting:** max 10 pushes per situation per device per rolling hour
+  (`push.rate_limit_per_hour`). Beyond it, matches are suppressed silently and
+  the next push that gets through carries a `" · +X more"` suffix. Counted in
+  SQLite, not memory, so bouncing the process can't reset a runaway camera's
+  ceiling.
+- **Pre-warmed thumbnails:** on a match the sidecar pulls the snapshot, resizes
+  to ~320px/q60 (~10–20KB) and parks it under the push's handle for 24h; the
+  NSE fetches it from `GET /v1/push/thumbnail/{handle}` against an already-warm
+  cache. The fetch runs *in parallel* with the send, never in series, and every
+  failure path costs the notification its image rather than its existence.
+
+### Loiter needs `frigate/events`, not `frigate/reviews`
+
+The plan derives dwell by holding a first-seen timestamp against subsequent
+`frigate/reviews` `type: update` messages. Measured against this deployment
+(19.6 min of live traffic, 2026-08-05) that topic published **4 messages**:
+two review items, each a `new` and an `end` ~30s apart, with no `update`
+between them. Frigate publishes a review update when the item's *data* changes
+— a new object, a new zone, a severity promotion — not on a clock, so a person
+standing still is exactly the case that generates no traffic. A loiter
+threshold fed only from there is never re-evaluated and never fires.
+
+`frigate/events` published 2031 messages over the same window (~0.2–0.5s per
+object) and carries `current_zones` — live occupancy, which *drops* a zone when
+the object leaves, unlike the review topic's cumulative `zones`. So dwell comes
+from there: entry timestamps that reset on a real exit, and a tick to
+re-evaluate against.
+
+`frigate/reviews` remains the sole authority on whether anything is
+push-worthy — a `frigate/events` message can only fire a situation for a track
+some review message already declared alert-worthy. Set
+`push.dwell_source: reviews` to restore the literal prescribed behaviour.
 
 ## Decision override from the spec
 

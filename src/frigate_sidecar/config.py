@@ -377,6 +377,9 @@ class PushSection(BaseModel):
     mqtt_client_id: str = "frigate-sidecar-push"
     mqtt_topic_reviews: str = "frigate/reviews"
     mqtt_topic_available: str = "frigate/available"
+    # Dwell input only -- `frigate/reviews` stays the sole authority on
+    # whether anything is push-worthy. See `dwell_source` below.
+    mqtt_topic_events: str = "frigate/events"
     # Reconnect backoff (spec §5, "MQTT broker unreachable from the sidecar").
     reconnect_backoff_s: float = 2.0
     reconnect_backoff_max_s: float = 60.0
@@ -396,6 +399,43 @@ class PushSection(BaseModel):
 
     # -- Handle redemption (spec §3 step 2) --
     handle_ttl_s: float = 3600.0
+
+    # -- Situations (notification-experience plan §8) --
+    # Situation handles carry a pre-warmed thumbnail and outlive the v1 ones:
+    # plan §8 retains them for 24h so a notification the user comes back to
+    # hours later can still redeem its image.
+    situation_handle_ttl_s: float = 86400.0
+    # Plan §6: max N pushes per situation per device per hour (rolling).
+    # Protects against a runaway camera, which is a different problem from
+    # snooze -- that one protects against the user's own choice.
+    rate_limit_per_hour: int = 10
+    rate_limit_window_s: float = 3600.0
+    # Pre-warmed thumbnail (plan §4 lever 1). ~320px/q60 lands around 10-20KB;
+    # the NSE runs under a very tight memory ceiling and the phone may be on a
+    # cold radio, so bigger buys nothing a notification can show.
+    thumbnail_max_edge: int = 320
+    thumbnail_quality: int = 60
+    thumbnail_timeout_s: float = 5.0
+    # Where a situation's loiter check gets its clock and its zone occupancy.
+    #
+    # "events" subscribes to `frigate/events` for dwell only. "reviews" is the
+    # handoff's literal prescription -- dwell advanced solely by
+    # `frigate/reviews` `type: update` messages. Measured on this deployment
+    # (19.6 min, 2026-08-05) that topic published two review items as a `new`
+    # and an `end` 30s apart with no update in between, because Frigate
+    # publishes a review update when the item's *data* changes and a person
+    # standing still changes nothing. A loiter threshold fed only from there
+    # is never re-evaluated and never fires; "events" is the default for that
+    # reason. Neither setting lets the object stream trigger a push on its own.
+    dwell_source: str = "events"
+
+    @field_validator("dwell_source")
+    @classmethod
+    def _known_dwell_source(cls, v: str) -> str:
+        s = v.strip().lower()
+        if s not in ("events", "reviews"):
+            raise ValueError(f"push.dwell_source must be 'events' or 'reviews', got {v!r}")
+        return s
 
     @field_validator("transport")
     @classmethod

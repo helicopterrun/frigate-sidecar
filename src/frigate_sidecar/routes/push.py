@@ -10,11 +10,12 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, Path, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from frigate_sidecar import db
-from frigate_sidecar.push import store
+from frigate_sidecar.push import library, store
+from frigate_sidecar.push.situations import Situation
 
 router = APIRouter(prefix="/v1/push", tags=["push"])
 
@@ -22,9 +23,28 @@ _ERR_HANDLE_NOT_FOUND = "handle_not_found"
 _ERR_DEVICE_NOT_FOUND = "device_not_found"
 _ERR_PUSH_DISABLED = "push_disabled"
 _ERR_TEST_SEND_FAILED = "test_send_failed"
+_ERR_SITUATION_NOT_FOUND = "situation_not_found"
+_ERR_THUMBNAIL_NOT_FOUND = "thumbnail_not_found"
+_ERR_BAD_SCOPE = "bad_scope"
+
+
+class DeviceLocation(BaseModel):
+    lat: float
+    lon: float
 
 
 class DeviceRegistration(BaseModel):
+    """The v2 registration record (notification-experience plan §8).
+
+    Every v1 field keeps its meaning and its default, so a phone running an
+    older app build PUTs exactly what it PUT before and is stored exactly as
+    it was stored before. Everything added below is optional; an omitted
+    `situations` is what keeps that device on the v1 firing path.
+
+    Unknown fields are ignored rather than rejected -- the app ships on its
+    own cadence and a newer build must not 422 against an older sidecar.
+    """
+
     bundle_id: str
     # Not optional, not inferred (spec §1) -- sandbox and production APNs are
     # different endpoints with different trust; the app must read its own
@@ -35,6 +55,57 @@ class DeviceRegistration(BaseModel):
     labels: list[str] = Field(default_factory=list)  # [] = all labels
     min_severity: Literal["alert", "detection"] = "alert"
 
+    # -- v2 --
+    schema_version: int = 1
+    timezone: str = ""  # IANA name, e.g. "America/Los_Angeles"
+    location: DeviceLocation | None = None
+    situations: list[dict[str, Any]] = Field(default_factory=list)
+    # None means "the client didn't mention snoozes", which must leave the
+    # ones it set earlier alone -- see `store.replace_snoozes`. An explicit
+    # [] is a request to clear them.
+    snoozes: list[dict[str, Any]] | None = None
+
+    # Accepted, persisted, and deliberately unread this phase (handoff's
+    # "out of scope": Phase 2's Live Activities, Phase 4's digest and LLM).
+    live_activity_token: str = ""
+    morning_digest: dict[str, Any] | None = None
+    llm: dict[str, Any] | None = None
+
+
+class SnoozeRequest(BaseModel):
+    """`POST /v1/push/snooze` (plan §8).
+
+    `apns_token` identifies the device, because nothing else can: the sidecar's
+    auth is the shared Frigate session, which is per-*user*, and snoozes are
+    per-*device* by design (plan §6 -- snoozing on the iPad must not quiet the
+    iPhone).
+    """
+
+    apns_token: str
+    scope: str  # "situation:<id>" | "camera:<name>" | "global"
+    until_epoch: float
+
+
+class SituationTestRequest(BaseModel):
+    apns_token: str
+
+
+def _validate_scope(scope: str) -> str:
+    scope = scope.strip()
+    if scope == "global":
+        return scope
+    # A prefix with nothing after it ("situation:") would silence nothing
+    # while looking exactly like a snooze that took.
+    if scope.startswith(("situation:", "camera:")) and scope.split(":", 1)[1]:
+        return scope
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "error": _ERR_BAD_SCOPE,
+            "message": "scope must be 'global', 'situation:<id>', or 'camera:<name>'",
+        },
+    )
+
 
 @router.put("/devices/{apns_token}")
 async def register_device(
@@ -44,8 +115,19 @@ async def register_device(
 ) -> dict[str, Any]:
     """Idempotent PUT on the token (spec §1) -- re-registering (relaunch,
     entitlement refresh) overwrites this device's own filter state rather
-    than accumulating duplicate rows that would double-fire alerts."""
+    than accumulating duplicate rows that would double-fire alerts.
+
+    The response echoes how the sidecar will actually evaluate this device:
+    `schema_version: 1` (today's camera+label+severity firing) or `2`
+    (situation-only), plus how many of the submitted situations parsed. A
+    situation the sidecar silently discarded -- no `id`, say -- would
+    otherwise look enabled in the app and never fire.
+    """
     settings = request.app.state.settings
+    situations = [s for s in body.situations if isinstance(s, dict)]
+    parsed = [s for s in (Situation.from_dict(s) for s in situations) if s is not None]
+    schema_version = 2 if parsed else body.schema_version
+
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:
         device_id = store.upsert_device(
@@ -57,11 +139,25 @@ async def register_device(
             cameras=body.cameras,
             labels=body.labels,
             min_severity=body.min_severity,
+            schema_version=schema_version,
+            timezone_name=body.timezone,
+            location=body.location.model_dump() if body.location else None,
+            situations=situations,
+            live_activity_token=body.live_activity_token,
+            morning_digest=body.morning_digest,
+            llm=body.llm,
         )
+        if body.snoozes is not None:
+            store.replace_snoozes(conn, apns_token=apns_token, snoozes=body.snoozes)
         conn.commit()
     finally:
         conn.close()
-    return {"registered": True, "device_id": device_id}
+    return {
+        "registered": True,
+        "device_id": device_id,
+        "schema_version": schema_version,
+        "situations_accepted": len(parsed),
+    }
 
 
 @router.delete("/devices/{apns_token}")
@@ -135,6 +231,182 @@ async def test_push(
             },
         )
     return {"sent": True}
+
+
+@router.get("/situations/library")
+async def situations_library() -> list[dict[str, Any]]:
+    """The starter situations a new user can enable with one tap (plan §1).
+
+    Cameras and zones are placeholders using the plan's own example names --
+    the app's editor replaces them with real ones read from the user's Frigate
+    `/api/config` before registering. A starter left unedited matches only if
+    the user happens to have a zone by that name, which fails silent rather
+    than firehose.
+    """
+    return library.starter_library()
+
+
+@router.get("/sounds")
+async def sounds(app_version: str = Query("")) -> list[dict[str, str]]:
+    """The sound ids a situation's `sound` field may name (plan §3).
+
+    The `.caf` assets ship in the *app* bundle, not here, so the catalog is
+    keyed on `app_version`: advertising a sound an older build doesn't contain
+    would deliver a silent notification, which reads as broken at exactly the
+    wrong moment. Phase 1 ships one catalog for every version.
+    """
+    return library.sound_catalog(app_version)
+
+
+@router.post("/snooze")
+async def create_snooze(body: SnoozeRequest, request: Request) -> dict[str, Any]:
+    """Silence one scope for one device until `until_epoch` (plan §6).
+
+    Sidecar-side because it has to survive an app kill, and because the
+    interactive widget's "Snooze all 15m" must reach the source of truth
+    without the app running at all. Expiry is a timestamp, not a scheduled
+    job: it re-enables itself with nothing to run and nothing to miss if the
+    sidecar was restarted in the meantime.
+    """
+    scope = _validate_scope(body.scope)
+    settings = request.app.state.settings
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        if store.get_device(conn, body.apns_token) is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": _ERR_DEVICE_NOT_FOUND, "message": "token not registered"},
+            )
+        store.set_snooze(
+            conn, apns_token=body.apns_token, scope=scope, until_epoch=body.until_epoch
+        )
+        conn.commit()
+        active = store.list_snoozes(conn, body.apns_token)
+    finally:
+        conn.close()
+    return {"snoozed": True, "scope": scope, "until_epoch": body.until_epoch, "active": active}
+
+
+@router.delete("/snooze/{scope:path}")
+async def delete_snooze(
+    scope: str, request: Request, apns_token: str = Query(..., min_length=1)
+) -> dict[str, Any]:
+    """Lift a snooze early. Idempotent: clearing one that already expired (or
+    never existed) is still a 200, since the end state either way is "not
+    snoozed".
+
+    `{scope:path}` because a scope contains a colon (`situation:at-the-door`)
+    and, for `camera:<name>`, whatever the user named their camera.
+    """
+    settings = request.app.state.settings
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        store.clear_snooze(conn, apns_token=apns_token, scope=scope)
+        conn.commit()
+        active = store.list_snoozes(conn, apns_token)
+    finally:
+        conn.close()
+    return {"unsnoozed": True, "scope": scope, "active": active}
+
+
+@router.post("/test/{situation_id}")
+async def test_situation_push(
+    situation_id: Annotated[str, Path(min_length=1)],
+    body: SituationTestRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """Fire one push for `situation_id` at the calling device (plan §8).
+
+    The device is named in the body rather than inferred from the session:
+    the sidecar's auth is the shared Frigate session, which identifies a
+    *user*, and this endpoint is per-*device* -- there is nothing on the
+    request that could tell two of a user's phones apart.
+
+    Runs the whole real path (handle, thumbnail pre-warm, payload, collapse
+    id, sound), because what the app's Settings button is verifying is that a
+    real situation push arrives looking the way it should. Snooze and the
+    rate-limit ceiling are bypassed and the send isn't charged against the
+    hourly budget -- the user asked for this one.
+    """
+    settings = request.app.state.settings
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        device = store.get_device(conn, body.apns_token)
+    finally:
+        conn.close()
+    if device is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_DEVICE_NOT_FOUND, "message": "token not registered"},
+        )
+
+    situation = next((s for s in device.situations if s.id == situation_id), None)
+    if situation is None:
+        # Falling back to the starter library would test a rule the device
+        # isn't actually registered with, which is the one thing this button
+        # must not quietly do.
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": _ERR_SITUATION_NOT_FOUND,
+                "message": f"device has no situation {situation_id!r}",
+            },
+        )
+
+    engine = getattr(request.app.state, "push_engine", None)
+    if engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": _ERR_PUSH_DISABLED,
+                "message": "push is not enabled on this server (push.enabled=false)",
+            },
+        )
+
+    result = await engine.send_situation_test(device, situation)
+    if not result.ok:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": _ERR_TEST_SEND_FAILED,
+                "message": result.error or "push transport rejected the send",
+            },
+        )
+    return {"sent": True, "situation_id": situation_id}
+
+
+@router.get("/thumbnail/{handle}")
+async def get_thumbnail(handle: str, request: Request) -> Response:
+    """The NSE's pre-warmed snapshot fetch (plan §8).
+
+    Same auth as every other `/v1/` endpoint -- the extension reads the app's
+    session credential from the shared Keychain access group, so there is no
+    second credential and no second login flow (transport spec §3).
+
+    A miss is a 404 and the app delivers the alert without an image: the
+    visible push is the promise, the image is not.
+    """
+    settings = request.app.state.settings
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        jpeg = store.get_thumbnail(conn, handle)
+    finally:
+        conn.close()
+    if jpeg is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": _ERR_THUMBNAIL_NOT_FOUND,
+                "message": "no thumbnail for that handle (expired, unknown, or never warmed)",
+            },
+        )
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        # Immutable for the handle's life: a handle is minted per push and
+        # never reused, so the bytes behind one can't change.
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @router.get("/handle/{handle}")

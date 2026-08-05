@@ -200,6 +200,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             transport=transport,
             server_id=server_id,
             handle_ttl_s=settings.push.handle_ttl_s,
+            situation_handle_ttl_s=settings.push.situation_handle_ttl_s,
+            frigate_base_url=settings.frigate.base_url,
+            rate_limit_per_hour=settings.push.rate_limit_per_hour,
+            rate_limit_window_s=settings.push.rate_limit_window_s,
+            thumbnail_max_edge=settings.push.thumbnail_max_edge,
+            thumbnail_quality=settings.push.thumbnail_quality,
+            thumbnail_timeout_s=settings.push.thumbnail_timeout_s,
+            dwell_source=settings.push.dwell_source,
         )
         app.state.push_engine = engine
         subscriber = MqttReviewSubscriber(
@@ -219,6 +227,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         running_subscriber = getattr(app.state, "push_subscriber", None)
         if running_subscriber is not None:
             running_subscriber.stop()
+        running_engine = getattr(app.state, "push_engine", None)
+        if running_engine is not None:
+            await running_engine.aclose()
         transport = getattr(app.state, "push_transport", None)
         if isinstance(transport, RelayTransport):
             await transport.aclose()

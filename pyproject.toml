@@ -34,6 +34,14 @@ faces = [
     "opencv-python-headless>=4.10",
     "numpy>=1.26",
 ]
+http2 = [
+    # Lets push.transport.RelayTransport hold one long-lived HTTP/2
+    # connection to the relay. Optional: without it the client falls back to
+    # HTTP/1.1 keep-alive, which reuses the connection just the same and is
+    # where nearly all of the saving comes from for a one-request-at-a-time
+    # sender.
+    "httpx[http2]>=0.27",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

@@ -116,23 +116,124 @@ CREATE TABLE IF NOT EXISTS push_devices (
     labels       TEXT NOT NULL DEFAULT '[]',   -- JSON list; [] = all labels
     min_severity TEXT NOT NULL DEFAULT 'alert' CHECK(min_severity IN ('alert','detection')),
     registered_at TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
+    updated_at   TEXT NOT NULL,
+    -- v2 registration shape (notification-experience plan §8). An empty or
+    -- absent `situations` keeps the device on the v1 camera+label+severity
+    -- path unchanged; a non-empty one switches it to situation-only
+    -- evaluation. `schema_version` makes which of the two unambiguous.
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    timezone     TEXT NOT NULL DEFAULT '',
+    location     TEXT,                        -- JSON {"lat":…,"lon":…}; NULL = not shared
+    situations   TEXT NOT NULL DEFAULT '[]',  -- JSON list of situation objects
+    -- Accepted and persisted, deliberately unread this phase (Phase 2/4).
+    live_activity_token TEXT NOT NULL DEFAULT '',
+    morning_digest TEXT,                      -- JSON
+    llm          TEXT                         -- JSON
 );
 
 -- Opaque, sidecar-minted, short-lived handles standing in for
 -- {camera, event_id} in the APNs payload -- the NSE and app redeem the
 -- handle, never see a raw Frigate event id (which embeds a wall-clock
 -- timestamp) over the wire. Expired rows are pruned lazily on redeem.
+--
+-- `thumbnail` is the pre-warmed JPEG the NSE fetches by handle (plan §4
+-- lever 1): filled at match time so the extension's fetch hits a warm cache
+-- instead of racing Frigate inside its ~30s budget. NULL means "the fetch
+-- failed or hasn't landed yet" -- never a reason to withhold the push.
 CREATE TABLE IF NOT EXISTS push_handles (
     handle       TEXT PRIMARY KEY,
     camera       TEXT NOT NULL,
     event_id     TEXT NOT NULL,
     review_id    TEXT NOT NULL,
     created_at   REAL NOT NULL,
-    expires_at   REAL NOT NULL
+    expires_at   REAL NOT NULL,
+    situation_id TEXT NOT NULL DEFAULT '',
+    track_id     TEXT NOT NULL DEFAULT '',
+    thumbnail    BLOB
 );
 CREATE INDEX IF NOT EXISTS idx_push_handle_expiry ON push_handles(expires_at);
+
+-- Snooze / mute state (plan §6). Sidecar-side on purpose: it must survive an
+-- app kill, and the interactive widget's "Snooze all 15m" has to reach the
+-- source of truth without the app running. Per-device, never shared across a
+-- user's phone+iPad -- snoozing on one must not quiet the other.
+-- `scope` is 'situation:<id>' | 'camera:<name>' | 'global'.
+CREATE TABLE IF NOT EXISTS push_snoozes (
+    apns_token  TEXT NOT NULL,
+    scope       TEXT NOT NULL,
+    until_epoch REAL NOT NULL,
+    created_at  REAL NOT NULL,
+    PRIMARY KEY (apns_token, scope)
+);
+
+-- One row per situation push actually sent, for the rolling rate-limit window
+-- (plan §6: max N per situation per device per hour). In the DB rather than
+-- in memory so a sidecar restart can't reset a runaway camera's ceiling --
+-- the whole point of the limit is the case where something is misbehaving,
+-- which is also the case where the process is most likely to be bounced.
+CREATE TABLE IF NOT EXISTS push_sends (
+    apns_token   TEXT NOT NULL,
+    situation_id TEXT NOT NULL,
+    sent_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_sends_window
+    ON push_sends(apns_token, situation_id, sent_at);
+
+-- Matches dropped while over the ceiling, counted so the next push that gets
+-- through can carry the " · +X more" suffix (plan §6) rather than silently
+-- pretending nothing happened during the quiet window.
+CREATE TABLE IF NOT EXISTS push_suppressed (
+    apns_token   TEXT NOT NULL,
+    situation_id TEXT NOT NULL,
+    count        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (apns_token, situation_id)
+);
 """
+
+# Columns added to `push_devices` / `push_handles` after those tables first
+# shipped. `CREATE TABLE IF NOT EXISTS` is a no-op against an existing
+# deployment, so an additive column has to arrive as an ALTER -- this is the
+# whole migration story the sidecar needs (nothing is ever dropped or
+# retyped, and SQLite's ALTER ... ADD COLUMN is O(1) metadata only).
+_ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "push_devices": [
+        # v2 registration shape (notification-experience plan §8). Everything
+        # here is persisted whether or not this phase evaluates it, so the app
+        # can start sending fields ahead of the phase that consumes them.
+        ("schema_version", "INTEGER NOT NULL DEFAULT 1"),
+        ("timezone", "TEXT NOT NULL DEFAULT ''"),
+        ("location", "TEXT"),  # JSON {"lat":…, "lon":…}; NULL = not shared
+        ("situations", "TEXT NOT NULL DEFAULT '[]'"),  # JSON list
+        ("live_activity_token", "TEXT NOT NULL DEFAULT ''"),  # Phase 2
+        ("morning_digest", "TEXT"),  # JSON; Phase 4
+        ("llm", "TEXT"),  # JSON; Phase 4
+    ],
+    "push_handles": [
+        ("situation_id", "TEXT NOT NULL DEFAULT ''"),
+        ("track_id", "TEXT NOT NULL DEFAULT ''"),
+        ("thumbnail", "BLOB"),
+    ],
+}
+
+
+def _apply_added_columns(conn: sqlite3.Connection) -> None:
+    """Bring an existing sidecar DB up to the current column set.
+
+    Idempotent and cheap: `PRAGMA table_info` then one ALTER per genuinely
+    missing column. Runs on the same path that applies the schema, so a fresh
+    DB (which already has every column from `SIDECAR_SCHEMA`) finds nothing to
+    do.
+    """
+    for table, columns in _ADDED_COLUMNS.items():
+        try:
+            have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.DatabaseError:  # pragma: no cover - table absent
+            continue
+        if not have:
+            continue
+        for name, decl in columns:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def open_frigate_ro(path: str | Path) -> sqlite3.Connection:
@@ -167,6 +268,7 @@ def open_sidecar(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     if needs_schema:
         conn.executescript(SIDECAR_SCHEMA)
+        _apply_added_columns(conn)
         conn.commit()
         _SCHEMA_APPLIED.add(key)
     return conn
