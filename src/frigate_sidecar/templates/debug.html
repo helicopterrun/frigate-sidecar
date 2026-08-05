@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% set active_page = 'debug' %}
+{% block title %}debug — frigate-sidecar{% endblock %}
+{% block body %}
+{% include "_header.html" %}
+<main>
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="stat-label">Sidecar version</div>
+      <div class="stat-value">{{ version }}</div>
+    </div>
+  </div>
+
+  <h2 class="section-h">Utilities</h2>
+  <ul class="rec-list">
+    <li><a href="/toybox">Toybox</a> — the 50-states couch game (with leaderboard)</li>
+    <li><a href="/docs">API docs</a> — interactive OpenAPI browser</li>
+    <li><a href="/version">/version</a> · <a href="/healthz">/healthz</a> · <a href="/v1/capabilities">/v1/capabilities</a></li>
+  </ul>
+
+  <h2 class="section-h">Capabilities (what the app sees)</h2>
+  <div class="panel"><pre style="margin:0; font-size:12px; overflow-x:auto;">{{ capabilities_json }}</pre></div>
+</main>
+{% endblock %}

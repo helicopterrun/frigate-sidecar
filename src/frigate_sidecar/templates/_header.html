@@ -1,16 +1,25 @@
 {# Shared header with cross-page nav. Templates that include this set
-   `active_page` to one of: 'triage', 'motion'. #}
+   `active_page` to one of: 'status', 'scrub', 'triage', 'faces', 'motion',
+   'score_histogram', 'fps_budget', 'placement', 'zone_hits', 'devices',
+   'debug'. #}
 <header>
-  <h1><a href="/" style="color:inherit;text-decoration:none;">frigate-sidecar</a></h1>
+  <h1><a href="/">frigate-sidecar</a></h1>
+  {% set _active = active_page|default('') %}
   <nav class="pages">
-    {% set _active = active_page|default('') %}
-    <a href="/" class="page-link{% if _active == 'triage' %} active{% endif %}">Triage</a>
-    <a href="/motion" class="page-link{% if _active == 'motion' %} active{% endif %}">Motion</a>
-    <a href="/score-histogram" class="page-link{% if _active == 'score_histogram' %} active{% endif %}">Scores</a>
-    <a href="/fps-budget" class="page-link{% if _active == 'fps_budget' %} active{% endif %}">FPS budget</a>
-    <a href="/placement" class="page-link{% if _active == 'placement' %} active{% endif %}">Placement</a>
+    <a href="/" class="page-link{% if _active == 'status' %} active{% endif %}">Status</a>
+    <a href="/scrub" class="page-link{% if _active == 'scrub' %} active{% endif %}">Scrub</a>
+    <a href="/triage" class="page-link{% if _active == 'triage' %} active{% endif %}">Triage</a>
     <a href="/faces" class="page-link{% if _active == 'faces' %} active{% endif %}">Faces</a>
-    <a href="/toybox" class="page-link{% if _active == 'toybox' %} active{% endif %}">Toybox</a>
+    <a href="/motion" class="page-link{% if _active == 'motion' %} active{% endif %}">Motion</a>
+    <details class="nav-group"{% if _active in ('score_histogram', 'fps_budget', 'placement', 'zone_hits') %} open{% endif %}>
+      <summary class="page-link{% if _active in ('score_histogram', 'fps_budget', 'placement', 'zone_hits') %} active{% endif %}">Analysis</summary>
+      <div class="nav-drop">
+        <a href="/score-histogram" class="page-link{% if _active == 'score_histogram' %} active{% endif %}">Scores</a>
+        <a href="/fps-budget" class="page-link{% if _active == 'fps_budget' %} active{% endif %}">FPS budget</a>
+        <a href="/placement" class="page-link{% if _active == 'placement' %} active{% endif %}">Placement</a>
+        <a href="/zone-hits" class="page-link{% if _active == 'zone_hits' %} active{% endif %}">Zone hits</a>
+      </div>
+    </details>
   </nav>
   <span class="stats">{{ summary or '' }}
     {% if counts and (counts.get('tp') or counts.get('fp') or counts.get('skip')) %}
@@ -20,5 +29,16 @@
       <span class="badge skip">{{ counts.get('skip', 0) }} SKIP</span>
     {% endif %}
   </span>
-  <span class="session">session: <input id="session" type="text" placeholder="2026-05-09a" size="14"></span>
+  <span class="header-right">
+    {% if _active == 'triage' %}<span class="session">session: <input id="session" type="text" placeholder="2026-05-09a" size="14"></span>{% endif %}
+    <select id="theme-picker" class="theme-picker" title="Theme" aria-label="Theme">
+      <option value="">Kronborg Signal</option>
+      <option value="elsinore">Elsinore</option>
+      <option value="moss-terracotta">Moss &amp; Terracotta</option>
+      <option value="oresund-harbor">Øresund Harbor</option>
+      <option value="midnight-fjord">Midnight Fjord</option>
+    </select>
+    <a href="/devices" class="page-link util{% if _active == 'devices' %} active{% endif %}">Devices</a>
+    <a href="/debug" class="page-link util{% if _active == 'debug' %} active{% endif %}">Debug</a>
+  </span>
 </header>

@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% set active_page = 'status' %}
+{% block title %}Status · frigate-sidecar{% endblock %}
+
+{% block body %}
+{% include "_header.html" %}
+<main id="status-root">
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="stat-label">Sidecar</div>
+      <div class="stat-value">v{{ status.version }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Frigate</div>
+      <div class="stat-value cell-class {{ 'ok' if status.frigate.reachable else 'noise' }}" data-k="frigate">
+        {{ status.frigate.version if status.frigate.reachable else 'unreachable' }}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Scrub cache</div>
+      <div class="stat-value cell-class {{ 'ok' if status.scrub.enabled else 'muted' }}" data-k="scrub">
+        {{ 'on' if status.scrub.enabled else 'off' }}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Push</div>
+      <div class="stat-value cell-class {{ 'ok' if status.push.enabled else 'muted' }}" data-k="push">
+        {{ 'on' if status.push.enabled else 'off' }}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Devices</div>
+      <div class="stat-value" data-k="devices">{{ status.push.device_count }}</div>
+    </div>
+  </div>
+
+  {% if status.scrub.enabled %}
+  <h2 class="section-h">Scrub generator</h2>
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="stat-label">Last cycle</div>
+      <div class="stat-value" data-k="last-cycle">
+        {{ (status.scrub.last_cycle_s_ago ~ 's ago') if status.scrub.last_cycle_s_ago is not none else '—' }}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Sheets</div>
+      <div class="stat-value">{{ status.scrub.sheet_count | default('—') }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Cache size</div>
+      <div class="stat-value">{{ fmt_bytes(status.sizes.scrub_cache) }}</div>
+    </div>
+  </div>
+  <table class="motion-table" id="scrub-cams">
+    <thead><tr><th>camera</th><th>live-edge lag</th></tr></thead>
+    <tbody>
+    {% for c in status.scrub.cameras %}
+      <tr>
+        <td>{{ c.camera }}</td>
+        <td data-cam="{{ c.camera }}">
+          {% if c.lag_s is none %}—
+          {% elif c.lag_s < 120 %}<span class="cell-class ok">{{ c.lag_s }}s</span>
+          {% elif c.lag_s < 600 %}<span class="cell-class warn">{{ c.lag_s }}s</span>
+          {% else %}<span class="cell-class noise">{{ (c.lag_s / 60) | round | int }}m</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if status.push.enabled %}
+  <h2 class="section-h">Push engine</h2>
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="stat-label">MQTT</div>
+      <div class="stat-value cell-class {{ 'ok' if status.push.mqtt_connected else 'noise' }}">
+        {{ 'live' if status.push.mqtt_connected else 'stale' }}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Frigate (via MQTT)</div>
+      <div class="stat-value cell-class {{ 'ok' if status.push.frigate_online else 'noise' }}">
+        {{ 'online' if status.push.frigate_online else 'offline' }}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Last broker traffic</div>
+      <div class="stat-value">{{ (status.push.last_event_s_ago ~ 's ago') if status.push.last_event_s_ago is not none else '—' }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Transport</div>
+      <div class="stat-value">{{ status.push.transport }}</div>
+    </div>
+  </div>
+  {% endif %}
+
+  <h2 class="section-h">Storage</h2>
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="stat-label">Sidecar DB</div>
+      <div class="stat-value">{{ fmt_bytes(status.sizes.sidecar_db) }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Frigate DB</div>
+      <div class="stat-value">{{ fmt_bytes(status.sizes.frigate_db) }}</div>
+    </div>
+  </div>
+
+  <p class="help">Refreshes every 10s from <code>/status.json</code>.</p>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/status.js"></script>
+{% endblock %}

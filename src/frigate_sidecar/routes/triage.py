@@ -261,7 +261,7 @@ def _zone_overlay(
     return polygons, legend
 
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/triage", response_class=HTMLResponse)
 def list_view(
     request: Request,
     camera: str | None = None,

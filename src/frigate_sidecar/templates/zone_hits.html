@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% set active_page = 'zone_hits' %}
+{% block title %}Zone hits · frigate-sidecar{% endblock %}
+
+{% block body %}
+{% include "_header.html" %}
+<main>
+  <form class="filters" method="get" action="/zone-hits">
+    <label>camera
+      <select name="camera">
+        <option value="">all</option>
+        {% for c in cameras %}
+          <option value="{{ c }}"{% if c == camera %} selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>days
+      <input type="number" name="days" value="{{ days }}" min="1" max="365" style="width:70px">
+    </label>
+    <button type="submit">Apply</button>
+  </form>
+
+  {% if error %}
+    <div class="empty" style="color:var(--live)">{{ error }}</div>
+  {% elif result %}
+    <h2 class="section-h">Zone hits (last {{ result.days }} days)</h2>
+    {% if result.hits %}
+    <table class="motion-table">
+      <thead><tr><th>camera</th><th>zone</th><th>label</th><th>events</th><th>FP in triage</th></tr></thead>
+      <tbody>
+      {% for h in result.hits %}
+        <tr>
+          <td>{{ h.camera }}</td>
+          <td>{{ h.zone }}</td>
+          <td>{{ h.label }}</td>
+          <td>{{ h.n }}</td>
+          <td>{% if h.fp_in_triage %}<span class="cell-class noise">{{ h.fp_in_triage }}</span>{% else %}—{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div class="empty">no zone hits in this window</div>
+    {% endif %}
+
+    <h2 class="section-h">Possible mask candidates</h2>
+    {% if result.mask_candidates %}
+    <table class="motion-table">
+      <thead><tr><th>camera</th><th>label</th><th>cluster</th><th>centroid</th><th>sample event</th><th>reason</th></tr></thead>
+      <tbody>
+      {% for m in result.mask_candidates %}
+        <tr>
+          <td>{{ m.camera }}</td>
+          <td>{{ m.label }}</td>
+          <td>{{ m.cluster_size }}</td>
+          <td>{{ '%.2f'|format(m.centroid_x) }}, {{ '%.2f'|format(m.centroid_y) }}</td>
+          <td><a href="/event/{{ m.sample_event_id }}">{{ m.sample_event_id }}</a></td>
+          <td>{{ m.reason }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div class="empty">none</div>
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

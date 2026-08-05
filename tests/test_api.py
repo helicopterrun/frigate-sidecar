@@ -32,7 +32,7 @@ def client(frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path) -> Test
 
 
 def test_list_html(client: TestClient) -> None:
-    r = client.get("/")
+    r = client.get("/triage")
     assert r.status_code == 200
     assert "frigate-sidecar" in r.text
     # Each fixture camera should appear in the camera filter.
@@ -41,7 +41,7 @@ def test_list_html(client: TestClient) -> None:
 
 
 def test_list_filter_by_camera(client: TestClient) -> None:
-    r = client.get("/", params={"camera": "alley-east", "days": 7})
+    r = client.get("/triage", params={"camera": "alley-east", "days": 7})
     assert r.status_code == 200
     # `alley-east` is in the fixture but only as a dog event; should render.
     assert "alley-east" in r.text
@@ -71,7 +71,7 @@ def test_label_round_trip(client: TestClient) -> None:
     # Default `submit_plus=False` means no Plus call was attempted.
     assert body["plus"] == {"status": "not_requested"}
     # The list view filtered to fp should now include e1.
-    r2 = client.get("/", params={"triage": "fp"})
+    r2 = client.get("/triage", params={"triage": "fp"})
     assert "e1" in r2.text
 
 
@@ -126,7 +126,7 @@ def test_motion_error_on_unreachable_frigate(client: TestClient) -> None:
 
 
 def test_list_has_active_nav(client: TestClient) -> None:
-    r = client.get("/")
+    r = client.get("/triage")
     assert r.status_code == 200
     # Verify the nav with active=triage shows up.
     assert "page-link active" in r.text

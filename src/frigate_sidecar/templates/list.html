@@ -6,7 +6,7 @@
 {% set summary = events|length ~ ' matching event' ~ ('s' if events|length != 1 else '') %}
 {% include "_header.html" %}
 <main>
-  <form class="filters" method="get" action="/">
+  <form class="filters" method="get" action="/triage">
     <label>camera
       <select name="camera">
         <option value="">all</option>

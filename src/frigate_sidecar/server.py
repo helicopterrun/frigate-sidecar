@@ -23,6 +23,8 @@ from frigate_sidecar.push.engine import PushEngine
 from frigate_sidecar.push.mqtt import MqttReviewSubscriber
 from frigate_sidecar.push.transport import LogTransport, RelayTransport
 from frigate_sidecar.routes import analysis as analysis_routes
+from frigate_sidecar.routes import debug as debug_routes
+from frigate_sidecar.routes import devices as devices_routes
 from frigate_sidecar.routes import faces as faces_routes
 from frigate_sidecar.routes import fps_budget as fps_budget_routes
 from frigate_sidecar.routes import health as health_routes
@@ -32,8 +34,11 @@ from frigate_sidecar.routes import proxy as proxy_routes
 from frigate_sidecar.routes import push as push_routes
 from frigate_sidecar.routes import score_histogram as score_histogram_routes
 from frigate_sidecar.routes import scrub as scrub_routes
+from frigate_sidecar.routes import scrub_ui as scrub_ui_routes
+from frigate_sidecar.routes import status as status_routes
 from frigate_sidecar.routes import toybox as toybox_routes
 from frigate_sidecar.routes import triage as triage_routes
+from frigate_sidecar.routes import zone_hits as zone_hits_routes
 
 _PACKAGE_ROOT = Path(__file__).parent
 _TEMPLATES_DIR = _PACKAGE_ROOT / "templates"
@@ -85,6 +90,9 @@ async def _scrub_generation_loop(app: FastAPI) -> None:
             )
         except Exception:
             logger.exception("scrub: generation cycle failed")
+        else:
+            # Consumed by the status dashboard: "when did a cycle last finish".
+            app.state.scrub_last_cycle = time.time()
         if time.time() >= next_prune:
             next_prune = time.time() + settings.scrub.prune_interval_s
             try:
@@ -234,6 +242,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     app.include_router(health_routes.router)
+    app.include_router(status_routes.router)
+    app.include_router(scrub_ui_routes.router)
+    app.include_router(debug_routes.router)
+    app.include_router(devices_routes.router)
+    app.include_router(zone_hits_routes.router)
     app.include_router(triage_routes.router)
     app.include_router(motion_routes.router)
     app.include_router(score_histogram_routes.router)
