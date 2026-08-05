@@ -26,6 +26,28 @@ def _match(**kw) -> Match:
     return Match(**base)  # type: ignore[arg-type]
 
 
+def test_sent_at_is_epoch_seconds_with_sub_second_resolution() -> None:
+    """The app's NSE subtracts this to get sidecar -> NSE and
+    sidecar -> present deltas. Whole seconds would quantise a measurement
+    whose interesting range is hundreds of milliseconds."""
+    p = build_payload(_match(), handle="h", server_id="s", now=1785952622.7040415)
+    assert p["sent_at"] == 1785952622.704
+    assert isinstance(p["sent_at"], float)
+
+
+def test_every_situation_path_stamps_sent_at() -> None:
+    """Stamped inside build_payload so a live match, the test button, and
+    anything Phase 2 adds all carry it without having to remember to."""
+    import time as _time
+
+    before = _time.time()
+    p = build_payload(_match(), handle="h", server_id="s")
+    after = _time.time()
+    # Half a millisecond of slack at each end: the value is rounded to the
+    # millisecond, so it can land just outside the window it was taken in.
+    assert before - 0.0005 <= p["sent_at"] <= after + 0.0005
+
+
 def test_payload_matches_section_8() -> None:
     p = build_payload(_match(), handle="h_9f3a", server_id="s_a1b2")
     assert p["aps"]["alert"] == {"title": "At the door", "body": "Person, 6s"}

@@ -140,6 +140,14 @@ loses a push on upgrade.
   the next push that gets through carries a `" · +X more"` suffix. Counted in
   SQLite, not memory, so bouncing the process can't reset a runaway camera's
   ceiling.
+- **`sent_at`:** every situation payload carries unix epoch seconds to the
+  millisecond, stamped in `build_payload` at the last moment the sidecar
+  controls before the bytes leave for the relay. The app's NSE subtracts it for
+  `sidecar_to_nse_ms` / `sidecar_to_present_ms` — the only way to see the APNs
+  hop from outside, since Apple gives no delivery receipt. Sub-second on
+  purpose: whole seconds would quantise a measurement whose interesting range
+  is hundreds of milliseconds. Not present on v1-path or plain-test pushes,
+  whose bodies the relay templates (see the relay note above).
 - **Pre-warmed thumbnails:** on a match the sidecar pulls the snapshot, resizes
   to ~320px/q60 (~10–20KB) and parks it under the push's handle for 24h; the
   NSE fetches it from `GET /v1/push/thumbnail/{handle}` against an already-warm

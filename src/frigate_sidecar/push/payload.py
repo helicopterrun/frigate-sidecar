@@ -17,6 +17,7 @@ sight.
   "situation_id": "at-the-door",
   "handle": "h_9f3a…",
   "server_id": "s_a1b2c3",
+  "sent_at": 1785952622.704,
   "actions_available": ["live-view", "snooze-15m", "mute-situation"]
 }
 ```
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from frigate_sidecar.push.library import sound_file
@@ -85,9 +87,16 @@ def build_payload(
     server_id: str,
     suppressed: int = 0,
     actions: tuple[str, ...] = DEFAULT_ACTIONS,
+    now: float | None = None,
 ) -> dict[str, Any]:
-    """The full APNs body for one situation push."""
+    """The full APNs body for one situation push.
+
+    `sent_at` is stamped here rather than by the caller so every path that can
+    emit a situation push -- a live match, the Settings test button, and
+    whatever Phase 2 adds -- carries it without having to remember to.
+    """
     situation = match.situation
+    sent_at = time.time() if now is None else now
     payload: dict[str, Any] = {
         "aps": {
             "alert": {"title": situation.name or situation.id, "body": body_text(
@@ -108,6 +117,15 @@ def build_payload(
         # base URL to redeem the handle against without a hostname in the
         # payload.
         "server_id": server_id,
+        # Unix epoch seconds, to the millisecond, taken the moment the payload
+        # is built -- the last timestamp the sidecar controls before the bytes
+        # leave for the relay. The NSE subtracts it to get the sidecar -> NSE
+        # and sidecar -> present deltas, which is the only way to see the APNs
+        # hop from the outside: Apple gives no delivery receipt.
+        #
+        # Sub-second precision on purpose. Whole seconds would quantise a
+        # measurement whose interesting range is hundreds of milliseconds.
+        "sent_at": round(sent_at, 3),
         "actions_available": list(actions),
     }
     return _fit_to_budget(payload)
