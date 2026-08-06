@@ -123,6 +123,11 @@ class PushEngine:
     #: between review messages -- which is the normal case, since a person
     #: standing still generates no review traffic -- can still be noticed.
     _pending: dict[tuple[str, str], ReviewEvent] = field(default_factory=dict)
+    #: When each `_pending` entry was set. A track this fresh has, by
+    #: definition, not yet had its first `frigate/events` tick recorded in
+    #: `tracks` -- that tick is exactly what `_pending` is waiting for. GC
+    #: must not treat "not in `tracks` yet" as "stale"; see `_maybe_gc`.
+    _pending_since: dict[tuple[str, str], float] = field(default_factory=dict)
     #: Latest `sub_label` seen per `(camera, track_id)` off `frigate/events`.
     #: Feeds the `sub_label_unknown` escalation trigger; Phase 5 owns the
     #: allow/deny lists that will use the same input.
@@ -153,6 +158,7 @@ class PushEngine:
             logger.info("push: clearing %d track(s) after mqtt reconnect", len(self.tracks))
         self.tracks.clear()
         self._pending.clear()
+        self._pending_since.clear()
         self._sub_labels.clear()
 
     async def handle_object_payload(self, payload: dict[str, Any]) -> int:
@@ -180,6 +186,7 @@ class PushEngine:
             ended = await self._end_activities_for_track(obj.camera, obj.track_id)
             self.tracks.forget(obj.camera, obj.track_id)
             self._pending.pop(key, None)
+            self._pending_since.pop(key, None)
             self._sub_labels.pop(key, None)
             return ended
 
@@ -239,7 +246,9 @@ class PushEngine:
                 # object has already left and undo the exit signal that makes
                 # loiter mean anything.
                 for track_id in event.track_ids or (event.review_id,):
-                    self._pending[(event.camera, track_id)] = event
+                    key = (event.camera, track_id)
+                    self._pending[key] = event
+                    self._pending_since[key] = now
             else:
                 self.tracks.observe(event, now=now)
             if event.severity == "alert":
@@ -1118,9 +1127,22 @@ class PushEngine:
         self._last_gc = now
         reaped = self.tracks.reap(now=now)
         # A pending review outlives its object only if Frigate never sent the
-        # `end` -- drop those with the track they were waiting on.
-        for key in [k for k in self._pending if k not in self.tracks]:
+        # `end` -- drop those with the track they were waiting on. But a
+        # track that hasn't reached `tracks` *yet* is not the same thing: a
+        # review can (and often does) arrive before that track's first
+        # `frigate/events` tick has been processed, and pruning on bare
+        # absence here raced that first tick out from under it -- the pending
+        # review, and the situation match it was holding open, vanished
+        # before `frigate/events` ever got a chance to look it up (2026-08-05
+        # doorbell miss). Age it out instead, on the same clock `tracks.reap`
+        # already uses for "this track is actually gone".
+        for key in [
+            k for k in self._pending
+            if k not in self.tracks
+            and now - self._pending_since.get(k, now) > self.tracks.reap_after_s
+        ]:
             del self._pending[key]
+            self._pending_since.pop(key, None)
         for key in [k for k in self._sub_labels if k not in self.tracks]:
             del self._sub_labels[key]
         conn = self._conn()

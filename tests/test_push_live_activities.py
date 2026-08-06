@@ -140,6 +140,31 @@ def test_present_situation_starts_a_live_activity(tmp_path: Path) -> None:
     )
 
 
+def test_review_arriving_before_the_first_object_tick_still_starts(
+    tmp_path: Path,
+) -> None:
+    """2026-08-05 doorbell miss: a review can name a track Frigate has not yet
+    published a `frigate/events` tick for (the review and the track's birth
+    landed in the same instant on the wire). `_pending` exists precisely to
+    let that first tick finish the match -- but a GC pass that lands in the
+    gap between the two must not treat "not in `tracks` yet" as "stale" and
+    delete the pending review out from under the tick that was coming for
+    it. Order reversed from `_arrive`, and a GC forced mid-gap."""
+    db_path = tmp_path / "sidecar.db"
+    _register(db_path, "tok", situations=[PACKAGE_DELIVERY], schema_version=2,
+              push_to_start_token=PTS)
+    transport = LogTransport()
+    engine = _engine(db_path, transport)
+
+    _run(engine.handle_event(_review()))  # track not in `tracks` yet
+    engine._maybe_gc(NOW)  # noqa: SLF001 -- as if this landed right after a restart
+    assert ("doorbell", "t1") in engine._pending  # noqa: SLF001 -- survives the GC
+
+    _run(engine.handle_object_payload(_object()))  # the tick `_pending` was waiting for
+
+    assert len(_sent(transport, "start")) == 1
+
+
 def test_activity_starts_before_the_loiter_threshold(tmp_path: Path) -> None:
     """Plan §3: the LA appears when the person enters the zone, at "0:04" --
     the dwell threshold decides the *interrupt*, not the activity."""
