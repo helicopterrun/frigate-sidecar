@@ -138,6 +138,26 @@ class PushEngine:
 
         return db.open_sidecar(self.db_path)
 
+    def _log_decision(
+        self,
+        *,
+        apns_token: str,
+        event_id: str,
+        decision: str,
+        situation_id: str = "",
+        reason: str = "",
+    ) -> None:
+        """One line per push decision (handoff Thread B item 4): fired,
+        suppressed-by-snooze, suppressed-by-window, matched-no-situation,
+        activity-started/updated/escalated/ended, and so on. Info level,
+        structured, so a trace like Thread A's ("why didn't this fire")
+        doesn't need a live repro to answer -- grep the token and the event.
+        """
+        logger.info(
+            "push: decision=%s apns_token=%s situation_id=%s event_id=%s reason=%s",
+            decision, apns_token[:8], situation_id or "-", event_id or "-", reason or "-",
+        )
+
     def _client(self) -> httpx.AsyncClient:
         """One pooled client for snapshot pre-warm, kept for the process's
         life so a match doesn't pay connection setup to Frigate on the
@@ -421,12 +441,24 @@ class PushEngine:
             )
             if result.ok:
                 self._record_sent(device, match, now=now)
-            elif not result.unregistered:
-                # Only a send that actually happened counts against the
-                # ceiling and burns the track's one shot at this dwell -- a
-                # transport failure must stay retryable on the next update.
-                self.tracks.unmark_fired(
-                    event.camera, match.track_id, device.apns_token, match.situation.id
+                self._log_decision(
+                    apns_token=device.apns_token, event_id=event.event_id,
+                    situation_id=match.situation.id, decision="fired",
+                    reason=f"zone={match.zone or '-'} dwell={match.dwell_s:.1f}s",
+                )
+            else:
+                if not result.unregistered:
+                    # Only a send that actually happened counts against the
+                    # ceiling and burns the track's one shot at this dwell --
+                    # a transport failure must stay retryable on the next
+                    # update.
+                    self.tracks.unmark_fired(
+                        event.camera, match.track_id, device.apns_token, match.situation.id
+                    )
+                self._log_decision(
+                    apns_token=device.apns_token, event_id=event.event_id,
+                    situation_id=match.situation.id, decision="send-failed",
+                    reason=str(result.error or "unknown"),
                 )
             sent += self._account(device, result, to_prune)
 
@@ -447,8 +479,10 @@ class PushEngine:
                 or f"situation:{match.situation.id}" in snoozed
                 or f"camera:{event.camera}" in snoozed
             ):
-                logger.debug(
-                    "push: %s snoozed for device %s", match.situation.id, device.device_id
+                self._log_decision(
+                    apns_token=device.apns_token, event_id=event.event_id,
+                    situation_id=match.situation.id, decision="suppressed-by-snooze",
+                    reason=f"snoozed scopes: {sorted(snoozed)}",
                 )
                 return None
 
@@ -463,10 +497,10 @@ class PushEngine:
                     conn, apns_token=device.apns_token, situation_id=match.situation.id
                 )
                 conn.commit()
-                logger.info(
-                    "push: rate limit reached for %s on device %s (%d in the last %.0fs) -- "
-                    "suppressing until the window opens",
-                    match.situation.id, device.device_id, recent, self.rate_limit_window_s,
+                self._log_decision(
+                    apns_token=device.apns_token, event_id=event.event_id,
+                    situation_id=match.situation.id, decision="suppressed-by-window",
+                    reason=f"{recent} sent in the last {self.rate_limit_window_s:.0f}s",
                 )
                 return None
 
@@ -529,9 +563,20 @@ class PushEngine:
                 await self._end_activity(
                     device, situation, event.camera, track_id, reason="left", now=now
                 )
+            else:
+                self._log_decision(
+                    apns_token=device.apns_token, event_id=event.event_id,
+                    situation_id=situation.id, decision="matched-no-situation",
+                    reason="camera/label/zone/time-of-day conditions not met",
+                )
             return 0
 
         if stage is None:
+            self._log_decision(
+                apns_token=device.apns_token, event_id=event.event_id,
+                situation_id=situation.id, decision="activity-started",
+                reason=f"zone={hit.zone or '-'} dwell={hit.dwell_s:.1f}s",
+            )
             return await self._start_activity(device, hit, event, now=now)
 
         if stage == STAGE_ENDING:
@@ -539,6 +584,11 @@ class PushEngine:
 
         sub_label = self._sub_labels.get((event.camera, track_id), "")
         if stage != STAGE_ESCALATED and escalation_reached(hit, sub_label=sub_label):
+            self._log_decision(
+                apns_token=device.apns_token, event_id=event.event_id,
+                situation_id=situation.id, decision="activity-escalated",
+                reason=f"dwell={hit.dwell_s:.1f}s",
+            )
             return await self._escalate(device, hit, event, now=now)
 
         return await self._update_activity(device, hit, event, stage=stage, now=now)

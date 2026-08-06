@@ -313,7 +313,18 @@ async def create_snooze(body: SnoozeRequest, request: Request) -> dict[str, Any]
     without the app running at all. Expiry is a timestamp, not a scheduled
     job: it re-enables itself with nothing to run and nothing to miss if the
     sidecar was restarted in the meantime.
+
+    Deprecated (sidecar-snooze-and-v2-investigation handoff, Thread B):
+    superseded by `registration.snoozes`, a full-state replace on every
+    `PUT /v1/push/devices/{token}` -- point-updates writing the same store a
+    whole-state sync writes let local and sidecar snooze state drift apart
+    invisibly. Kept for one release so an app build that still calls this
+    keeps working; slated for removal once that build has aged out.
     """
+    logger.warning(
+        "push: deprecated POST /v1/push/snooze called for device %s -- "
+        "use registration.snoozes instead", body.apns_token,
+    )
     scope = _validate_scope(body.scope)
     settings = request.app.state.settings
     conn = db.open_sidecar(settings.sidecar.db_path)
@@ -343,7 +354,15 @@ async def delete_snooze(
 
     `{scope:path}` because a scope contains a colon (`situation:at-the-door`)
     and, for `camera:<name>`, whatever the user named their camera.
+
+    Deprecated (sidecar-snooze-and-v2-investigation handoff, Thread B): same
+    reasoning as `POST /v1/push/snooze` -- lifting a snooze is just
+    re-registering with a shorter (or absent) `snoozes` array now.
     """
+    logger.warning(
+        "push: deprecated DELETE /v1/push/snooze/%s called for device %s -- "
+        "use registration.snoozes instead", scope, apns_token,
+    )
     settings = request.app.state.settings
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:
