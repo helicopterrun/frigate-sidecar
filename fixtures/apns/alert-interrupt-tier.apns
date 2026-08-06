@@ -1,0 +1,23 @@
+{
+  "aps": {
+    "alert": {
+      "title": "At the door",
+      "body": "Person, 6s"
+    },
+    "sound": "at-the-door.caf",
+    "thread-id": "at-the-door",
+    "interruption-level": "time-sensitive",
+    "mutable-content": 1,
+    "category": "situation.at-the-door"
+  },
+  "situation_id": "at-the-door",
+  "handle": "h_9f3a1c2d3e4f5061",
+  "server_id": "s_a1b2c3",
+  "sent_at": 1785952622.704,
+  "actions_available": [
+    "live-view",
+    "snooze-15m",
+    "mute-situation"
+  ],
+  "Simulator Target Bundle": "com.houseofpaimon.Elsinore"
+}

@@ -1,0 +1,23 @@
+{
+  "aps": {
+    "alert": {
+      "title": "Package delivery",
+      "body": "Person, 4s"
+    },
+    "sound": "package-delivery.caf",
+    "thread-id": "package-delivery",
+    "interruption-level": "time-sensitive",
+    "mutable-content": 1,
+    "category": "situation.package-delivery"
+  },
+  "situation_id": "package-delivery",
+  "handle": "h_9f3a1c2d3e4f5061",
+  "server_id": "s_a1b2c3",
+  "sent_at": 1785952622.704,
+  "actions_available": [
+    "live-view",
+    "snooze-15m",
+    "mute-situation"
+  ],
+  "Simulator Target Bundle": "com.houseofpaimon.Elsinore"
+}

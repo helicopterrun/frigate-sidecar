@@ -86,6 +86,7 @@ def attributes(match: Match, *, handle: str, camera: str) -> dict[str, Any]:
         "situation_name": match.situation.name or match.situation.id,
         "camera_id": camera,
         "handle": handle,
+        "track_id": match.track_id,
     }
 
 

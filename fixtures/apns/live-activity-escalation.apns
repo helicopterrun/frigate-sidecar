@@ -1,0 +1,21 @@
+{
+  "aps": {
+    "timestamp": 1785952622,
+    "event": "update",
+    "content-state": {
+      "stage": "escalated",
+      "dwell_seconds": 6,
+      "title": "Package delivery",
+      "subtitle": "Person, 6s",
+      "thumbnail_revision": 2
+    },
+    "alert": {
+      "title": "Package delivery",
+      "body": "Person, 6s"
+    },
+    "sound": "package-delivery.caf",
+    "interruption-level": "time-sensitive"
+  },
+  "sent_at": 1785952622.704,
+  "Simulator Target Bundle": "com.houseofpaimon.Elsinore"
+}

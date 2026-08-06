@@ -129,6 +129,7 @@ def test_present_situation_starts_a_live_activity(tmp_path: Path) -> None:
     assert aps["attributes"] == {
         "situation_id": "package-delivery", "situation_name": "Package delivery",
         "camera_id": "doorbell", "handle": starts[0]["payload"]["handle"],
+        "track_id": "t1",
     }
     assert aps["content-state"]["stage"] == "arriving"
     assert set(aps["content-state"]) == {
