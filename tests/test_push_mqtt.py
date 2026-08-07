@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
 from frigate_sidecar.config import PushSection
 from frigate_sidecar.push.engine import PushEngine
@@ -52,6 +54,36 @@ def test_on_message_malformed_json_does_not_raise(tmp_path: Path) -> None:
     msg = SimpleNamespace(topic="frigate/reviews", payload=b"{not json")
     sub.on_message(None, None, msg)  # should not raise
     sub._loop.close()
+
+
+def test_reviews_dispatch_exception_is_logged_not_swallowed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A push that raises partway through must leave a trace -- the fire-and-
+    forget `run_coroutine_threadsafe` future is never otherwise awaited, so an
+    exception there used to vanish silently (found tracing a replay where one
+    of two matched devices logged nothing at all)."""
+    sub, engine = _subscriber(tmp_path)
+
+    async def _boom(payload: dict) -> int:
+        raise RuntimeError("kaboom")
+
+    engine.handle_review_payload = _boom  # type: ignore[method-assign]
+
+    loop = asyncio.new_event_loop()
+    sub._loop = loop
+    payload = {
+        "type": "new",
+        "after": {"id": "r1", "camera": "doorbell", "severity": "alert",
+                   "data": {"objects": ["person"], "detections": []}},
+    }
+    msg = SimpleNamespace(topic="frigate/reviews", payload=json.dumps(payload).encode())
+    with caplog.at_level(logging.ERROR, logger="frigate_sidecar.push.mqtt"):
+        sub.on_message(None, None, msg)
+        loop.run_until_complete(asyncio.sleep(0.05))
+    loop.close()
+    assert "unhandled error handling frigate/reviews message" in caplog.text
+    assert "kaboom" in caplog.text
 
 
 def test_available_offline_marks_frigate_offline(tmp_path: Path) -> None:
