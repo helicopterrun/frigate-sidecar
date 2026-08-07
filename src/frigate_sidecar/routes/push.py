@@ -166,6 +166,7 @@ async def register_device(
 
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:
+        previous = store.get_device(conn, apns_token)
         device_id = store.upsert_device(
             conn,
             apns_token=apns_token,
@@ -193,6 +194,27 @@ async def register_device(
         stored = store.get_device(conn, apns_token)
     finally:
         conn.close()
+
+    # Which mode this device evaluates under is otherwise invisible short of
+    # dumping the row: an empty `situations` array is a legitimate, deliberate
+    # choice (v1 camera/label/severity dispatch), but nothing recorded *that*
+    # a device landed there until this line existed.
+    uses_situations = bool(parsed)
+    dispatch = "situation matching (_dispatch_situations)" if uses_situations else "v1 camera/label/severity (_dispatch_v1)"
+    logger.info(
+        "push: registration apns_token=%s schema_version=%s uses_situations=%s dispatch=%s",
+        apns_token[:8], schema_version, uses_situations, dispatch,
+    )
+    if previous is not None and previous.uses_situations != uses_situations:
+        # The edge that actually matters: a device silently flipping mode
+        # (e.g. an app reinstall wiping stored situations) looks identical to
+        # a healthy re-registration from the outside. This is the line that
+        # would have caught it in seconds instead of a four-hour trace.
+        logger.info(
+            "push: registration apns_token=%s transitioned uses_situations %s -> %s",
+            apns_token[:8], previous.uses_situations, uses_situations,
+        )
+
     # Echo back what the sidecar will actually do with this device, including
     # whether Live Activities are available to it -- the app-side token flow is
     # asynchronous, so "did my push-to-start token land" is a real question

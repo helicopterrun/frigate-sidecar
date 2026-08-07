@@ -144,6 +144,7 @@ class PushEngine:
         apns_token: str,
         event_id: str,
         decision: str,
+        uses_situations: bool,
         situation_id: str = "",
         reason: str = "",
     ) -> None:
@@ -152,10 +153,17 @@ class PushEngine:
         activity-started/updated/escalated/ended, and so on. Info level,
         structured, so a trace like Thread A's ("why didn't this fire")
         doesn't need a live repro to answer -- grep the token and the event.
+
+        `uses_situations` is carried alongside the rest so the same grep that
+        answers "what happened to this push" also answers "which mode was
+        this device in when it happened" -- no separate lookup against the
+        registration log required.
         """
         logger.info(
-            "push: decision=%s apns_token=%s situation_id=%s event_id=%s reason=%s",
-            decision, apns_token[:8], situation_id or "-", event_id or "-", reason or "-",
+            "push: decision=%s apns_token=%s situation_id=%s event_id=%s "
+            "uses_situations=%s reason=%s",
+            decision, apns_token[:8], situation_id or "-", event_id or "-",
+            uses_situations, reason or "-",
         )
 
     def _client(self) -> httpx.AsyncClient:
@@ -443,6 +451,7 @@ class PushEngine:
                 self._record_sent(device, match, now=now)
                 self._log_decision(
                     apns_token=device.apns_token, event_id=event.event_id,
+                    uses_situations=device.uses_situations,
                     situation_id=match.situation.id, decision="fired",
                     reason=f"zone={match.zone or '-'} dwell={match.dwell_s:.1f}s",
                 )
@@ -457,6 +466,7 @@ class PushEngine:
                     )
                 self._log_decision(
                     apns_token=device.apns_token, event_id=event.event_id,
+                    uses_situations=device.uses_situations,
                     situation_id=match.situation.id, decision="send-failed",
                     reason=str(result.error or "unknown"),
                 )
@@ -481,6 +491,7 @@ class PushEngine:
             ):
                 self._log_decision(
                     apns_token=device.apns_token, event_id=event.event_id,
+                    uses_situations=device.uses_situations,
                     situation_id=match.situation.id, decision="suppressed-by-snooze",
                     reason=f"snoozed scopes: {sorted(snoozed)}",
                 )
@@ -499,6 +510,7 @@ class PushEngine:
                 conn.commit()
                 self._log_decision(
                     apns_token=device.apns_token, event_id=event.event_id,
+                    uses_situations=device.uses_situations,
                     situation_id=match.situation.id, decision="suppressed-by-window",
                     reason=f"{recent} sent in the last {self.rate_limit_window_s:.0f}s",
                 )
@@ -566,6 +578,7 @@ class PushEngine:
             else:
                 self._log_decision(
                     apns_token=device.apns_token, event_id=event.event_id,
+                    uses_situations=device.uses_situations,
                     situation_id=situation.id, decision="matched-no-situation",
                     reason="camera/label/zone/time-of-day conditions not met",
                 )
@@ -574,6 +587,7 @@ class PushEngine:
         if stage is None:
             self._log_decision(
                 apns_token=device.apns_token, event_id=event.event_id,
+                uses_situations=device.uses_situations,
                 situation_id=situation.id, decision="activity-started",
                 reason=f"zone={hit.zone or '-'} dwell={hit.dwell_s:.1f}s",
             )
@@ -586,6 +600,7 @@ class PushEngine:
         if stage != STAGE_ESCALATED and escalation_reached(hit, sub_label=sub_label):
             self._log_decision(
                 apns_token=device.apns_token, event_id=event.event_id,
+                uses_situations=device.uses_situations,
                 situation_id=situation.id, decision="activity-escalated",
                 reason=f"dwell={hit.dwell_s:.1f}s",
             )

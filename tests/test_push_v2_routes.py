@@ -341,6 +341,54 @@ def test_unknown_registration_fields_are_logged_not_swallowed(
     assert "\"a\": 1" not in caplog.text
 
 
+def test_registration_with_empty_situations_logs_v1_mode(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A `schema_version=2` registration with no situations is legitimate
+    backward-compat -- it must still land on a log line saying so, at info
+    level, not as a warning."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="frigate_sidecar.routes.push"):
+        r = _register(client, schema_version=2, cameras=["doorbell"])
+    assert r.status_code == 200
+    assert f"apns_token={TOKEN[:8]}" in caplog.text
+    assert "uses_situations=False" in caplog.text
+    for record in caplog.records:
+        assert record.levelno == logging.INFO
+    # Never a full token.
+    assert TOKEN not in caplog.text
+
+
+def test_registration_with_situations_logs_situation_mode(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="frigate_sidecar.routes.push"):
+        r = _register(client, schema_version=2, situations=[AT_THE_DOOR])
+    assert r.status_code == 200
+    assert f"apns_token={TOKEN[:8]}" in caplog.text
+    assert "uses_situations=True" in caplog.text
+    assert TOKEN not in caplog.text
+
+
+def test_reregistration_flipping_situations_logs_the_transition(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The edge that actually matters: a device silently moving from
+    situation matching to v1 (or back) must be traceable without a live
+    repro -- this is the line Thread A's four-hour trace needed."""
+    import logging
+
+    _register(client, schema_version=2, situations=[AT_THE_DOOR])
+    with caplog.at_level(logging.INFO, logger="frigate_sidecar.routes.push"):
+        r = _register(client, schema_version=2, situations=[])
+    assert r.status_code == 200
+    assert "transitioned uses_situations True -> False" in caplog.text
+    assert TOKEN not in caplog.text
+
+
 def test_at_the_door_is_a_present_tier_starter_that_escalates(client: TestClient) -> None:
     """Phase 2 retiers the poster-child starter: a Live Activity when someone
     walks up, a buzz only if they are still there five seconds later."""
