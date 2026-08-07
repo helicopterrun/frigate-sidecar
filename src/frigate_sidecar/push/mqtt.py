@@ -152,14 +152,18 @@ class MqttReviewSubscriber:
         # what happened tracing the muskrat replay: two devices matched, one
         # logged its failure, the other logged nothing at all because its
         # exception had nowhere to go.
-        future.add_done_callback(self._log_review_task_exception)
+        future.add_done_callback(
+            lambda f: self._log_task_exception("frigate/reviews", f)
+        )
 
-    def _log_review_task_exception(self, future: "concurrent.futures.Future[int]") -> None:
+    def _log_task_exception(
+        self, topic: str, future: "concurrent.futures.Future[int]"
+    ) -> None:
         if future.cancelled():
             return
         exc = future.exception()
         if exc is not None:
-            logger.error("push: unhandled error handling frigate/reviews message", exc_info=exc)
+            logger.error("push: unhandled error handling %s message", topic, exc_info=exc)
 
     def _handle_events_message(self, payload_bytes: bytes) -> None:
         """`frigate/events` -- dwell input only, never a push trigger.
@@ -179,7 +183,12 @@ class MqttReviewSubscriber:
         loop = self._loop
         if loop is None:
             return
-        asyncio.run_coroutine_threadsafe(self.engine.handle_object_payload(payload), loop)
+        future = asyncio.run_coroutine_threadsafe(
+            self.engine.handle_object_payload(payload), loop
+        )
+        future.add_done_callback(
+            lambda f: self._log_task_exception("frigate/events", f)
+        )
 
     def _handle_available_message(self, payload_bytes: bytes) -> None:
         self.last_seen = time.time()

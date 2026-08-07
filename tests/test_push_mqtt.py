@@ -86,6 +86,31 @@ def test_reviews_dispatch_exception_is_logged_not_swallowed(
     assert "kaboom" in caplog.text
 
 
+def test_events_dispatch_exception_is_logged_not_swallowed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Same fire-and-forget gap as the reviews path (`_log_task_exception` is
+    shared) -- covered separately since `frigate/events` has its own handler
+    and its own `run_coroutine_threadsafe` call site."""
+    sub, engine = _subscriber(tmp_path)
+
+    async def _boom(payload: dict) -> int:
+        raise RuntimeError("kaboom")
+
+    engine.handle_object_payload = _boom  # type: ignore[method-assign]
+
+    loop = asyncio.new_event_loop()
+    sub._loop = loop
+    payload = {"after": {"camera": "doorbell", "id": "t1"}, "type": "new"}
+    msg = SimpleNamespace(topic="frigate/events", payload=json.dumps(payload).encode())
+    with caplog.at_level(logging.ERROR, logger="frigate_sidecar.push.mqtt"):
+        sub.on_message(None, None, msg)
+        loop.run_until_complete(asyncio.sleep(0.05))
+    loop.close()
+    assert "unhandled error handling frigate/events message" in caplog.text
+    assert "kaboom" in caplog.text
+
+
 def test_available_offline_marks_frigate_offline(tmp_path: Path) -> None:
     sub, _ = _subscriber(tmp_path)
     msg = SimpleNamespace(topic="frigate/available", payload=b"offline")
