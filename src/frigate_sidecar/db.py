@@ -268,6 +268,15 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("track_id", "TEXT NOT NULL DEFAULT ''"),
         ("thumbnail", "BLOB"),
     ],
+    "push_activities": [
+        # Added alongside SIDECAR_SCHEMA's CREATE TABLE without a matching
+        # migration entry here -- on a deployment whose push_activities table
+        # predated it, every touch_activity(dwell_seconds=...) call raised
+        # "no such column", silently (the caller is a fire-and-forget MQTT
+        # task; see push/mqtt.py's _log_task_exception) dropping the activity
+        # after the APNs send had already gone out.
+        ("dwell_seconds", "INTEGER NOT NULL DEFAULT 0"),
+    ],
 }
 
 

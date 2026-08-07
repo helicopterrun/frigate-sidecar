@@ -31,6 +31,47 @@ def test_open_sidecar_idempotent(sidecar_db_path: Path) -> None:
     assert n == 0
 
 
+def test_open_sidecar_backfills_dwell_seconds_on_a_pre_migration_activities_table(
+    sidecar_db_path: Path,
+) -> None:
+    """`push_activities` shipped without `dwell_seconds`, which was later added
+    to `SIDECAR_SCHEMA`'s CREATE TABLE -- a no-op against an already-existing
+    table. A deployment whose table predates the column needs the ALTER in
+    `_ADDED_COLUMNS`, exactly like `push_devices`/`push_handles` get; without
+    it every `touch_activity(dwell_seconds=...)` call raises
+    "no such column: dwell_seconds"."""
+    conn = sqlite3.connect(sidecar_db_path)
+    conn.execute(
+        "CREATE TABLE push_activities ("
+        " activity_id TEXT PRIMARY KEY, apns_token TEXT NOT NULL, "
+        " situation_id TEXT NOT NULL, track_id TEXT NOT NULL, "
+        " camera TEXT NOT NULL DEFAULT '', token TEXT NOT NULL DEFAULT '', "
+        " collapse_id TEXT NOT NULL DEFAULT '', handle TEXT NOT NULL DEFAULT '', "
+        " stage TEXT NOT NULL DEFAULT 'arriving', thumbnail_revision INTEGER NOT NULL DEFAULT 1, "
+        " from_detection INTEGER NOT NULL DEFAULT 0, promoted INTEGER NOT NULL DEFAULT 0, "
+        " created_at REAL NOT NULL, last_push_at REAL NOT NULL DEFAULT 0, "
+        " last_seen_at REAL NOT NULL DEFAULT 0, ended_at REAL)"
+    )
+    conn.commit()
+    conn.close()
+
+    from frigate_sidecar.push import store
+
+    conn = db.open_sidecar(sidecar_db_path)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(push_activities)")}
+    assert "dwell_seconds" in cols
+
+    store.open_activity(
+        conn, activity_id="a1", apns_token="tok", situation_id="s1", track_id="t1",
+        camera="doorbell", collapse_id="c1", handle="h1", now=1.0,
+    )
+    store.touch_activity(conn, "a1", dwell_seconds=5, now=2.0)  # must not raise
+    conn.commit()
+    row = store.get_activity(conn, "a1")
+    assert row["dwell_seconds"] == 5
+    conn.close()
+
+
 def test_open_joined_round_trip(frigate_db_path: Path, sidecar_db_path: Path) -> None:
     conn = db.open_joined(frigate_db_path, sidecar_db_path)
     # Insert a triage label via the joined handle.
