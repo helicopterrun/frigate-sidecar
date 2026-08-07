@@ -662,6 +662,31 @@ class PushEngine:
                 "push: LA start failed for device %s situation %s: %s",
                 device.device_id, match.situation.id, result.error,
             )
+            if result.unregistered:
+                if result.status_code == 410:
+                    # The device itself is gone -- same treatment as the
+                    # alert path's 410/400 pruning (spec §5).
+                    logger.info(
+                        "push: pruning device %s after dead LA start (%s)",
+                        device.device_id, result.error,
+                    )
+                    self._prune([device.apns_token])
+                else:
+                    # 400 BadDeviceToken on a *push-to-start* token often just
+                    # means the build that minted it isn't installed right
+                    # now, not that the device/subscription is dead. Drop the
+                    # token, keep the row's situations/filters/snoozes -- a
+                    # live build's next registration repopulates the token.
+                    conn = self._conn()
+                    try:
+                        store.clear_push_to_start_token(conn, device.apns_token)
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    logger.info(
+                        "push: cleared dead push-to-start token for device %s (%s)",
+                        device.device_id, result.error,
+                    )
             return 0
 
         conn = self._conn()

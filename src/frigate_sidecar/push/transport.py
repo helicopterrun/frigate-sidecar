@@ -41,6 +41,7 @@ class TransportResult:
     # device row immediately rather than retrying.
     unregistered: bool = False
     error: str | None = None
+    status_code: int | None = None
 
 
 class PushTransport(Protocol):
@@ -430,5 +431,11 @@ class RelayTransport:
         if resp.status_code in (410, 400):
             # 410 Unregistered / 400 BadDeviceToken (spec §5): permanent,
             # never retried -- the caller deletes the device row.
-            return TransportResult(ok=False, unregistered=True, error=f"HTTP {resp.status_code}")
+            logger.warning(
+                "push: relay %s body: %s", resp.status_code, resp.text[:500],
+            )
+            return TransportResult(
+                ok=False, unregistered=True, error=f"HTTP {resp.status_code}",
+                status_code=resp.status_code,
+            )
         return TransportResult(ok=False, error=f"HTTP {resp.status_code}: {resp.text[:200]}")
