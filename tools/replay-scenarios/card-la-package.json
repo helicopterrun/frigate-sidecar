@@ -1,0 +1,12 @@
+{
+  "id": "card-la-package",
+  "camera": "doorbell",
+  "label": "package",
+  "description": "Live-Activity-eligible package detection at an off_limits zone (pool). Package + off_limits = quiet (pushable), and the 'package' family qualifies for a Live Activity. Exercises push-to-start -> update -> resolve/end lifecycle.",
+  "steps": [
+    {"type": "new",    "severity": "alert", "delay_s": 0,  "topic": "frigate/reviews", "zones": ["pool"]},
+    {"type": "update", "severity": "alert", "delay_s": 5,  "topic": "frigate/reviews", "zones": ["pool"]},
+    {"type": "update", "severity": "alert", "delay_s": 10, "topic": "frigate/reviews", "zones": ["pool"]},
+    {"type": "end",    "severity": "alert", "delay_s": 15, "topic": "frigate/events",  "zones": ["pool"]}
+  ]
+}

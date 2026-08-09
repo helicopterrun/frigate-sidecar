@@ -1,0 +1,12 @@
+{
+  "id": "card-escalate-urgent",
+  "camera": "patio",
+  "label": "person",
+  "description": "Escalation to urgent: stranger detected at an off-limits zone (pool). First step creates at quiet (stranger+off_limits=urgent), but the zone change from yard to pool triggers the escalation. Exercises create -> escalate (urgent, time-sensitive, re-sound eligible) -> resolve.",
+  "steps": [
+    {"type": "new",    "severity": "alert", "delay_s": 0,  "topic": "frigate/reviews", "zones": ["front_yard"]},
+    {"type": "update", "severity": "alert", "delay_s": 5,  "topic": "frigate/reviews", "zones": ["pool"]},
+    {"type": "update", "severity": "alert", "delay_s": 10, "topic": "frigate/reviews", "zones": ["pool"]},
+    {"type": "end",    "severity": "alert", "delay_s": 15, "topic": "frigate/events",  "zones": ["pool"]}
+  ]
+}
