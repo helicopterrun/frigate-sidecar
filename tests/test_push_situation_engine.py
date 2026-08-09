@@ -8,6 +8,10 @@ snapshot.
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.skip(reason="situations pipeline retired in Phase 5 §1")
+
 import asyncio
 import json
 from pathlib import Path

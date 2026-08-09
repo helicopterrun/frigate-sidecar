@@ -65,7 +65,7 @@ def test_build_card_payload_contract_fields():
     assert payload["deep_link"].split("?t=")[1] == str(payload["state_since_ts"])
     assert payload["aps"]["alert"] == {"title": "Person at Front Door", "body": "Front Door · 0s"}
     assert payload["aps"]["interruption-level"] == "active"
-    assert payload["aps"]["sound"] == "default"
+    assert payload["aps"]["sound"] == "general.caf"
     assert payload["aps"]["mutable-content"] == 1
 
 
@@ -96,14 +96,15 @@ def test_build_card_payload_silent_omits_sound_key():
     assert "deep_link" not in payload
 
 
-def test_build_card_payload_quiet_level_no_interruption_level_for_log():
+def test_build_card_payload_enrich_is_passive():
     card = Card(card_key="k", level="log", created_at=0.0, updated_at=0.0, state_since_at=0.0)
     payload = build_card_payload(
         card, "enrich", sound=False, subject_kind="animal", place_class="street",
         camera="front", zone_name="", glyph="animal.seen",
         primary="Animal seen", secondary="Street · 0s", event_ts=0.0,
     )
-    assert "interruption-level" not in payload["aps"]
+    assert payload["aps"]["interruption-level"] == "passive"
+    assert "sound" not in payload["aps"]
 
 
 @pytest.mark.asyncio

@@ -179,11 +179,12 @@ def test_build_la_update_payload_shape():
     assert "attributes-type" not in payload["aps"]
 
 
-def test_build_la_end_payload_dismissal_is_timestamp_plus_four():
+def test_build_la_end_payload_dismissal_is_timestamp_plus_thirty():
     state = _content_state(mutation="resolve", thumbnail_handle=None)
     payload = la.build_la_end_payload(content_state=state, now=1786235329)
     aps = payload["aps"]
     assert aps["event"] == "end"
     assert aps["timestamp"] == 1786235329
-    assert aps["dismissal-date"] == 1786235333
+    assert aps["dismissal-date"] == 1786235359
+    assert aps["relevance-score"] == 0.75  # default level is "notify"
     assert aps["content-state"]["thumbnail_handle"] is None

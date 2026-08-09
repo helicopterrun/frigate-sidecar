@@ -87,6 +87,42 @@ _GUESS_ORDER: tuple[tuple[str, tuple[str, ...]], ...] = (
 _OPENING_NAME_HINTS = ("door", "gate", "garage", "entry", "entrance")
 
 
+def _valid_time(val: str) -> bool:
+    try:
+        parts = val.split(":")
+        if len(parts) != 2:
+            return False
+        h, m = int(parts[0]), int(parts[1])
+        return 0 <= h <= 23 and 0 <= m <= 59
+    except (ValueError, TypeError):
+        return False
+
+
+def _time_to_minutes(val: str) -> int:
+    h, m = val.split(":")
+    return int(h) * 60 + int(m)
+
+
+def is_quiet_hours(settings: dict[str, Any], now_minutes: int) -> tuple[bool, str]:
+    """Check if `now_minutes` (minutes since midnight, local) falls in the
+    quiet-hours window. Returns `(active, mode)`. Wrap-around ranges
+    (e.g. 22:00–07:00) are supported."""
+    qh = settings.get("quiet_hours")
+    if not isinstance(qh, dict):
+        return False, ""
+    try:
+        start = _time_to_minutes(qh["start"])
+        end = _time_to_minutes(qh["end"])
+        mode = qh.get("mode", "cap_quiet")
+    except (KeyError, ValueError, TypeError):
+        return False, ""
+    if start <= end:
+        active = start <= now_minutes < end
+    else:
+        active = now_minutes >= start or now_minutes < end
+    return active, mode if active else ""
+
+
 def guess_zone_class(name: str, cameras: tuple[str, ...] = ()) -> str:
     """Best-effort place-class guess from a zone's name, falling back to its
     camera name(s) if the zone name itself doesn't hint at anything (e.g. a
@@ -112,7 +148,12 @@ def default_settings() -> dict[str, Any]:
         "routing_table": {subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE.items()},
         "zone_classes": {},
         "zone_overrides": {},
-        "live_activities": {family: True for family in FAMILIES} | {"opening_picks": []},
+        "live_activities": {family: True for family in FAMILIES} | {
+            "opening_picks": [],
+            "alert_all_changes": True,
+        },
+        "mute_sounds": False,
+        "quiet_hours": None,
     }
 
 
@@ -190,7 +231,7 @@ def validate_settings(data: Any) -> list[str]:
         if not isinstance(live_activities, dict):
             errors.append("live_activities must be an object")
         else:
-            unknown_keys = set(live_activities) - set(FAMILIES) - {"opening_picks"}
+            unknown_keys = set(live_activities) - set(FAMILIES) - {"opening_picks", "alert_all_changes"}
             if unknown_keys:
                 errors.append(f"live_activities has unknown key(s): {sorted(unknown_keys)}")
             for family in FAMILIES:
@@ -201,6 +242,28 @@ def validate_settings(data: Any) -> list[str]:
                 isinstance(picks, list) and all(isinstance(p, str) for p in picks)
             ):
                 errors.append("live_activities.opening_picks must be a list of strings")
+            aac = live_activities.get("alert_all_changes")
+            if aac is not None and not isinstance(aac, bool):
+                errors.append("live_activities.alert_all_changes must be a boolean")
+
+    mute_sounds = data.get("mute_sounds")
+    if mute_sounds is not None and not isinstance(mute_sounds, bool):
+        errors.append("mute_sounds must be a boolean")
+
+    quiet_hours = data.get("quiet_hours")
+    if quiet_hours is not None:
+        if not isinstance(quiet_hours, dict):
+            errors.append("quiet_hours must be an object or null")
+        else:
+            for field in ("start", "end"):
+                val = quiet_hours.get(field)
+                if not isinstance(val, str) or not _valid_time(val):
+                    errors.append(f"quiet_hours.{field} must be HH:MM (got {val!r})")
+            mode = quiet_hours.get("mode")
+            if mode not in ("cap_quiet", "mute_sounds"):
+                errors.append(
+                    f"quiet_hours.mode must be 'cap_quiet' or 'mute_sounds', got {mode!r}"
+                )
 
     return errors
 
@@ -253,6 +316,21 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
         picks = live_activities.get("opening_picks")
         if isinstance(picks, list):
             merged["live_activities"]["opening_picks"] = [str(p) for p in picks]
+        if isinstance(live_activities.get("alert_all_changes"), bool):
+            merged["live_activities"]["alert_all_changes"] = live_activities["alert_all_changes"]
+
+    if isinstance(data.get("mute_sounds"), bool):
+        merged["mute_sounds"] = data["mute_sounds"]
+
+    quiet_hours = data.get("quiet_hours")
+    if quiet_hours is None:
+        merged["quiet_hours"] = None
+    elif isinstance(quiet_hours, dict):
+        start = quiet_hours.get("start", "")
+        end = quiet_hours.get("end", "")
+        mode = quiet_hours.get("mode", "cap_quiet")
+        if _valid_time(start) and _valid_time(end) and mode in ("cap_quiet", "mute_sounds"):
+            merged["quiet_hours"] = {"start": start, "end": end, "mode": mode}
 
     return merged
 

@@ -51,6 +51,7 @@ async def backfill_since(
     after: float,
     client: httpx.AsyncClient | None = None,
     timeout: float = 10.0,
+    staleness_s: float = 300.0,
 ) -> int:
     """Back-fill any alert-worthy events Frigate recorded during a broker
     blip, evaluating each against registered devices' filters before
@@ -82,6 +83,7 @@ async def backfill_since(
             events = []
         if not isinstance(events, list):
             return 0
+        now = time.time()
         for raw in events:
             if not isinstance(raw, dict):
                 continue
@@ -89,6 +91,9 @@ async def backfill_since(
             label = raw.get("label")
             event_id = raw.get("id")
             if not camera or not event_id:
+                continue
+            start_time = raw.get("start_time")
+            if isinstance(start_time, (int, float)) and (now - start_time) > staleness_s:
                 continue
             event = ReviewEvent(
                 review_id=str(event_id),
@@ -217,7 +222,8 @@ class MqttReviewSubscriber:
         the gap before treating live pushes as caught up."""
         after = self.last_seen - self.settings.backfill_lookback_s
         return await backfill_since(
-            self.engine, frigate_base_url=self.frigate_base_url, after=after
+            self.engine, frigate_base_url=self.frigate_base_url, after=after,
+            staleness_s=self.settings.delivery_backfill_staleness_s,
         )
 
     def build_client(self) -> mqtt.Client:

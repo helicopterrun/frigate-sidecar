@@ -120,8 +120,13 @@ def test_urgent_resound_not_for_notify():
     assert urgent_resound_due(card, now=200.0, interval_s=120.0, enabled=True) is False
 
 
-def test_urgent_resound_only_once():
+def test_urgent_resound_repeats_up_to_max():
     card = make_card("urgent", last_sound_at=0.0, resound_count=1)
+    assert urgent_resound_due(card, now=999.0, interval_s=120.0, enabled=True) is True
+
+
+def test_urgent_resound_stops_at_max():
+    card = make_card("urgent", last_sound_at=0.0, resound_count=5)
     assert urgent_resound_due(card, now=999.0, interval_s=120.0, enabled=True) is False
 
 

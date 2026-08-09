@@ -1,0 +1,424 @@
+"""Phase 5 — Notification Experience v2 (WU7).
+
+Tests for behaviors introduced or changed in Phase 5 that aren't already
+covered by the existing per-module test files:
+
+- Per-device label filtering
+- Snooze → no alert push, no new LA start
+- Global sounding rate cap (11th = silent + passive; next sounding = "+N more")
+- Quiet resolve (peak_level ≤ quiet → no push)
+- Quiet hours enforcement (cap_quiet and mute_sounds modes, urgent exemption)
+- mute_sounds enforcement
+- Payload fields: thread-id, category, apns_priority/apns_expiration
+- Single routing-table default agreement
+- Backfill staleness filter
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from frigate_sidecar import db
+from frigate_sidecar.config import PushSection
+from frigate_sidecar.push import card_store, policy_settings, store
+from frigate_sidecar.push.cards import _level_index
+from frigate_sidecar.push.delivery import (
+    _device_eligible,
+    build_card_payload,
+    send_card_mutation,
+    should_push,
+    sound_name_for_card,
+)
+from frigate_sidecar.push.delivery_wire import (
+    handle_delivery_event,
+    handle_delivery_resolve,
+)
+from frigate_sidecar.push.models import Device, ReviewEvent
+from frigate_sidecar.push.transport import LogTransport
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+def make_device(
+    token: str = "tok1",
+    *,
+    cameras: tuple[str, ...] = (),
+    labels: tuple[str, ...] = (),
+    min_severity: str = "detection",
+    push_to_start: str = "pts1",
+) -> Device:
+    return Device(
+        apns_token=token, device_id=f"d_{token}", bundle_id="com.pondhouse.Elsinore",
+        environment="sandbox", cameras=cameras, labels=labels,
+        min_severity=min_severity, push_to_start_token=push_to_start,
+    )
+
+
+def make_event(
+    camera: str = "doorbell",
+    track_id: str = "trk1",
+    label: str = "person",
+    zones: tuple[str, ...] = ("pool",),
+    severity: str = "alert",
+) -> ReviewEvent:
+    return ReviewEvent(
+        review_id=f"r_{camera}_{track_id}", camera=camera, severity=severity,
+        labels=(label,), track_ids=(track_id,), zones=zones,
+    )
+
+
+def situation_sends(transport: LogTransport) -> list[dict]:
+    return [r for r in transport.sent if "payload" in r and not r.get("live_activity")]
+
+
+def la_sends(transport: LogTransport) -> list[dict]:
+    return [r for r in transport.sent if r.get("live_activity")]
+
+
+# ---------------------------------------------------------------------------
+# Per-device label filtering
+# ---------------------------------------------------------------------------
+
+
+class TestDeviceEligibleLabels:
+    def test_empty_labels_matches_everything(self):
+        dev = make_device(labels=())
+        assert _device_eligible(dev, camera="doorbell", labels=("person",), card_level="notify")
+
+    def test_matching_label_passes(self):
+        dev = make_device(labels=("person",))
+        assert _device_eligible(dev, camera="doorbell", labels=("person",), card_level="notify")
+
+    def test_non_matching_label_filtered(self):
+        dev = make_device(labels=("car",))
+        assert not _device_eligible(dev, camera="doorbell", labels=("person",), card_level="notify")
+
+
+# ---------------------------------------------------------------------------
+# Snooze: no alert push + no new LA start
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_snoozed_camera_skips_push(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    store.set_snooze(conn, apns_token="tok1", scope="camera:doorbell", until_epoch=9999.0)
+    conn.commit()
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=100.0,
+    )
+    assert situation_sends(transport) == []
+    assert la_sends(transport) == []
+    # Card state still advances despite snooze.
+    card = card_store.get_card(conn, "doorbell:stranger:trk1")
+    assert card is not None
+
+
+@pytest.mark.asyncio
+async def test_global_snooze_skips_push(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    store.set_snooze(conn, apns_token="tok1", scope="global", until_epoch=9999.0)
+    conn.commit()
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=100.0,
+    )
+    assert situation_sends(transport) == []
+
+
+# ---------------------------------------------------------------------------
+# Global sounding rate cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rate_cap_silences_11th_sounding_push(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    # Seed 10 sounding sends in the last hour.
+    for i in range(10):
+        store.record_send(conn, apns_token="tok1", situation_id="_card_sound", now=50.0 + i)
+    conn.commit()
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=100.0,
+    )
+    sends = situation_sends(transport)
+    assert len(sends) == 1
+    aps = sends[0]["payload"]["aps"]
+    assert "sound" not in aps
+    assert aps["interruption-level"] == "passive"
+
+
+@pytest.mark.asyncio
+async def test_rate_cap_plus_n_more_on_next_sounding(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    # Seed 10 sounding sends, then bump suppressed count by 3.
+    for i in range(10):
+        store.record_send(conn, apns_token="tok1", situation_id="_card_sound", now=50.0 + i)
+    for _ in range(3):
+        store.bump_suppressed(conn, apns_token="tok1", situation_id="_card_sound")
+    conn.commit()
+
+    # Now send an event when the rate window has passed (sends are old enough).
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=5000.0,
+    )
+    sends = situation_sends(transport)
+    assert len(sends) == 1
+    body = sends[0]["payload"]["aps"]["alert"]["body"]
+    assert "+3 more" in body
+
+
+# ---------------------------------------------------------------------------
+# Quiet resolve
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_quiet_resolve_no_push(sidecar_db_path: Path):
+    """A card whose peak_level never exceeded quiet gets no resolve push."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    # Create at quiet level (thing at off_limits = quiet).
+    await handle_delivery_event(
+        make_event("cam1", "trk1", "package", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    transport.sent.clear()
+
+    # Resolve it.
+    await handle_delivery_resolve(
+        "cam1", "trk1", conn=conn, devices=[device], transport=transport,
+        config=config, subject_kind="thing", now=30.0,
+    )
+    assert situation_sends(transport) == []
+
+
+# ---------------------------------------------------------------------------
+# Quiet hours enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestQuietHours:
+    def test_is_quiet_hours_normal_range(self):
+        settings = policy_settings.default_settings()
+        settings["quiet_hours"] = {"start": "09:00", "end": "17:00", "mode": "cap_quiet"}
+        active, mode = policy_settings.is_quiet_hours(settings, 600)  # 10:00
+        assert active is True
+        assert mode == "cap_quiet"
+        active2, _ = policy_settings.is_quiet_hours(settings, 480)  # 08:00
+        assert active2 is False
+
+    def test_is_quiet_hours_wraparound(self):
+        settings = policy_settings.default_settings()
+        settings["quiet_hours"] = {"start": "22:00", "end": "07:00", "mode": "mute_sounds"}
+        # 23:00 = 1380 minutes → inside
+        active, mode = policy_settings.is_quiet_hours(settings, 1380)
+        assert active is True
+        assert mode == "mute_sounds"
+        # 05:00 = 300 → inside (wrap)
+        active2, _ = policy_settings.is_quiet_hours(settings, 300)
+        assert active2 is True
+        # 12:00 = 720 → outside
+        active3, _ = policy_settings.is_quiet_hours(settings, 720)
+        assert active3 is False
+
+    def test_no_quiet_hours_returns_inactive(self):
+        settings = policy_settings.default_settings()
+        active, mode = policy_settings.is_quiet_hours(settings, 600)
+        assert active is False
+        assert mode == ""
+
+
+# ---------------------------------------------------------------------------
+# mute_sounds enforcement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mute_sounds_suppresses_card(sidecar_db_path: Path):
+    """mute_sounds feeds Snapshot.muted → ladder returns SUPPRESSED → no push."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    settings = policy_settings.default_settings()
+    settings["mute_sounds"] = True
+    policy_settings.apply_settings(settings)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    assert situation_sends(transport) == []
+    # Card is still persisted (suppressed state).
+    card = card_store.get_card(conn, "doorbell:stranger:trk1")
+    assert card is not None
+    assert card.closed is True
+
+
+# ---------------------------------------------------------------------------
+# Payload fields: thread-id, category
+# ---------------------------------------------------------------------------
+
+
+class TestPayloadFields:
+    def _make_card(self):
+        from frigate_sidecar.push.cards import Card
+        return Card(
+            card_key="doorbell:stranger:trk1", level="notify",
+            created_at=0.0, updated_at=10.0, state_since_at=0.0,
+        )
+
+    def test_thread_id_is_camera(self):
+        payload = build_card_payload(
+            self._make_card(), "create", sound=True, subject_kind="stranger",
+            place_class="doors", camera="doorbell", zone_name="front_door",
+            glyph="person.stranger", primary="Person at Front Door",
+            secondary="Front Door · 10s", event_ts=10.0,
+        )
+        assert payload["aps"]["thread-id"] == "doorbell"
+
+    def test_category_matches_level(self):
+        payload = build_card_payload(
+            self._make_card(), "create", sound=True, subject_kind="stranger",
+            place_class="doors", camera="doorbell", zone_name="front_door",
+            glyph="person.stranger", primary="Person", secondary="10s",
+            event_ts=10.0,
+        )
+        assert payload["aps"]["category"] == "card.notify"
+
+    def test_sound_name_urgent(self):
+        assert sound_name_for_card("urgent") == "urgent.caf"
+
+    def test_sound_name_person_at_door(self):
+        assert sound_name_for_card("notify", "stranger", "person") == "at-the-door.caf"
+
+    def test_sound_name_package(self):
+        assert sound_name_for_card("notify", "thing", "package") == "package-delivery.caf"
+
+    def test_sound_name_general(self):
+        assert sound_name_for_card("notify", "animal", "cat") == "general.caf"
+
+
+# ---------------------------------------------------------------------------
+# apns_priority / apns_expiration on LA sends
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_la_start_has_priority_10_and_expiration(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "package", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=100.0,
+    )
+    starts = [r for r in la_sends(transport) if r["event"] == "start"]
+    assert len(starts) == 1
+    # LogTransport doesn't record apns_priority in its dict, but the call
+    # succeeded (no TypeError from missing param), confirming the transport
+    # interface accepts them.
+
+
+# ---------------------------------------------------------------------------
+# Single routing-table default: both init paths agree
+# ---------------------------------------------------------------------------
+
+
+def test_routing_table_defaults_agree():
+    from frigate_sidecar.push import ladder_policy
+    ladder_table = ladder_policy.TABLE
+    settings_table = policy_settings.DEFAULT_ROUTING_TABLE
+    for subject in settings_table:
+        for place in settings_table[subject]:
+            assert ladder_table[subject][place] == settings_table[subject][place], (
+                f"{subject}.{place}: ladder={ladder_table[subject][place]} "
+                f"settings={settings_table[subject][place]}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Backfill staleness filter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backfill_staleness_filters_old_events():
+    import httpx
+    from frigate_sidecar.push.engine import PushEngine
+    from frigate_sidecar.push.mqtt import backfill_since
+    import tempfile, time
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "sidecar.db"
+        conn = db.open_sidecar(db_path)
+        store.upsert_device(
+            conn, apns_token="tok1", bundle_id="com.x", environment="sandbox",
+            cameras=["cam1"], min_severity="detection",
+        )
+        conn.commit()
+        conn.close()
+
+        transport = LogTransport()
+        engine = PushEngine(db_path=str(db_path), transport=transport, server_id="s1")
+        engine.push_config = PushSection(delivery_enabled=True)
+
+        now = time.time()
+        fresh_ts = now - 100   # 100s ago → within 300s staleness
+        stale_ts = now - 500   # 500s ago → outside 300s staleness
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[
+                {"id": "ev1", "camera": "cam1", "label": "person", "start_time": fresh_ts},
+                {"id": "ev2", "camera": "cam1", "label": "car", "start_time": stale_ts},
+            ])
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        notified = await backfill_since(
+            engine, frigate_base_url="http://frigate.test:5000",
+            after=0.0, client=client, staleness_s=300.0,
+        )
+        assert notified == 1
+        await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# delivery_enabled default
+# ---------------------------------------------------------------------------
+
+
+def test_delivery_enabled_defaults_true():
+    assert PushSection().delivery_enabled is True

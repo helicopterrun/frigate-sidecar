@@ -15,9 +15,14 @@ from frigate_sidecar.push.cards import Card
 
 
 def _row_to_card(row: sqlite3.Row) -> Card:
+    try:
+        peak_level = row["peak_level"]
+    except (IndexError, KeyError):
+        peak_level = row["level"]
     return Card(
         card_key=row["card_key"],
         level=row["level"],
+        peak_level=peak_level or row["level"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         state_since_at=row["state_since_at"],
@@ -56,12 +61,13 @@ def upsert_card(
     """
     conn.execute(
         "INSERT INTO push_cards "
-        "(card_key, level, subject_kind, place_class, camera, zone_name, "
+        "(card_key, level, peak_level, subject_kind, place_class, camera, zone_name, "
         " created_at, updated_at, state_since_at, sound_count, handled, handled_at, "
         " last_sound_at, resound_count, resolved, closed) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(card_key) DO UPDATE SET "
-        "level=excluded.level, subject_kind=excluded.subject_kind, "
+        "level=excluded.level, peak_level=excluded.peak_level, "
+        "subject_kind=excluded.subject_kind, "
         "place_class=excluded.place_class, camera=excluded.camera, "
         "zone_name=excluded.zone_name, updated_at=excluded.updated_at, "
         "state_since_at=excluded.state_since_at, "
@@ -70,7 +76,8 @@ def upsert_card(
         "resound_count=excluded.resound_count, resolved=excluded.resolved, "
         "closed=excluded.closed",
         (
-            card.card_key, card.level, subject_kind, place_class, camera, zone_name,
+            card.card_key, card.level, card.peak_level, subject_kind, place_class,
+            camera, zone_name,
             card.created_at, card.updated_at, card.state_since_at, card.sound_count,
             int(card.handled), card.handled_at, card.last_sound_at, card.resound_count,
             int(card.resolved), int(card.closed),
@@ -136,14 +143,19 @@ def migrate_drop_zone_from_card_keys(conn: sqlite3.Connection) -> int:
         candidates = list(old_rows) + ([existing_new] if existing_new is not None else [])
         winner = max(candidates, key=lambda r: (r["updated_at"], r["created_at"]))
 
+        try:
+            peak_level = winner["peak_level"]
+        except (IndexError, KeyError):
+            peak_level = winner["level"]
         conn.execute(
             "INSERT INTO push_cards "
-            "(card_key, level, subject_kind, place_class, camera, zone_name, "
+            "(card_key, level, peak_level, subject_kind, place_class, camera, zone_name, "
             " created_at, updated_at, state_since_at, sound_count, handled, handled_at, "
             " last_sound_at, resound_count, resolved, closed) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(card_key) DO UPDATE SET "
-            "level=excluded.level, subject_kind=excluded.subject_kind, "
+            "level=excluded.level, peak_level=excluded.peak_level, "
+            "subject_kind=excluded.subject_kind, "
             "place_class=excluded.place_class, camera=excluded.camera, "
             "zone_name=excluded.zone_name, created_at=excluded.created_at, "
             "updated_at=excluded.updated_at, state_since_at=excluded.state_since_at, "
@@ -152,7 +164,8 @@ def migrate_drop_zone_from_card_keys(conn: sqlite3.Connection) -> int:
             "resound_count=excluded.resound_count, resolved=excluded.resolved, "
             "closed=excluded.closed",
             (
-                new_key, winner["level"], winner["subject_kind"], winner["place_class"],
+                new_key, winner["level"], peak_level or winner["level"],
+                winner["subject_kind"], winner["place_class"],
                 winner["camera"], winner["zone_name"], winner["created_at"], winner["updated_at"],
                 winner["state_since_at"], winner["sound_count"], winner["handled"],
                 winner["handled_at"], winner["last_sound_at"], winner["resound_count"],

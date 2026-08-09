@@ -3,9 +3,16 @@
 Phase 2's "done looks like" list, one test per line -- plus the two rules it
 is easiest to violate: a device without a push-to-start token keeps working,
 and an escalation is *one* alert carrying the activity's own collapse id.
-"""
 
+NOTE: These tests exercise the **situations** Live Activity pipeline
+(`engine._drive_activities`/`_start_activity`/`_update_activity`), which was
+retired in Phase 5 §1 (all devices now go through the card pipeline). The
+card-model LA tests live in `test_push_card_live_activities.py`.
+"""
 from __future__ import annotations
+
+import pytest
+pytestmark = pytest.mark.skip(reason="situations pipeline retired in Phase 5 §1")
 
 import asyncio
 from pathlib import Path

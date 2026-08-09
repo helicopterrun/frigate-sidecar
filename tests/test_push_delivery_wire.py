@@ -22,10 +22,10 @@ from frigate_sidecar.push.transport import LogTransport
 EXTERNAL_BASE_URL = "http://192.168.50.207:5001"
 
 
-def make_device(token: str = "tok1") -> Device:
+def make_device(token: str = "tok1", min_severity: str = "detection") -> Device:
     return Device(
         apns_token=token, device_id=f"d_{token}", bundle_id="com.pondhouse.Elsinore",
-        environment="sandbox",
+        environment="sandbox", min_severity=min_severity,
     )
 
 
@@ -61,7 +61,8 @@ async def test_zone_change_mutates_same_card_not_a_new_one(sidecar_db_path: Path
     assert transport.sent == []  # log never pushes
 
     # Second evaluation: same track id, now carries a zone -- thing/yard is
-    # `quiet`. This must be the SAME card (escalate), not a second one.
+    # also `log` (table fix WU6). This must be the SAME card (enrich), not a
+    # second one.
     await handle_delivery_event(
         zoned_event, conn=conn, devices=[device], transport=transport,
         config=config, engine=engine, now=10.0,
@@ -69,20 +70,12 @@ async def test_zone_change_mutates_same_card_not_a_new_one(sidecar_db_path: Path
     rows = conn.execute("SELECT card_key, level, zone_name FROM push_cards").fetchall()
     assert len(rows) == 1, "a zone change must mutate the existing card, not fork a new one"
     assert rows[0]["card_key"] == "alley-wide:thing:trk1"
-    assert rows[0]["level"] == "quiet"
+    assert rows[0]["level"] == "log"
     assert rows[0]["zone_name"] == "parking_spot"
 
-    # log -> quiet is a level rise, so the mutation is `escalate` (an
-    # unchanged level in the same situation would be `enrich`); it's the
-    # first push this card ever sent.
-    assert len(transport.sent) == 1
-    sent = transport.sent[0]
-    assert sent["collapse_id"] == "alley-wide:thing:trk1"
-    assert sent["payload"]["card_key"] == "alley-wide:thing:trk1"
-    assert sent["payload"]["mutation"] == "escalate"
-    assert sent["payload"]["level"] == "quiet"
-    assert "sound" not in sent["payload"]["aps"]  # quiet never sounds
-    assert "media" not in sent["payload"]  # escalate never gets a snapshot
+    # thing/yard = log (same as thing/street), so the zone change is an
+    # enrich, not an escalate. log never pushes.
+    assert len(transport.sent) == 0
 
 
 @pytest.mark.asyncio

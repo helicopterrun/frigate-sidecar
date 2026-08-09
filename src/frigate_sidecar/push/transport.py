@@ -61,6 +61,8 @@ class PushTransport(Protocol):
         *,
         payload: dict[str, Any],
         collapse_id: str,
+        apns_priority: int | None = None,
+        apns_expiration: int | None = None,
     ) -> TransportResult:
         """One Interrupt-tier situation push (plan §8).
 
@@ -83,6 +85,8 @@ class PushTransport(Protocol):
         payload: dict[str, Any],
         collapse_id: str,
         event: str,
+        apns_priority: int | None = None,
+        apns_expiration: int | None = None,
     ) -> TransportResult:
         """One Live Activity push: `start`, `update`, or `end` (Phase 2).
 
@@ -152,7 +156,8 @@ class LogTransport:
         return TransportResult(ok=True)
 
     async def send_situation(
-        self, device: Device, *, payload: dict[str, Any], collapse_id: str
+        self, device: Device, *, payload: dict[str, Any], collapse_id: str,
+        apns_priority: int | None = None, apns_expiration: int | None = None,
     ) -> TransportResult:
         record: dict[str, object] = {
             "device_id": device.device_id,
@@ -175,6 +180,7 @@ class LogTransport:
     async def send_live_activity(
         self, device: Device, *, token: str, payload: dict[str, Any],
         collapse_id: str, event: str,
+        apns_priority: int | None = None, apns_expiration: int | None = None,
     ) -> TransportResult:
         record: dict[str, object] = {
             "device_id": device.device_id,
@@ -247,10 +253,14 @@ class RelayTransport:
         *,
         client: httpx.AsyncClient | None = None,
         timeout: float = 10.0,
+        relay_key: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._client = client or self._build_client(timeout)
         self._owns_client = client is None
+        self._relay_key = relay_key
+        if not relay_key:
+            logger.warning("push: relay_key not set — relay requests will be unauthenticated")
 
     @classmethod
     def _build_client(cls, timeout: float) -> httpx.AsyncClient:
@@ -275,6 +285,11 @@ class RelayTransport:
     def _environment(cls, device: Device) -> str:
         return cls._RELAY_ENVIRONMENT.get(device.environment, device.environment)
 
+    def _headers(self) -> dict[str, str]:
+        if self._relay_key:
+            return {"x-relay-key": self._relay_key}
+        return {}
+
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
@@ -298,53 +313,30 @@ class RelayTransport:
         }
         url = f"{self.base_url}/v1/relay/push"
         try:
-            resp = await self._client.post(url, json=payload)
+            resp = await self._client.post(url, json=payload, headers=self._headers())
         except httpx.HTTPError as exc:
             return TransportResult(ok=False, error=str(exc))
 
         return self._result(resp)
 
     async def send_situation(
-        self, device: Device, *, payload: dict[str, Any], collapse_id: str
+        self, device: Device, *, payload: dict[str, Any], collapse_id: str,
+        apns_priority: int | None = None, apns_expiration: int | None = None,
     ) -> TransportResult:
-        """POST a fully-built situation payload to `/v1/relay/situation`.
-
-        **A new relay route, and deliberately not `/v1/relay/push`.** That one
-        takes `{handle, severity}` and *builds* the alert text from a fixed
-        severity-keyed template; handing it a situation would deliver a
-        generic "New alert" banner while reporting success -- the failure mode
-        where the wrong thing arrives and nothing says so. A distinct route
-        404s cleanly until the relay ships the matching version, which shows
-        up in the logs and in the app's test button as a plain failure.
-
-        Wire contract, as implemented in elsinore-push-relay `4278bdf`:
-
-            POST /v1/relay/situation
-            {
-              "device_token":     "<hex>",
-              "environment":      "sandbox" | "production",
-              "apns-collapse-id": "<situation-id>:<track-id>",
-              "payload":          { …the APNs body, forwarded verbatim… }
-            }
-
-        The relay signs the provider JWT and sets `apns-topic`,
-        `apns-push-type: alert` and `apns-priority: 10` itself -- it
-        contributes routing and the collapse id, nothing else, so none of
-        those are sent from here. It validates `payload.aps` and rejects
-        anything over 4KB with a readable 422 rather than letting Apple
-        answer `PayloadTooLarge`. It returns APNs' own status (200, or
-        410/400 for a dead token). It does not persist, log, or inspect the
-        payload body -- plan §8's relay boundary.
-        """
-        body = {
+        """POST a fully-built situation payload to `/v1/relay/situation`."""
+        body: dict[str, Any] = {
             "device_token": device.apns_token,
             "environment": self._environment(device),
             "apns-collapse-id": collapse_id,
             "payload": payload,
         }
+        if apns_priority is not None:
+            body["apns-priority"] = apns_priority
+        if apns_expiration is not None:
+            body["apns-expiration"] = apns_expiration
         url = f"{self.base_url}/v1/relay/situation"
         try:
-            resp = await self._client.post(url, json=body)
+            resp = await self._client.post(url, json=body, headers=self._headers())
         except httpx.HTTPError as exc:
             return TransportResult(ok=False, error=str(exc))
         return self._result(resp)
@@ -352,50 +344,23 @@ class RelayTransport:
     async def send_live_activity(
         self, device: Device, *, token: str, payload: dict[str, Any],
         collapse_id: str, event: str,
+        apns_priority: int | None = None, apns_expiration: int | None = None,
     ) -> TransportResult:
-        """POST a Live Activity push to `/v1/relay/liveactivity`.
-
-        **A fourth relay route, and it cannot be folded into
-        `/v1/relay/situation`.** That route hardcodes `apns-push-type: alert`
-        and `apns-topic: env.APNS_TOPIC` (verified against elsinore-push-relay
-        `43c5209`). A live-activity push needs `apns-push-type: liveactivity`
-        and the `<bundle-id>.push-type.liveactivity` topic; Apple rejects the
-        combination otherwise, and the token is not the device's alert token
-        either. All three differ, so it is a different request in every field
-        that matters.
-
-        Wire contract the relay needs to implement:
-
-            POST /v1/relay/liveactivity
-            {
-              "device_token":     "<per-activity or push-to-start token, hex>",
-              "environment":      "sandbox" | "production",
-              "apns-collapse-id": "<situation-id>:<track-id>",
-              "event":            "start" | "update" | "end",
-              "payload":          { …the APNs body, forwarded verbatim… }
-            }
-
-        The relay signs the same provider JWT, sets `apns-push-type:
-        liveactivity`, `apns-priority: 10`, and
-        `apns-topic: <APNS_TOPIC>.push-type.liveactivity`, then forwards
-        `payload` unchanged. `event` is passed so the relay can validate the
-        shape (`start` must carry `attributes` and `attributes-type`) rather
-        than letting Apple 400 it -- the same courtesy `/v1/relay/situation`
-        already does for oversized payloads.
-
-        Same content-free-at-rest rule: `content-state` transits in flight and
-        is never persisted, logged, or inspected.
-        """
-        body = {
+        """POST a Live Activity push to `/v1/relay/liveactivity`."""
+        body: dict[str, Any] = {
             "device_token": token,
             "environment": self._environment(device),
             "apns-collapse-id": collapse_id,
             "event": event,
             "payload": payload,
         }
+        if apns_priority is not None:
+            body["apns-priority"] = apns_priority
+        if apns_expiration is not None:
+            body["apns-expiration"] = apns_expiration
         url = f"{self.base_url}/v1/relay/liveactivity"
         try:
-            resp = await self._client.post(url, json=body)
+            resp = await self._client.post(url, json=body, headers=self._headers())
         except httpx.HTTPError as exc:
             return TransportResult(ok=False, error=str(exc))
         return self._result(resp)
@@ -419,7 +384,7 @@ class RelayTransport:
         }
         url = f"{self.base_url}/v1/relay/test"
         try:
-            resp = await self._client.post(url, json=payload)
+            resp = await self._client.post(url, json=payload, headers=self._headers())
         except httpx.HTTPError as exc:
             return TransportResult(ok=False, error=str(exc))
         return self._result(resp)

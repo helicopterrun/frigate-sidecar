@@ -36,10 +36,12 @@ from frigate_sidecar.push import card_store
 from frigate_sidecar.push.cards import (
     CREATE,
     DEESCALATE,
+    ENRICH,
     ESCALATE,
     RESOLVE,
     SUPPRESSED,
     Card,
+    _level_index,
     classify_mutation,
     should_sound,
     urgent_resound_due,
@@ -70,6 +72,17 @@ LEVEL_APNS: dict[str, dict[str, Any]] = {
 
 def should_push(level: str) -> bool:
     return LEVEL_APNS.get(level, {}).get("push", False)
+
+
+def sound_name_for_card(level: str, subject_kind: str = "", label: str = "") -> str:
+    """Per-family/level sound name from the app's .caf catalog."""
+    if level == "urgent":
+        return "urgent.caf"
+    if subject_kind in ("stranger", "known") and label == "person":
+        return "at-the-door.caf"
+    if label == "package":
+        return "package-delivery.caf"
+    return "general.caf"
 
 
 def build_card_key(
@@ -141,13 +154,19 @@ def advance_card(
 
     if mutation == CREATE:
         card = Card(
-            card_key=card_key, level=new_level, created_at=now, updated_at=now, state_since_at=now,
+            card_key=card_key, level=new_level, peak_level=new_level,
+            created_at=now, updated_at=now, state_since_at=now,
         )
     else:
-        # classify_mutation only returns escalate/deescalate/enrich with a card.
         assert existing is not None
         state_since = now if mutation in (ESCALATE, DEESCALATE) else existing.state_since_at
-        card = replace(existing, level=new_level, updated_at=now, state_since_at=state_since)
+        peak = existing.peak_level
+        if _level_index(new_level) > _level_index(peak):
+            peak = new_level
+        card = replace(
+            existing, level=new_level, peak_level=peak,
+            updated_at=now, state_since_at=state_since,
+        )
 
     sound = should_sound(card, mutation, new_level)
     if sound:
@@ -189,6 +208,10 @@ def build_card_payload(
     knows the sound-accounting outcome) must supply rather than derive here.
     """
     interruption_level = LEVEL_APNS.get(card.level, {}).get("interruption_level")
+    # Silent enriches: same level, new facts — no new banner/sound (§2).
+    if mutation == ENRICH:
+        interruption_level = "passive"
+        sound = False
     aps: dict[str, Any] = {
         "alert": {"title": primary, "body": secondary},
         "mutable-content": 1,
@@ -196,10 +219,9 @@ def build_card_payload(
     if interruption_level is not None:
         aps["interruption-level"] = interruption_level
     if sound:
-        # No situation-specific sound catalog applies to ladder cards --
-        # design doc §4: "default sound", both levels that can ever carry
-        # one (`notify`, `urgent`) use the same one.
-        aps["sound"] = "default"
+        aps["sound"] = sound_name_for_card(card.level, subject_kind, place_class)
+    aps["thread-id"] = camera
+    aps["category"] = f"card.{card.level}"
 
     state_since_ts = round(card.state_since_at, 3)
     payload: dict[str, Any] = {
@@ -244,6 +266,31 @@ def _fit_to_budget(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+_LEVEL_TO_SEVERITY = {"urgent": "alert", "notify": "alert", "quiet": "detection", "log": "log"}
+_SEVERITY_INDEX = {"log": 0, "detection": 1, "alert": 2}
+
+_SOUND_RATE_KEY = "_card_sound"
+
+
+def _device_eligible(
+    device: Device, *, camera: str, labels: tuple[str, ...], card_level: str,
+) -> bool:
+    if device.cameras and camera not in device.cameras:
+        return False
+    if device.labels and not (set(device.labels) & set(labels)):
+        return False
+    card_sev = _LEVEL_TO_SEVERITY.get(card_level, "log")
+    if _SEVERITY_INDEX.get(card_sev, 0) < _SEVERITY_INDEX.get(device.min_severity, 2):
+        return False
+    return True
+
+
+def _is_snoozed(conn: Any, device: Device, camera: str, *, now: float) -> bool:
+    from frigate_sidecar.push import store
+    snoozed = store.active_snoozes(conn, device.apns_token, now=now)
+    return "global" in snoozed or f"camera:{camera}" in snoozed
+
+
 async def send_card_mutation(
     conn: Any,
     transport: PushTransport,
@@ -256,20 +303,78 @@ async def send_card_mutation(
     place_class: str = "",
     camera: str = "",
     zone_name: str = "",
+    labels: tuple[str, ...] = (),
+    now: float | None = None,
 ) -> int:
-    """Persist `card` and, if `payload` is not None (i.e. `should_push`
-    said yes), send it to every device. Returns the number of sends
-    attempted -- not the number that succeeded; `transport` logs failures.
-    """
+    """Persist `card` and send to eligible devices, honoring per-device
+    filtering, snooze, quiet resolves, and the global sounding rate cap."""
+    import time as _time
+    from frigate_sidecar.push import store
+
+    now = _time.time() if now is None else now
     card_store.upsert_card(
         conn, card, subject_kind=subject_kind, place_class=place_class,
         camera=camera, zone_name=zone_name,
     )
     if payload is None:
         return 0
+
+    # Quiet resolves: don't push resolve for cards whose peak never exceeded quiet.
+    if mutation == RESOLVE:
+        from frigate_sidecar.push import ladder_policy
+        quiet_idx = ladder_policy.LEVELS.index("quiet")
+        peak_idx = _level_index(card.peak_level)
+        if peak_idx <= quiet_idx:
+            return 0
+        # Cards that did produce a notification get one final silent update.
+        payload = dict(payload)
+        payload["aps"] = dict(payload["aps"])
+        payload["aps"].pop("sound", None)
+        payload["aps"]["interruption-level"] = "passive"
+
+    has_sound = bool(payload.get("aps", {}).get("sound"))
+
     sent = 0
     for device in devices:
-        result = await transport.send_situation(device, payload=payload, collapse_id=card.card_key)
+        if not _device_eligible(device, camera=camera, labels=labels, card_level=card.level):
+            continue
+        if _is_snoozed(conn, device, camera, now=now):
+            continue
+
+        dev_payload = payload
+        if has_sound:
+            recent = store.count_sends_since(
+                conn, apns_token=device.apns_token, situation_id=_SOUND_RATE_KEY,
+                since=now - 3600.0,
+            )
+            if recent >= 10:
+                dev_payload = dict(payload)
+                dev_payload["aps"] = dict(dev_payload["aps"])
+                dev_payload["aps"].pop("sound", None)
+                dev_payload["aps"]["interruption-level"] = "passive"
+                store.bump_suppressed(
+                    conn, apns_token=device.apns_token, situation_id=_SOUND_RATE_KEY,
+                )
+                conn.commit()
+            else:
+                suppressed = store.take_suppressed(
+                    conn, apns_token=device.apns_token, situation_id=_SOUND_RATE_KEY,
+                )
+                conn.commit()
+                if suppressed:
+                    dev_payload = dict(payload)
+                    dev_payload["aps"] = dict(dev_payload["aps"])
+                    body = dev_payload["aps"].get("alert", {}).get("body", "")
+                    dev_payload["aps"]["alert"] = dict(dev_payload["aps"].get("alert", {}))
+                    dev_payload["aps"]["alert"]["body"] = f"{body} · +{suppressed} more"
+                store.record_send(
+                    conn, apns_token=device.apns_token, situation_id=_SOUND_RATE_KEY, now=now,
+                )
+                conn.commit()
+
+        result = await transport.send_situation(
+            device, payload=dev_payload, collapse_id=card.card_key,
+        )
         if not result.ok:
             logger.info(
                 "push: card send failed device=%s card_key=%s mutation=%s error=%s",
@@ -278,7 +383,7 @@ async def send_card_mutation(
         sent += 1
     logger.info(
         "push: card mutation=%s level=%s card_key=%s sound=%s devices=%d",
-        mutation, card.level, card.card_key, bool(payload.get("aps", {}).get("sound")), sent,
+        mutation, card.level, card.card_key, has_sound, sent,
     )
     return sent
 
@@ -291,25 +396,24 @@ async def sweep_urgent_resound(
     now: float | None = None,
     interval_s: float = 120.0,
     enabled: bool = True,
+    max_resounds: int = 5,
     payload_for_resound: Any = None,
 ) -> int:
-    """Check every open `urgent` card for the one-time re-sound (design doc
-    §3). `payload_for_resound(card, context) -> dict` builds the payload for
-    a re-sound push (same copy as the card's last state, sound forced on);
-    `context` is the `{subject_kind, place_class, camera, zone_name}` dict
-    stored alongside the card (`card_store.list_open_urgent_cards`), since a
-    bare `Card` doesn't carry the copy inputs and the sweep has no live
-    event to re-derive them from.
-    """
+    """Check every open `urgent` card for repeating re-sounds (§2). Each
+    re-sound counts against the global sounding rate cap."""
     if not enabled or payload_for_resound is None:
         return 0
     now = time.time() if now is None else now
     resounded = 0
     for card, context in card_store.list_open_urgent_cards(conn):
-        if not urgent_resound_due(card, now=now, interval_s=interval_s, enabled=enabled):
+        if not urgent_resound_due(
+            card, now=now, interval_s=interval_s, enabled=enabled, max_resounds=max_resounds,
+        ):
             continue
         card = apply_urgent_resound(card, now=now)
         payload = payload_for_resound(card, context)
-        await send_card_mutation(conn, transport, devices, card, ESCALATE, payload, **context)
+        await send_card_mutation(
+            conn, transport, devices, card, ESCALATE, payload, now=now, **context,
+        )
         resounded += 1
     return resounded

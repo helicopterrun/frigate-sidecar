@@ -30,13 +30,16 @@ import time
 from typing import TYPE_CHECKING
 
 from frigate_sidecar.push import card_store, live_activities, policy_settings, store
-from frigate_sidecar.push.cards import CREATE, ENRICH, RESOLVE, Card
+from frigate_sidecar.push.cards import CREATE, ENRICH, ESCALATE, RESOLVE, Card
 from frigate_sidecar.push.delivery import advance_card as _advance_card
 from frigate_sidecar.push.delivery import (
+    _device_eligible,
+    _is_snoozed,
     build_card_key,
     build_card_payload,
     send_card_mutation,
     should_push,
+    sound_name_for_card,
 )
 from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
 from frigate_sidecar.push.models import ReviewEvent
@@ -304,6 +307,10 @@ async def _deliver_live_activities(
     # the same value regardless of which camera's event triggered this call.
     la_track_id = card_key.split(":", 2)[-1]
 
+    policy = policy_settings.get_active()
+    alert_all = policy.get("live_activities", {}).get("alert_all_changes", True)
+    stale_s = config.delivery_la_stale_s
+
     for device in devices:
         row = store.find_activity(
             conn, apns_token=device.apns_token, situation_id=card_key, track_id=la_track_id,
@@ -321,21 +328,24 @@ async def _deliver_live_activities(
                 card_key=card_key, thumbnail_handle=None,
                 thumbnail_revision=int(row["thumbnail_revision"] or 1),
             )
-            payload = live_activities.build_la_end_payload(content_state=content_state, now=now)
-            # The per-activity token if the app ever uploaded one, else the
-            # push-to-start token: APNs accepts an `end` push-to-start too, so
-            # a card resolving before the token arrives still dismisses the
-            # activity instead of leaving it stuck open forever.
+            payload = live_activities.build_la_end_payload(
+                content_state=content_state, now=now, dismissal_offset=30.0,
+            )
             token = row["token"] or device.push_to_start_token
             if token:
                 await transport.send_live_activity(
                     device, token=token, payload=payload, collapse_id=card_key, event="end",
+                    apns_priority=5,
                 )
             store.close_activity(conn, row["activity_id"], now=now)
             continue
 
         if row is None:
             if mutation != CREATE or family is None or not device.push_to_start_token:
+                continue
+            if not _device_eligible(device, camera=camera, labels=(label,), card_level=card.level):
+                continue
+            if _is_snoozed(conn, device, camera, now=now):
                 continue
             content_state = live_activities.build_content_state(
                 level=card.level, mutation=mutation,
@@ -347,11 +357,12 @@ async def _deliver_live_activities(
             )
             payload = live_activities.build_la_start_payload(
                 content_state=content_state, family=family, camera=camera,
-                track_id=la_track_id, card_key=card_key, now=now,
+                track_id=la_track_id, card_key=card_key, now=now, stale_s=stale_s,
             )
             result = await transport.send_live_activity(
                 device, token=device.push_to_start_token, payload=payload,
                 collapse_id=card_key, event="start",
+                apns_priority=10, apns_expiration=int(now + 900),
             )
             if not result.ok:
                 continue
@@ -364,11 +375,6 @@ async def _deliver_live_activities(
             store.record_activity_send(conn, activity_id=activity_id, now=now)
             continue
 
-        # An activity is already running for this card+device -- advance it,
-        # if the app has uploaded the per-activity token yet. "Not yet" is a
-        # normal transient state (design doc §7): the activity is on screen
-        # and will catch up on the next mutation, so this update is simply
-        # dropped rather than buffered or retried.
         if not row["token"]:
             continue
         revision = int(row["thumbnail_revision"] or 1)
@@ -382,9 +388,28 @@ async def _deliver_live_activities(
             primary=primary, secondary=secondary, elapsed_seconds=elapsed_seconds,
             card_key=card_key, thumbnail_handle=media_handle, thumbnail_revision=revision,
         )
-        payload = live_activities.build_la_update_payload(content_state=content_state, now=now)
+
+        # Escalation alert: when level rises to notify/urgent, the LA update
+        # carries an alert dict + sound so iOS surfaces a banner.
+        wants_alert = False
+        la_sound = None
+        la_interruption = None
+        if mutation == ESCALATE and card.level in ("notify", "urgent"):
+            wants_alert = True
+            la_sound = sound_name_for_card(card.level, subject_kind, label)
+            la_interruption = "time-sensitive" if card.level == "urgent" else "active"
+        elif alert_all and mutation in (ESCALATE, "deescalate"):
+            wants_alert = True
+
+        priority = 10 if wants_alert else 5
+        payload = live_activities.build_la_update_payload(
+            content_state=content_state, now=now, stale_s=stale_s,
+            alert=wants_alert, alert_title=primary, alert_body=secondary,
+            sound=la_sound, interruption_level=la_interruption,
+        )
         await transport.send_live_activity(
             device, token=row["token"], payload=payload, collapse_id=card_key, event="update",
+            apns_priority=priority, apns_expiration=int(now + 900),
         )
         store.touch_activity(
             conn, row["activity_id"], thumbnail_revision=revision, pushed=True, now=now,
@@ -419,11 +444,28 @@ async def handle_delivery_event(
     now = time.time() if now is None else now
     policy = policy_settings.get_active()
 
+    # Quiet hours (§4): check before ladder evaluation.
+    import datetime
+    local_now = datetime.datetime.now()
+    now_minutes = local_now.hour * 60 + local_now.minute
+    qh_active, qh_mode = policy_settings.is_quiet_hours(policy, now_minutes)
+
+    muted = bool(policy.get("mute_sounds"))
+
     snapshot, subject_kind, place_class = snapshot_from_review(
         event, zone_classes=policy["zone_classes"],
         nobody_home=nobody_home, night=night, dwell_exceeded=dwell_exceeded,
+        muted=muted,
     )
     level = evaluate_ladder(snapshot)
+
+    # Quiet hours: cap_quiet caps level at quiet (urgent exempt).
+    if qh_active and qh_mode == "cap_quiet" and level != "urgent":
+        from frigate_sidecar.push import ladder_policy
+        quiet_idx = ladder_policy.LEVELS.index("quiet")
+        level_idx = ladder_policy.LEVELS.index(level)
+        if level_idx > quiet_idx:
+            level = "quiet"
     zone_name = event.zones[0] if event.zones else ""
     track_ids = event.track_ids or (event.event_id,)
 
@@ -447,6 +489,13 @@ async def handle_delivery_event(
             # (below) so the app's timeline routing is unaffected.
             secondary = f"{secondary} · also on {event.camera.replace('_', ' ').title()}"
 
+        # mute_sounds / quiet-hours mute_sounds mode: omit sound entirely
+        # (urgent exempt from quiet-hours mute).
+        if muted:
+            sound = False
+        if qh_active and qh_mode == "mute_sounds" and card.level != "urgent":
+            sound = False
+
         payload = None
         warm_task = None
         media_handle = None
@@ -465,6 +514,7 @@ async def handle_delivery_event(
             conn, transport, devices, card, mutation, payload,
             subject_kind=subject_kind, place_class=place_class,
             camera=owning_camera, zone_name=zone_name,
+            labels=event.labels, now=now,
         )
         if warm_task is not None:
             # Runs concurrently with the send above, not in series (plan §4

@@ -77,6 +77,9 @@ class Card:
     #: clock the payload's `state_since_ts` reports -- "how long the state
     #: has been true", not since the first detector event ever seen.
     state_since_at: float = 0.0
+    #: Highest level this card has ever reached. Used to decide whether a
+    #: resolve push is worth sending (§2: quiet-only cards resolve silently).
+    peak_level: str = "log"
     #: Sounds already spent against `SOUND_BUDGET` (create + first escalate).
     #: Does *not* include the urgent re-sound, which is tracked separately.
     sound_count: int = 0
@@ -153,19 +156,19 @@ def should_sound(card: Card, mutation: str, new_level: str) -> bool:
     return card.sound_budget_remaining
 
 
-def urgent_resound_due(card: Card, *, now: float, interval_s: float, enabled: bool) -> bool:
+def urgent_resound_due(
+    card: Card, *, now: float, interval_s: float, enabled: bool, max_resounds: int = 5,
+) -> bool:
     """True if an `urgent` card that hasn't been handled should re-sound.
 
-    Config-gated (`enabled`, default on for urgent only per the design doc);
-    fires once per card lifetime (`resound_count == 0`); measured from the
-    card's last sound, not from creation, so a card that escalates late still
-    gets the full interval before its first re-sound check.
+    Config-gated (`enabled`); fires every `interval_s` while urgent, up to
+    `max_resounds` total. Measured from the card's last sound, not creation.
     """
     if not enabled:
         return False
     if card.level != "urgent" or card.resolved or card.closed or card.handled:
         return False
-    if card.resound_count > 0:
+    if card.resound_count >= max_resounds:
         return False
     if card.last_sound_at is None:
         return False

@@ -9,9 +9,9 @@
       {"kind": "snapshot", "now": 4200, "inputs": {"subject": "thing", "place": "yard"}, "resolved": true}
     ],
     "expected": [
-      {"mutation": "create", "level": "quiet", "sound": false, "push": true},
-      {"mutation": "escalate", "level": "notify", "sound": true, "push": true},
-      {"mutation": "resolve", "level": "notify", "sound": false, "push": true}
+      {"mutation": "create", "level": "log", "sound": false, "push": false},
+      {"mutation": "escalate", "level": "quiet", "sound": false, "push": true},
+      {"mutation": "resolve", "level": "quiet", "sound": false, "push": true}
     ]
   },
   {
@@ -39,8 +39,8 @@
       {"kind": "snapshot", "now": 1800, "inputs": {"subject": "thing", "place": "doors", "ai_flagged": true}}
     ],
     "expected": [
-      {"mutation": "create", "level": "quiet", "sound": false, "push": true},
-      {"mutation": "escalate", "level": "notify", "sound": true, "push": true},
+      {"mutation": "create", "level": "log", "sound": false, "push": false},
+      {"mutation": "escalate", "level": "quiet", "sound": false, "push": true},
       {"mutation": "escalate", "level": "urgent", "sound": true, "push": true}
     ]
   },

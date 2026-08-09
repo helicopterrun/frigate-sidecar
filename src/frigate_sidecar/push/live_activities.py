@@ -40,13 +40,15 @@ import json
 import time
 from typing import Any
 
-from frigate_sidecar.push.cards import RESOLVE
+from frigate_sidecar.push.cards import ESCALATE, RESOLVE
 from frigate_sidecar.push.payload import APNS_MAX_PAYLOAD_BYTES
 
 #: The app's `ActivityAttributes` conformer for card-model activities.
 #: iOS matches the push-to-start push to a registered attributes type by
 #: this exact string -- it must equal the Swift type name.
 ATTRIBUTES_TYPE = "ElsinoreActivityAttributes"
+
+_RELEVANCE_SCORE = {"urgent": 1.0, "notify": 0.75, "quiet": 0.5, "log": 0.25}
 
 PACKAGE = "package"
 BINS = "bins"
@@ -177,15 +179,17 @@ def build_la_start_payload(
     track_id: str,
     card_key: str,
     now: float | None = None,
+    stale_s: float = 900.0,
 ) -> dict[str, Any]:
-    """The push-to-start payload asking iOS to create the activity. Only
-    this shape carries `attributes`/`attributes-type` -- the static half,
-    fixed for the activity's whole lifetime."""
+    """The push-to-start payload asking iOS to create the activity."""
     sent_at = time.time() if now is None else now
+    level = content_state.get("level", "log")
     payload = {
         "aps": {
             "timestamp": int(sent_at),
             "event": "start",
+            "relevance-score": _RELEVANCE_SCORE.get(level, 0.25),
+            "stale-date": int(sent_at + stale_s),
             "content-state": content_state,
             "attributes-type": ATTRIBUTES_TYPE,
             "attributes": {
@@ -201,16 +205,34 @@ def build_la_start_payload(
 
 def build_la_update_payload(
     *, content_state: dict[str, Any], now: float | None = None,
+    stale_s: float = 900.0,
+    alert: bool = False,
+    alert_title: str = "",
+    alert_body: str = "",
+    sound: str | None = None,
+    interruption_level: str | None = None,
 ) -> dict[str, Any]:
-    """A silent content-state advance over the per-activity token."""
+    """A content-state advance over the per-activity token.
+
+    When `alert` is True, the update carries an `alert` dict + optional sound
+    so iOS surfaces a banner (escalation alert, §5).
+    """
     sent_at = time.time() if now is None else now
-    payload = {
-        "aps": {
-            "timestamp": int(sent_at),
-            "event": "update",
-            "content-state": content_state,
-        },
+    level = content_state.get("level", "log")
+    aps: dict[str, Any] = {
+        "timestamp": int(sent_at),
+        "event": "update",
+        "relevance-score": _RELEVANCE_SCORE.get(level, 0.25),
+        "stale-date": int(sent_at + stale_s),
+        "content-state": content_state,
     }
+    if alert:
+        aps["alert"] = {"title": alert_title, "body": alert_body}
+        if sound:
+            aps["sound"] = sound
+        if interruption_level:
+            aps["interruption-level"] = interruption_level
+    payload = {"aps": aps}
     return _fit(payload)
 
 
@@ -218,17 +240,19 @@ def build_la_end_payload(
     *,
     content_state: dict[str, Any],
     now: float | None = None,
-    dismissal_offset: float = 4.0,
+    dismissal_offset: float = 30.0,
 ) -> dict[str, Any]:
     """Resolution. `dismissal-date` is `timestamp + dismissal_offset` --
     show the resolved state briefly, then iOS clears it from the lock
     screen; the activity itself lingers in the recent-activities area for up
     to 4h on its own, system-controlled schedule."""
     sent_at = time.time() if now is None else now
+    level = content_state.get("level", "log")
     payload = {
         "aps": {
             "timestamp": int(sent_at),
             "event": "end",
+            "relevance-score": _RELEVANCE_SCORE.get(level, 0.25),
             "dismissal-date": int(sent_at) + int(dismissal_offset),
             "content-state": content_state,
         },

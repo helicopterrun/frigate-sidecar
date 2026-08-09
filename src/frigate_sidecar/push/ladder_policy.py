@@ -31,8 +31,8 @@ TABLE: dict[str, dict[str, str]] = {
         "private": "quiet", "off_limits": "quiet",
     },
     "thing": {
-        "street": "log", "yard": "quiet", "doors": "quiet",
-        "private": "quiet", "off_limits": "quiet",
+        "street": "log", "yard": "log", "doors": "log",
+        "private": "log", "off_limits": "quiet",
     },
 }
 

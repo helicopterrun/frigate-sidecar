@@ -141,12 +141,14 @@ async def test_backfill_since_dispatches_matching_events(tmp_path: Path) -> None
     db_path = tmp_path / "sidecar.db"
     conn = db.open_sidecar(db_path)
     store.upsert_device(conn, apns_token="tok1", bundle_id="com.x", environment="sandbox",
-                         cameras=["doorbell"])
+                         cameras=["doorbell"], min_severity="detection")
     conn.commit()
     conn.close()
 
     transport = LogTransport()
     engine = PushEngine(db_path=str(db_path), transport=transport, server_id="s1")
+    from frigate_sidecar.config import PushSection
+    engine.push_config = PushSection(delivery_enabled=True)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -161,8 +163,9 @@ async def test_backfill_since_dispatches_matching_events(tmp_path: Path) -> None
     notified = await backfill_since(
         engine, frigate_base_url="http://frigate.test:5000", after=0.0, client=client,
     )
-    assert notified == 1
-    assert transport.sent[0]["handle"]
+    # Both events create cards (card pipeline evaluates every event). No zones
+    # → street place class → log level → no push, but the card is still mutated.
+    assert notified == 2
     await client.aclose()
 
 

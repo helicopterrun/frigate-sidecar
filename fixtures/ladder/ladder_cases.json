@@ -1,25 +1,227 @@
 [
-  {"id": 1, "name": "Stranger at door, noon", "inputs": {"subject": "stranger", "place": "doors"}, "expected": "notify"},
-  {"id": 2, "name": "Stranger in driveway, noon", "inputs": {"subject": "stranger", "place": "yard"}, "expected": "quiet"},
-  {"id": 3, "name": "Stranger in driveway, 2am, nobody home", "inputs": {"subject": "stranger", "place": "yard", "night": true, "nobody_home": true}, "expected": "notify"},
-  {"id": 4, "name": "Stranger at pool", "inputs": {"subject": "stranger", "place": "off_limits"}, "expected": "urgent"},
-  {"id": 5, "name": "Homeowner at own pool, 2am, away", "inputs": {"subject": "known", "place": "off_limits", "night": true, "nobody_home": true}, "expected": "quiet"},
-  {"id": 6, "name": "Kid at pool", "inputs": {"subject": "known", "place": "off_limits", "child_hazard_zone": true}, "expected": "notify"},
-  {"id": "7a", "name": "Stranger at door (pre-identity)", "inputs": {"subject": "stranger", "place": "doors"}, "expected": "notify"},
-  {"id": "7b", "name": "Same event, face resolves", "inputs": {"subject": "known", "place": "doors"}, "expected": "quiet"},
-  {"id": 8, "name": "Known face forces the door", "inputs": {"subject": "known", "place": "doors", "ai_flagged": true}, "expected": "urgent"},
-  {"id": 9, "name": "Delivery driver at door", "inputs": {"subject": "stranger", "place": "doors", "known_role": true}, "expected": "quiet"},
-  {"id": 10, "name": "Cat in pool enclosure", "inputs": {"subject": "animal", "place": "off_limits"}, "expected": "quiet"},
-  {"id": 11, "name": "Bear in back yard at night", "inputs": {"subject": "animal", "place": "private", "label": "bear", "night": true}, "expected": "urgent"},
-  {"id": 12, "name": "Same bear, two-day-old detector", "inputs": {"subject": "animal", "place": "private", "label": "bear", "night": true, "detector_confirmed": false}, "expected": "quiet"},
-  {"id": 13, "name": "Deer in yard, afternoon", "inputs": {"subject": "animal", "place": "yard"}, "expected": "quiet"},
-  {"id": 14, "name": "Bird on street", "inputs": {"subject": "animal", "place": "street"}, "expected": "log"},
-  {"id": 15, "name": "Garage open an hour", "inputs": {"subject": "thing", "place": "doors", "dwell_exceeded": true}, "expected": "notify"},
-  {"id": 16, "name": "Package taken by stranger", "inputs": {"subject": "thing", "place": "yard", "dwell_exceeded": true}, "expected": "notify"},
-  {"id": 17, "name": "Muted subject, anything", "inputs": {"subject": "stranger", "place": "off_limits", "muted": true}, "expected": "suppressed"},
-  {"id": 18, "name": "No recognition set up anywhere", "inputs": {"subject": "stranger", "place": "doors", "no_recognition_capability": true}, "expected": "quiet"},
-  {"id": 19, "name": "Camera offline (system card)", "inputs": {"source": "system"}, "expected": "notify"},
-  {"id": "19b", "name": "System card, muted", "inputs": {"source": "system", "muted": true}, "expected": "suppressed"},
-  {"id": 20, "name": "Screaming on the street camera", "inputs": {"subject": "stranger", "place": "street", "audio_safety": true}, "expected": "urgent"},
-  {"id": 21, "name": "Smoke alarm, unconfirmed audio detector", "inputs": {"subject": "stranger", "place": "yard", "audio_safety": true, "detector_confirmed": false}, "expected": "urgent"}
+  {
+    "id": 1,
+    "name": "Stranger at door, noon",
+    "inputs": {
+      "subject": "stranger",
+      "place": "doors"
+    },
+    "expected": "notify"
+  },
+  {
+    "id": 2,
+    "name": "Stranger in driveway, noon",
+    "inputs": {
+      "subject": "stranger",
+      "place": "yard"
+    },
+    "expected": "quiet"
+  },
+  {
+    "id": 3,
+    "name": "Stranger in driveway, 2am, nobody home",
+    "inputs": {
+      "subject": "stranger",
+      "place": "yard",
+      "night": true,
+      "nobody_home": true
+    },
+    "expected": "notify"
+  },
+  {
+    "id": 4,
+    "name": "Stranger at pool",
+    "inputs": {
+      "subject": "stranger",
+      "place": "off_limits"
+    },
+    "expected": "urgent"
+  },
+  {
+    "id": 5,
+    "name": "Homeowner at own pool, 2am, away",
+    "inputs": {
+      "subject": "known",
+      "place": "off_limits",
+      "night": true,
+      "nobody_home": true
+    },
+    "expected": "quiet"
+  },
+  {
+    "id": 6,
+    "name": "Kid at pool",
+    "inputs": {
+      "subject": "known",
+      "place": "off_limits",
+      "child_hazard_zone": true
+    },
+    "expected": "notify"
+  },
+  {
+    "id": "7a",
+    "name": "Stranger at door (pre-identity)",
+    "inputs": {
+      "subject": "stranger",
+      "place": "doors"
+    },
+    "expected": "notify"
+  },
+  {
+    "id": "7b",
+    "name": "Same event, face resolves",
+    "inputs": {
+      "subject": "known",
+      "place": "doors"
+    },
+    "expected": "quiet"
+  },
+  {
+    "id": 8,
+    "name": "Known face forces the door",
+    "inputs": {
+      "subject": "known",
+      "place": "doors",
+      "ai_flagged": true
+    },
+    "expected": "urgent"
+  },
+  {
+    "id": 9,
+    "name": "Delivery driver at door",
+    "inputs": {
+      "subject": "stranger",
+      "place": "doors",
+      "known_role": true
+    },
+    "expected": "quiet"
+  },
+  {
+    "id": 10,
+    "name": "Cat in pool enclosure",
+    "inputs": {
+      "subject": "animal",
+      "place": "off_limits"
+    },
+    "expected": "quiet"
+  },
+  {
+    "id": 11,
+    "name": "Bear in back yard at night",
+    "inputs": {
+      "subject": "animal",
+      "place": "private",
+      "label": "bear",
+      "night": true
+    },
+    "expected": "urgent"
+  },
+  {
+    "id": 12,
+    "name": "Same bear, two-day-old detector",
+    "inputs": {
+      "subject": "animal",
+      "place": "private",
+      "label": "bear",
+      "night": true,
+      "detector_confirmed": false
+    },
+    "expected": "quiet"
+  },
+  {
+    "id": 13,
+    "name": "Deer in yard, afternoon",
+    "inputs": {
+      "subject": "animal",
+      "place": "yard"
+    },
+    "expected": "quiet"
+  },
+  {
+    "id": 14,
+    "name": "Bird on street",
+    "inputs": {
+      "subject": "animal",
+      "place": "street"
+    },
+    "expected": "log"
+  },
+  {
+    "id": 15,
+    "name": "Garage open an hour",
+    "inputs": {
+      "subject": "thing",
+      "place": "doors",
+      "dwell_exceeded": true
+    },
+    "expected": "quiet"
+  },
+  {
+    "id": 16,
+    "name": "Package taken by stranger",
+    "inputs": {
+      "subject": "thing",
+      "place": "yard",
+      "dwell_exceeded": true
+    },
+    "expected": "quiet"
+  },
+  {
+    "id": 17,
+    "name": "Muted subject, anything",
+    "inputs": {
+      "subject": "stranger",
+      "place": "off_limits",
+      "muted": true
+    },
+    "expected": "suppressed"
+  },
+  {
+    "id": 18,
+    "name": "No recognition set up anywhere",
+    "inputs": {
+      "subject": "stranger",
+      "place": "doors",
+      "no_recognition_capability": true
+    },
+    "expected": "quiet"
+  },
+  {
+    "id": 19,
+    "name": "Camera offline (system card)",
+    "inputs": {
+      "source": "system"
+    },
+    "expected": "notify"
+  },
+  {
+    "id": "19b",
+    "name": "System card, muted",
+    "inputs": {
+      "source": "system",
+      "muted": true
+    },
+    "expected": "suppressed"
+  },
+  {
+    "id": 20,
+    "name": "Screaming on the street camera",
+    "inputs": {
+      "subject": "stranger",
+      "place": "street",
+      "audio_safety": true
+    },
+    "expected": "urgent"
+  },
+  {
+    "id": 21,
+    "name": "Smoke alarm, unconfirmed audio detector",
+    "inputs": {
+      "subject": "stranger",
+      "place": "yard",
+      "audio_safety": true,
+      "detector_confirmed": false
+    },
+    "expected": "urgent"
+  }
 ]

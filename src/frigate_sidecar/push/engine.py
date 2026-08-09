@@ -200,15 +200,8 @@ class PushEngine:
         self._sub_labels.clear()
 
     async def handle_object_payload(self, payload: dict[str, Any]) -> int:
-        """Dwell input from one `frigate/events` message.
-
-        This topic never triggers a push by itself: a match here is only
-        possible for a track a `frigate/reviews` message already declared
-        push-worthy, whose rule was waiting on loiter. What it provides is the
-        two things the review topic cannot -- live zone occupancy, so leaving
-        resets the dwell, and a tick every few hundred milliseconds, so a
-        threshold crossed while nothing else is happening is actually noticed.
-        """
+        """Process one `frigate/events` message — track observation and
+        delivery resolution only (Phase 5: situations pipeline retired)."""
         if self.dwell_source != "events":
             return 0
         obj = parse_object_message(payload)
@@ -217,11 +210,6 @@ class PushEngine:
         key = (obj.camera, obj.track_id)
 
         if obj.msg_type == "end":
-            # Frigate says the object is gone. That is resolution, and a
-            # faster signal than waiting out the quiet timeout -- but the
-            # activities have to be ended before the track state they are
-            # keyed on is dropped.
-            ended = await self._end_activities_for_track(obj.camera, obj.track_id)
             if self.push_config is not None and self.push_config.delivery_enabled:
                 conn = self._conn()
                 try:
@@ -236,30 +224,14 @@ class PushEngine:
             self._pending.pop(key, None)
             self._pending_since.pop(key, None)
             self._sub_labels.pop(key, None)
-            return ended
+            return 0
 
         now = time.time()
         self.tracks.observe_object(obj.camera, obj.track_id, obj.current_zones, now=now)
         if obj.sub_label:
             self._sub_labels[key] = obj.sub_label
-        self._touch_activities(obj.camera, obj.track_id, now=now)
-        # Housekeeping hangs off this topic as well as the review one: review
-        # messages are rare enough on a quiet house (4 in 20 minutes, measured)
-        # that hanging GC off them alone would leave handles and send records
-        # accumulating for hours. `_maybe_gc` throttles itself.
         self._maybe_gc(now)
-
-        review = self._pending.get(key)
-        if review is None:
-            return 0
-        conn = self._conn()
-        try:
-            devices = [d for d in store.list_devices(conn) if d.uses_situations]
-        finally:
-            conn.close()
-        if not devices:
-            return 0
-        return await self._dispatch_situations(devices, review, now=now)
+        return 0
 
     async def handle_review_payload(self, payload: dict[str, Any]) -> int:
         """Parse + dispatch one `frigate/reviews` message. Returns the number
@@ -278,42 +250,16 @@ class PushEngine:
         finally:
             conn.close()
 
-        v1 = [d for d in devices if not d.uses_situations]
-        v2 = [d for d in devices if d.uses_situations]
-
         sent = 0
-        if v1:
-            sent += await self._dispatch_v1(v1, event)
-        if v2:
-            # Track state is a property of Frigate's stream, not of any one
-            # device, so it is recorded once per message before anybody is
-            # evaluated against it.
-            if self.dwell_source == "events":
-                # Occupancy comes from `frigate/events`; seeding it from the
-                # review's cumulative `zones` here would re-add a zone the
-                # object has already left and undo the exit signal that makes
-                # loiter mean anything.
-                for track_id in event.track_ids or (event.review_id,):
-                    key = (event.camera, track_id)
-                    self._pending[key] = event
-                    self._pending_since[key] = now
-            else:
-                self.tracks.observe(event, now=now)
-            if event.severity == "alert":
-                # An early-fire activity started off a `detection` review has
-                # now earned its place; record it so resolution gives it the
-                # full tail rather than the short one (handoff item 8).
-                self._mark_promoted(event)
-            sent += await self._dispatch_situations(v2, event, now=now)
-
+        # Phase 5 §1: the card pipeline is now the only alert path for all
+        # devices. The situations pipeline (_dispatch_v1, _dispatch_situations)
+        # is retired — device registrations with `situations` are still
+        # accepted and stored (older app builds keep working), but no
+        # situation alert or situation LA push is emitted.
         if self.push_config is not None and self.push_config.delivery_enabled:
-            # Independent of the v1/v2 count above: the delivery pipeline
-            # runs its own card state and its own budget, to every
-            # registered device (no per-device situations/camera filter yet
-            # -- see docs/push-notifications.md). Ships dark until enabled.
             conn = self._conn()
             try:
-                await delivery_wire.handle_delivery_event(
+                sent = await delivery_wire.handle_delivery_event(
                     event, conn=conn, devices=devices, transport=self.transport,
                     config=self.push_config, engine=self, now=now,
                 )

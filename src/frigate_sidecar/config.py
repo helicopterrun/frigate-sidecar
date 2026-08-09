@@ -454,7 +454,7 @@ class PushSection(BaseModel):
     # dark until the wire-up's subject/place classification (currently an
     # MVP heuristic off `frigate/reviews` labels and `delivery_zone_place_map`)
     # is trusted against a live deployment. See docs/push-notifications.md.
-    delivery_enabled: bool = False
+    delivery_enabled: bool = True
     # Superseded by the user-editable `settings.zone_classes` (Elsinore
     # Phase 4, `push/policy_settings.py`) -- `delivery_wire.classify_place`
     # no longer reads this field. Left in place (unread) rather than
@@ -465,9 +465,16 @@ class PushSection(BaseModel):
     # after its last sound.
     delivery_urgent_resound_s: float = 120.0
     delivery_urgent_resound_enabled: bool = True
+    delivery_urgent_resound_max: int = 5
     # How often the urgent re-sound sweep runs. Only ever emits the one
     # re-sound a card is owed -- not a keep-alive.
     delivery_resound_sweep_interval_s: float = 15.0
+    # Backfilled events older than this are discarded rather than replayed.
+    delivery_backfill_staleness_s: float = 300.0
+    # Live Activity stale-date offset from now.
+    delivery_la_stale_s: float = 900.0
+    # Relay auth key — sent as x-relay-key header on every relay request.
+    relay_key: str = ""
     # Phone-reachable base URL for *this sidecar instance*, e.g.
     # "http://192.168.50.207:5001" or "https://sidecar.example.com". Used to
     # build the complete URL the card contract's `media` field documents

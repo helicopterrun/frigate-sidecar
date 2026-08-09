@@ -276,7 +276,8 @@ CREATE TABLE IF NOT EXISTS push_cards (
     last_sound_at REAL,
     resound_count INTEGER NOT NULL DEFAULT 0,
     resolved      INTEGER NOT NULL DEFAULT 0,
-    closed        INTEGER NOT NULL DEFAULT 0
+    closed        INTEGER NOT NULL DEFAULT 0,
+    peak_level    TEXT NOT NULL DEFAULT 'log'
 );
 CREATE INDEX IF NOT EXISTS idx_push_cards_open
     ON push_cards(closed, level, last_sound_at);
@@ -322,6 +323,9 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("situation_id", "TEXT NOT NULL DEFAULT ''"),
         ("track_id", "TEXT NOT NULL DEFAULT ''"),
         ("thumbnail", "BLOB"),
+    ],
+    "push_cards": [
+        ("peak_level", "TEXT NOT NULL DEFAULT 'log'"),
     ],
     "push_activities": [
         # Added alongside SIDECAR_SCHEMA's CREATE TABLE without a matching

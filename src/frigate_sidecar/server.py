@@ -148,7 +148,11 @@ def _build_push_transport(settings: Settings):  # noqa: ANN201 - Protocol return
     """Mock/log transport by default -- the only one usable without real APNs
     credentials (spec §4). "relay" posts to `push.relay_base_url`."""
     if settings.push.transport == "relay":
-        return RelayTransport(settings.push.relay_base_url, timeout=settings.push.relay_timeout_s)
+        return RelayTransport(
+            settings.push.relay_base_url,
+            timeout=settings.push.relay_timeout_s,
+            relay_key=settings.push.relay_key,
+        )
     return LogTransport()
 
 
@@ -203,6 +207,7 @@ async def _delivery_resound_sweep_loop(app: FastAPI) -> None:
                     conn, engine.transport, devices,
                     interval_s=settings.push.delivery_urgent_resound_s,
                     enabled=settings.push.delivery_urgent_resound_enabled,
+                    max_resounds=settings.push.delivery_urgent_resound_max,
                     payload_for_resound=delivery_wire.resound_payload_for,
                 )
             finally:
@@ -299,8 +304,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.push_subscriber = subscriber
         push_task = asyncio.create_task(_push_subscriber_loop(app))
         sweep_task = asyncio.create_task(_activity_sweep_loop(app))
-        if settings.push.delivery_enabled:
-            delivery_sweep_task = asyncio.create_task(_delivery_resound_sweep_loop(app))
+        delivery_sweep_task = asyncio.create_task(_delivery_resound_sweep_loop(app))
 
     try:
         yield
