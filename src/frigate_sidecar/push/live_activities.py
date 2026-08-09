@@ -82,13 +82,24 @@ def should_start_activity(
     label: str,
     place_class: str,
     families_enabled: dict[str, bool] | None = None,
+    opening_picks: list[str] | None = None,
+    opening_ids: tuple[str, ...] = (),
 ) -> str | None:
     """Which LA family this card qualifies for, or `None`.
 
     Hard-coded MVP rules (design doc §1) -- a config-driven per-family
-    override (`push.delivery_la_families`) is checked last so a disabled
-    family never starts an activity even when it would otherwise match, but
-    the detection itself doesn't depend on config existing.
+    override (Phase 4's `push/policy_settings.py`, `live_activities`
+    section of the settings object) is checked last so a disabled family
+    never starts an activity even when it would otherwise match, but the
+    detection itself doesn't depend on any settings existing.
+
+    `opening_picks`/`opening_ids` are the one family-specific refinement
+    (Phase 4 §3): the `openings` family additionally requires this card's
+    zone or camera to be one of the openings the user actually picked. An
+    empty or absent `opening_picks` means "nothing curated yet" and is
+    read permissively (every opening qualifies) rather than as "nothing
+    qualifies" -- the family toggle above is what fully turns `openings`
+    off; an empty picks list is a not-yet-configured state, not a choice.
     """
     family: str | None = None
     if subject_kind == "thing" and label == "package":
@@ -103,6 +114,9 @@ def should_start_activity(
     if family is None:
         return None
     if families_enabled is not None and families_enabled.get(family) is False:
+        return None
+    picks_active = family == OPENINGS and opening_picks
+    if picks_active and not any(oid in opening_picks for oid in opening_ids):
         return None
     return family
 

@@ -54,6 +54,32 @@ def test_non_qualifying_cards_return_none():
     ) is None
 
 
+def test_opening_picks_empty_is_permissive():
+    # Nothing curated yet -- every opening qualifies (Elsinore Phase 4).
+    assert la.should_start_activity(
+        subject_kind="thing", label="garage", place_class="street",
+        opening_picks=[], opening_ids=("garage-cam",),
+    ) == la.OPENINGS
+
+
+def test_opening_picks_restricts_to_curated_openings():
+    assert la.should_start_activity(
+        subject_kind="thing", label="garage", place_class="street",
+        opening_picks=["front_gate"], opening_ids=("garage-cam", "garage"),
+    ) is None
+    assert la.should_start_activity(
+        subject_kind="thing", label="gate", place_class="street",
+        opening_picks=["front_gate"], opening_ids=("front_gate", "doorbell"),
+    ) == la.OPENINGS
+
+
+def test_opening_picks_do_not_affect_other_families():
+    assert la.should_start_activity(
+        subject_kind="thing", label="package", place_class="yard",
+        opening_picks=["front_gate"], opening_ids=("some-other-camera",),
+    ) == la.PACKAGE
+
+
 def test_disabled_family_returns_none():
     assert la.should_start_activity(
         subject_kind="thing", label="package", place_class="yard",

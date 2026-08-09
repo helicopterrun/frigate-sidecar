@@ -572,6 +572,134 @@ before any per-activity token arriving falling back to the push-to-start
 token, and cross-camera dedup producing exactly one activity for the
 surviving card.
 
+## Attention ladder settings API (Elsinore Phase 4)
+
+Phases 2/3 shipped the routing table, zone-place classification, and Live
+Activity family toggles as hardcoded data (`ladder_policy.TABLE`) or static
+YAML config (`push.delivery_zone_place_map`, `push.delivery_la_families`).
+Phase 4 makes all three user-editable from the app: a compact 4x5 routing
+grid, a zone-class assignment screen, and LA family toggles, all backed by
+one settings document and `GET`/`PUT /v1/push/settings`.
+
+`push/policy_settings.py` owns the document's shape, defaults, validation,
+persistence (`config/push_settings.json`, JSON rather than YAML -- the app
+PUTs a JSON body and round-tripping it through YAML's type coercion on the
+way back out is a bug factory, not a feature), and *application*.
+"Applies immediately" is literal: `apply_settings` pushes the new routing
+table straight into `ladder_policy.set_table` (see below), and
+`zone_classes`/`live_activities` are read fresh from `get_active()` on
+every card event -- there is no cache to invalidate anywhere else.
+
+### The document
+
+```json
+{
+  "v": 1,
+  "routing_table": { "stranger": {...5 places...}, "known": {...}, "animal": {...}, "thing": {...} },
+  "zone_classes": { "front_entry_person": "doors", "driveway": "yard", ... },
+  "live_activities": { "package": true, "bins": true, "openings": true, "person": true,
+                        "opening_picks": ["front_gate", "garage"] }
+}
+```
+
+Defaults (`policy_settings.default_settings`) match the product brief's
+table exactly, so a fresh install behaves identically before the user ever
+opens settings. **This default table is a separate literal from
+`ladder_policy.TABLE`'s own built-in default** (`thing` no longer defaults
+to `quiet` at yard/doors/private) -- the two are allowed to diverge on
+purpose: one is "what the routing engine ships with if nothing ever
+touches it" (Phase 1's own tested baseline, `tests/test_push_ladder.py`),
+the other is "what a freshly onboarded settings file starts the user at".
+A real deployment always calls `policy_settings.startup` from `server.py`'s
+lifespan before any card can be evaluated, so in production this
+distinction is invisible -- it only matters to tests, which is exactly why
+`tests/conftest.py` carries an autouse fixture snapshotting and restoring
+`ladder_policy.TABLE` around every test.
+
+### Routing engine wiring
+
+`ladder_policy.set_table` rebinds the module-level `TABLE` dict.
+`ladder.py` itself is completely unchanged -- it already reads
+`policy.TABLE` as a bare module attribute at call time (not at import
+time), so simply rebinding it is enough for `evaluate_ladder` to pick up
+the new table on its very next call, no plumbing required.
+
+### Zone classification
+
+`delivery_wire.classify_place` now checks `settings.zone_classes` first,
+falling back to `policy_settings.guess_zone_class` (the same name-guessing
+heuristic `available_zones` exposes) for a zone nobody has explicitly
+classified yet -- a new zone (the user just added a camera) gets a
+reasonable class immediately instead of silently defaulting to a flat
+"yard" forever. The guess checks doors/off-limits/street/private/yard
+patterns in that order (most specific and most alarming first) against the
+zone's own name, then its camera's name if the zone name itself doesn't
+match anything -- resolving two real collisions: "front_entry_person"
+contains both a `yard` hint ("front") and a `doors` hint ("entry")
+(`doors` wins), and "sidewalk" (a literal `street` pattern) contains "side"
+(a `private` pattern) as a substring (`street` wins, checked first).
+`push.delivery_zone_place_map` (Phase 2) is no longer read.
+
+### Live Activity family gating
+
+`live_activities.should_start_activity` takes `families_enabled` (from
+`settings.live_activities`) and, for the `openings` family specifically,
+`opening_picks`/`opening_ids`: an empty or absent `opening_picks` is read
+permissively (nothing curated yet, every opening qualifies) rather than as
+"nothing qualifies" -- the family toggle is the full kill switch; an empty
+picks list is a not-yet-configured state, not a choice. `opening_ids` is
+checked against both the card's zone name and camera, so a pick can name
+either. `push.delivery_la_families` (Phase 3) is no longer read;
+`push.delivery_la_enabled` remains the separate, whole-feature kill switch
+above all of this.
+
+### `GET`/`PUT /v1/push/settings`
+
+`GET` returns the *live, applied* policy (`policy_settings.get_active()`),
+never an independent disk read -- they're identical once startup or a
+prior `PUT` has run, and this guarantees `GET` can never show something
+other than what the routing engine is actually evaluating against. A fresh
+install with no settings file gets one created (with defaults) on the very
+first `GET`, so `GET` and on-disk state can never quietly disagree before
+the first `PUT`. The response also carries `available_zones` (every zone
+across every camera in Frigate's config, via the existing `zones.py`
+reader, each with its `guessed_class`) and `available_openings`, so the
+app's zone-assignment and opening-picks screens don't need a second call.
+
+`PUT` validates (`policy_settings.validate_settings`) before persisting or
+applying anything: `routing_table` must cover exactly the four subjects x
+five places with a valid level in each cell; `zone_classes` values must be
+a valid place class; `live_activities` keys must be one of the four
+families (plus `opening_picks`) with boolean values. Unknown *top-level*
+fields are ignored (forward compat); an unknown subject/place/family key
+inside a known block is a `400` -- those vocabularies are closed, so a typo
+there is much more likely a client bug than a field this sidecar hasn't
+learned about yet. A syntactically valid but partial document (missing a
+newer field) is filled in from defaults (`policy_settings.normalize_settings`)
+rather than rejected, so an older-shaped file keeps working forever.
+
+### What did not change
+
+The routing evaluator's exception/nudge/cap logic (`ladder.py`), the card
+push delivery pipeline, the card identity key scheme, the APNs payload
+format, cross-camera dedup, and the LA push payload format -- only the base
+routing table, zone-class assignment, and LA family toggles became
+user-editable this phase.
+
+### Tests
+
+`tests/test_push_policy_settings.py` covers defaults, validation, the
+zone-guessing heuristic (every pattern plus the default and collision
+cases), persistence (missing/corrupt/partial file), and that
+`apply_settings` actually changes what `evaluate_ladder` returns.
+`tests/test_push_settings_routes.py` covers the HTTP surface end to end
+(`GET` defaults and creates the file, `available_zones`/`available_openings`
+from a fake Frigate config, `PUT` persists/validates/applies immediately).
+`tests/test_push_delivery_wire.py` and `tests/test_push_live_activities_wire.py`
+each carry one integration test confirming a `PUT`-equivalent
+`apply_settings` call changes real card evaluation output one layer below
+the HTTP route.
+
 ## Live Activities (Phase 2)
 
 Present-tier situations stop being silent and start living in a Live Activity:

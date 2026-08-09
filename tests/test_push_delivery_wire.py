@@ -327,18 +327,22 @@ async def test_subject_changing_zones_enriches_the_same_card_no_new_one(sidecar_
     config = PushSection(delivery_enabled=True)
     device = make_device()
 
+    # Both zones guess to the same place class ("yard", Elsinore Phase 4's
+    # name heuristic -- `policy_settings.guess_zone_class`), so the level is
+    # unchanged and the mutation is `enrich`: this test is about the zone
+    # move landing on the *same card*, not about a level change.
     await handle_delivery_event(
         make_event("cam-a", "trkA", zones=("driveway",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     await handle_delivery_event(
-        make_event("cam-a", "trkA", zones=("back_walkway",)),
+        make_event("cam-a", "trkA", zones=("parking_spot",)),
         conn=conn, devices=[device], transport=transport, config=config, now=5.0,
     )
 
     rows = conn.execute("SELECT card_key, zone_name FROM push_cards").fetchall()
     assert len(rows) == 1
-    assert rows[0]["zone_name"] == "back_walkway"
+    assert rows[0]["zone_name"] == "parking_spot"
     assert transport.sent[1]["payload"]["mutation"] == "enrich"
 
 
@@ -403,6 +407,70 @@ async def test_resolving_the_primary_track_resolves_the_card_normally(sidecar_db
     ).fetchone()
     assert card["closed"] == 1
     assert card["resolved"] == 1
+
+
+@pytest.mark.asyncio
+async def test_changing_the_routing_table_via_settings_changes_the_level_applied(
+    sidecar_db_path: Path,
+):
+    """Elsinore Phase 4: `push/policy_settings.py`'s applied routing table
+    is what `handle_delivery_event` actually evaluates cards against --
+    `PUT /v1/push/settings` reaching a running card pipeline with no
+    restart, exercised here one layer below the HTTP route
+    (`tests/test_push_settings_routes.py` covers the route itself)."""
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    new_settings = policy_settings.default_settings()
+    new_settings["routing_table"]["thing"]["yard"] = "urgent"
+    policy_settings.apply_settings(new_settings)
+
+    await handle_delivery_event(
+        ReviewEvent(
+            review_id="r1", camera="cam-a", severity="alert", labels=("package",),
+            track_ids=("trkA",), zones=("driveway",),
+        ),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+
+    row = conn.execute(
+        "SELECT level FROM push_cards WHERE card_key = 'cam-a:thing:trkA'"
+    ).fetchone()
+    assert row["level"] == "urgent"
+
+
+@pytest.mark.asyncio
+async def test_zone_classes_from_settings_take_priority_over_the_guess_heuristic(
+    sidecar_db_path: Path,
+):
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    # "driveway" would normally guess as "yard"; force it to "doors" via
+    # settings and confirm the card's place_class (and therefore level)
+    # reflects the override, not the heuristic.
+    new_settings = policy_settings.default_settings()
+    new_settings["zone_classes"]["driveway"] = "doors"
+    policy_settings.apply_settings(new_settings)
+
+    await handle_delivery_event(
+        ReviewEvent(
+            review_id="r1", camera="cam-a", severity="alert", labels=("person",),
+            track_ids=("trkA",), zones=("driveway",),
+        ),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    sent = transport.sent[0]["payload"]
+    assert sent["place_class"] == "doors"
+    assert sent["level"] == "notify"  # stranger/doors per the default table
 
 
 @pytest.mark.asyncio

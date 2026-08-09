@@ -12,13 +12,14 @@ opaque, unguessable, and short-lived instead.
 from __future__ import annotations
 
 import logging
+import pathlib
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from frigate_sidecar import db
-from frigate_sidecar.push import library, store
+from frigate_sidecar.push import library, policy_settings, store
 from frigate_sidecar.push.situations import Situation
 
 logger = logging.getLogger(__name__)
@@ -579,3 +580,61 @@ async def redeem_handle(handle: str, request: Request) -> dict[str, Any]:
         "event_id": data["event_id"],
         "snapshot_url": f"/api/events/{data['event_id']}/snapshot.jpg",
     }
+
+
+_ERR_INVALID_SETTINGS = "invalid_settings"
+
+
+@router.get("/settings")
+async def get_push_settings(request: Request) -> dict[str, Any]:
+    """The attention-ladder policy (Elsinore Phase 4): the routing table,
+    zone-class assignments, and Live Activity family toggles, plus enough
+    about the live Frigate config (`available_zones`/`available_openings`)
+    for the app to render its settings screens without a second call.
+
+    Returns the *live, applied* policy (`policy_settings.get_active()`), not
+    a fresh disk read -- they're the same thing once `startup`/a prior `PUT`
+    has run, and this guarantees `GET` can never show something other than
+    what the routing engine is actually evaluating against right now. On a
+    fresh install with no settings file yet, this is what creates one (with
+    defaults) rather than leaving `GET` and the on-disk state to silently
+    disagree until the first `PUT`.
+    """
+    settings = request.app.state.settings
+    active = policy_settings.get_active()
+    settings_path = pathlib.Path(settings.push.push_settings_path)
+    if not settings_path.exists():
+        policy_settings.save_settings(settings_path, active)
+
+    return {
+        "settings": active,
+        "available_zones": policy_settings.build_available_zones(settings.frigate.config_path),
+        "available_openings": policy_settings.build_available_openings(
+            settings.frigate.config_path
+        ),
+    }
+
+
+@router.put("/settings")
+async def put_push_settings(request: Request) -> dict[str, Any]:
+    """Validate, persist, and immediately apply a new policy document.
+
+    The body is the same shape `GET` returns under `settings` -- not the
+    wrapper with `available_zones`/`available_openings`, which are derived,
+    read-only, and never round-tripped back in. Unknown top-level fields are
+    ignored (forward compat); an unknown subject/place/family key inside a
+    known block, or an invalid level/place-class value, is a 400.
+    """
+    body = await request.json()
+    errors = policy_settings.validate_settings(body)
+    if errors:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": _ERR_INVALID_SETTINGS, "detail": errors},
+        )
+
+    settings = request.app.state.settings
+    merged = policy_settings.normalize_settings(body)
+    policy_settings.save_settings(settings.push.push_settings_path, merged)
+    policy_settings.apply_settings(merged)
+    return {"ok": True}

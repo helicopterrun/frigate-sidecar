@@ -455,10 +455,11 @@ class PushSection(BaseModel):
     # MVP heuristic off `frigate/reviews` labels and `delivery_zone_place_map`)
     # is trusted against a live deployment. See docs/push-notifications.md.
     delivery_enabled: bool = False
-    # `frigate/reviews` zone name -> ladder place class
-    # (street/yard/doors/private/off_limits). A zone absent from this map
-    # falls back to "yard" if the review carries any zone at all, else
-    # "street" -- see push/delivery_wire.py.
+    # Superseded by the user-editable `settings.zone_classes` (Elsinore
+    # Phase 4, `push/policy_settings.py`) -- `delivery_wire.classify_place`
+    # no longer reads this field. Left in place (unread) rather than
+    # removed, since it's still a valid YAML key an existing deployment's
+    # config file may set.
     delivery_zone_place_map: dict[str, str] = Field(default_factory=dict)
     # Design doc §3: an unhandled `urgent` card may re-alert once, this long
     # after its last sound.
@@ -487,11 +488,20 @@ class PushSection(BaseModel):
     # lifecycle, never a substitute for it). Off doesn't undo `delivery_la_families`;
     # it's the fast, whole-feature kill switch.
     delivery_la_enabled: bool = True
-    # Per-family opt-out (design doc §1's "future: per-family user toggles",
-    # brought forward as a config knob since it's nearly free to support).
-    # Absent or `True` = enabled; only an explicit `False` turns a family
-    # off. Keys: "package", "bins", "openings", "person".
+    # Superseded by the user-editable `settings.live_activities` (Elsinore
+    # Phase 4, `push/policy_settings.py`) -- `delivery_wire.py` no longer
+    # reads this field for per-family gating. Left in place (unread) for
+    # the same reason as `delivery_zone_place_map` above.
     delivery_la_families: dict[str, bool] = Field(default_factory=dict)
+
+    # -- Attention ladder settings API (Elsinore Phase 4) --
+    # Where the user-editable policy document (routing table, zone-class
+    # assignments, LA family toggles) is persisted. JSON, not YAML -- the
+    # app PUTs a JSON body and round-tripping it through YAML's type
+    # coercion on the way back out is a bug factory, not a feature. Created
+    # with defaults on first read if it doesn't exist yet
+    # (`push/policy_settings.py`).
+    push_settings_path: str = "config/push_settings.json"
 
     @field_validator("dwell_source")
     @classmethod

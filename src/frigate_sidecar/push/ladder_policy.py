@@ -55,3 +55,20 @@ CALM_REASONS = ("known_role", "low_confidence", "no_recognition_capability")
 #: etc.) -- these have no subject or place, so they never touch the table,
 #: nudge, floor, or caps.
 SYSTEM_CARD_LEVEL = "notify"
+
+
+def set_table(table: dict[str, dict[str, str]]) -> None:
+    """Replace the base subject x place table (Elsinore Phase 4: user-
+    editable routing). `ladder.py` reads `policy.TABLE` as a module
+    attribute at call time, not at import time, so simply rebinding it here
+    is enough -- no change to `ladder.py` itself, exactly as the policy/
+    evaluation-order split this module already established intends.
+
+    The literal `TABLE` above stays the module's own built-in default
+    (and the fixture-tested baseline `tests/test_push_ladder.py` exercises)
+    -- `push/policy_settings.py` owns the *live*, potentially user-edited
+    table and calls this to apply it; nothing in this module reads from
+    disk or knows a settings file exists.
+    """
+    global TABLE
+    TABLE = table

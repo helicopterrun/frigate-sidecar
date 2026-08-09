@@ -250,7 +250,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     delivery_sweep_task: asyncio.Task[None] | None = None
     if settings.push.enabled:
         from frigate_sidecar import db
-        from frigate_sidecar.push import card_store
+        from frigate_sidecar.push import card_store, policy_settings
 
         _conn = db.open_sidecar(str(settings.sidecar.db_path))
         try:
@@ -262,6 +262,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
         finally:
             _conn.close()
+
+        # Load the user-editable routing/zone/LA policy (Elsinore Phase 4)
+        # and apply it before the first card can ever be evaluated --
+        # `ladder_policy.TABLE` must never be read in its own unmodified
+        # default state on a deployment that has a settings file.
+        policy_settings.startup(settings.push.push_settings_path)
 
         server_id = settings.push.server_id or f"s_{id(app):x}"
         transport = _build_push_transport(settings)

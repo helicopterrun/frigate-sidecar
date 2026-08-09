@@ -238,3 +238,59 @@ async def test_delivery_la_enabled_false_suppresses_all_live_activities(sidecar_
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     assert la_sends(transport) == []
+
+
+@pytest.mark.asyncio
+async def test_settings_family_toggle_suppresses_just_that_family(sidecar_db_path: Path):
+    """Elsinore Phase 4: `settings.live_activities.<family>` gates family
+    detection, one layer below `delivery_la_enabled`'s whole-feature kill
+    switch above."""
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    disabled = policy_settings.default_settings()
+    disabled["live_activities"]["package"] = False
+    policy_settings.apply_settings(disabled)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "package"),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    assert la_sends(transport) == []
+    # An ordinary card push still went out -- only the LA family is off.
+    assert conn.execute("SELECT COUNT(*) FROM push_cards").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_settings_opening_picks_restrict_which_openings_get_an_activity(
+    sidecar_db_path: Path,
+):
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    curated = policy_settings.default_settings()
+    curated["live_activities"]["opening_picks"] = ["front_gate"]
+    policy_settings.apply_settings(curated)
+
+    # Not on the curated list -- no activity.
+    await handle_delivery_event(
+        make_event("side-cam", "trk1", "garage"),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    assert la_sends(transport) == []
+
+    # On the curated list (matches the camera name) -- activity starts.
+    await handle_delivery_event(
+        make_event("front_gate", "trk2", "gate"),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    starts = [r for r in la_sends(transport) if r["event"] == "start"]
+    assert len(starts) == 1

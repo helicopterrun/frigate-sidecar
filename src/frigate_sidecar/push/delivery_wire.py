@@ -7,14 +7,16 @@ No new transport, no new MQTT subscription: `PushEngine.handle_event` /
 module is a plain function each of them calls once, guarded by
 `settings.push.delivery_enabled`.
 
-**Subject/place classification here is a deliberate MVP**, not the
-full-fidelity mapping the design doc's ladder deserves. `frigate/reviews`
-carries labels and a cumulative zone list but no resolved identity (Phase
-5's territory) and no per-camera place-class config beyond
-`delivery_zone_place_map` -- so `classify_subject`/`classify_place` are
-heuristics, documented as such, safe to ship because the whole pipeline is
-off by default. Tightening them is a data/config change here, not a change
-to `ladder.py` or `delivery.py`, exactly like `ladder_policy.py`'s own
+**Subject classification here is a deliberate MVP**, not the full-fidelity
+mapping the design doc's ladder deserves -- `frigate/reviews` carries labels
+but no resolved identity (Phase 5's territory), so `classify_subject` is a
+heuristic, documented as such, safe to ship because the whole pipeline is
+off by default. **Place classification** (`classify_place`) is Phase 4's:
+it reads the user's own `settings.zone_classes`
+(`push/policy_settings.py`), falling back to the same name-guessing
+heuristic the settings API exposes for a zone nobody has classified yet.
+Tightening `classify_subject` is a data/code change here, not a change to
+`ladder.py` or `delivery.py`, exactly like `ladder_policy.py`'s own
 separation of policy from evaluation order.
 """
 
@@ -27,7 +29,7 @@ import secrets
 import time
 from typing import TYPE_CHECKING
 
-from frigate_sidecar.push import card_store, live_activities, store
+from frigate_sidecar.push import card_store, live_activities, policy_settings, store
 from frigate_sidecar.push.cards import CREATE, ENRICH, RESOLVE, Card
 from frigate_sidecar.push.delivery import advance_card as _advance_card
 from frigate_sidecar.push.delivery import (
@@ -98,17 +100,27 @@ def classify_subject(event: ReviewEvent) -> str:
     return "thing"
 
 
-def classify_place(event: ReviewEvent, zone_place_map: dict[str, str]) -> str:
+def classify_place(event: ReviewEvent, zone_classes: dict[str, str]) -> str:
+    """`zone_classes` (Elsinore Phase 4: `push/policy_settings.py`,
+    `settings.zone_classes`) is the user's explicit zone -> place-class
+    assignment; a zone not in it falls back to the same name-guessing
+    heuristic the settings API's `available_zones` uses
+    (`policy_settings.guess_zone_class`), rather than the flat "yard" this
+    used to default to -- new zones (a camera the user just added) get a
+    reasonable class immediately instead of going silent until explicitly
+    configured."""
     for zone in event.zones:
-        if zone in zone_place_map:
-            return zone_place_map[zone]
-    return "yard" if event.zones else "street"
+        if zone in zone_classes:
+            return zone_classes[zone]
+    if event.zones:
+        return policy_settings.guess_zone_class(event.zones[0])
+    return "street"
 
 
 def snapshot_from_review(
     event: ReviewEvent,
     *,
-    zone_place_map: dict[str, str],
+    zone_classes: dict[str, str],
     nobody_home: bool = False,
     night: bool = False,
     dwell_exceeded: bool = False,
@@ -118,7 +130,7 @@ def snapshot_from_review(
     place_class)` since the payload contract needs the classification
     alongside the level the snapshot evaluates to."""
     subject_kind = classify_subject(event)
-    place_class = classify_place(event, zone_place_map)
+    place_class = classify_place(event, zone_classes)
     label = event.labels[0] if event.labels else ""
     snapshot = Snapshot(
         subject=subject_kind, place=place_class, label=label,
@@ -404,9 +416,10 @@ async def handle_delivery_event(
     if not config.delivery_enabled:
         return 0
     now = time.time() if now is None else now
+    policy = policy_settings.get_active()
 
     snapshot, subject_kind, place_class = snapshot_from_review(
-        event, zone_place_map=config.delivery_zone_place_map,
+        event, zone_classes=policy["zone_classes"],
         nobody_home=nobody_home, night=night, dwell_exceeded=dwell_exceeded,
     )
     level = evaluate_ladder(snapshot)
@@ -462,7 +475,9 @@ async def handle_delivery_event(
 
         family = live_activities.should_start_activity(
             subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
-            families_enabled=config.delivery_la_families,
+            families_enabled=policy["live_activities"],
+            opening_picks=policy["live_activities"].get("opening_picks"),
+            opening_ids=(zone_name, owning_camera) if zone_name else (owning_camera,),
         )
         await _deliver_live_activities(
             conn, devices, transport, config=config, card=card, mutation=mutation,
