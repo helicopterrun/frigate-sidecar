@@ -16,16 +16,23 @@ Evaluation order:
 2. `source == "system"` (no subject/place, e.g. "camera offline") ->
    `ladder_policy.SYSTEM_CARD_LEVEL`, bypassing everything below.
 3. Safety exceptions (`audio_safety`, `ai_flagged`) -> `urgent`, bypassing the
-   table, nudge, floor, and the caps in step 7 -- including for `known`
+   table, nudge, floor, and the caps in step 8 -- including for `known`
    subjects.
 4. Reclassify: a dangerous-animal `label` makes `subject` a `stranger` from
    here on.
-5. Base table lookup (`subject` x `place`).
-6. One nudge: net worry vs. calm reasons moves the result at most one step.
+5. Zone override (Elsinore Phase 4 addendum, `ladder_policy.ZONE_OVERRIDES`):
+   a user-configured `(zone, subject)` override returns directly, bypassing
+   the base table *and* the nudge/floor/caps below -- "always banner this
+   subject in this zone" means always, not "usually, modulated by the same
+   general-purpose exceptions everything else goes through." Checked after
+   safety exceptions/mute (those are hard invariants, not policy) but before
+   everything the base table drives.
+6. Base table lookup (`subject` x `place`).
+7. One nudge: net worry vs. calm reasons moves the result at most one step.
    `animal` subjects never nudge; `known` subjects never nudge up (down is
    fine).
-7. Floor: a person subject in a `child_hazard_zone` is at least `notify`.
-8. Caps: `street` caps at `quiet`; an unconfirmed detector caps at `quiet`.
+8. Floor: a person subject in a `child_hazard_zone` is at least `notify`.
+9. Caps: `street` caps at `quiet`; an unconfirmed detector caps at `quiet`.
 """
 
 from __future__ import annotations
@@ -45,6 +52,11 @@ class Snapshot:
     source: str = "detection"  # "detection" | "system"
     subject: str = ""  # "stranger" | "known" | "animal" | "thing"
     place: str = ""  # "street" | "yard" | "doors" | "private" | "off_limits"
+    #: The raw Frigate zone name (not the place class `place` above) --
+    #: looked up against `ladder_policy.ZONE_OVERRIDES` before the base
+    #: table (Phase 4 addendum). "" for a detection with no zone, or a
+    #: system card.
+    zone: str = ""
     label: str = ""  # raw Frigate label
     nobody_home: bool = False
     night: bool = False
@@ -72,6 +84,10 @@ def evaluate_ladder(snapshot: Snapshot) -> str:
     subject = snapshot.subject
     if snapshot.label in policy.DANGEROUS_ANIMAL_LABELS:
         subject = "stranger"
+
+    override = policy.ZONE_OVERRIDES.get(snapshot.zone, {}).get(subject)
+    if override is not None:
+        return override
 
     levels = policy.LEVELS
     idx = levels.index(policy.TABLE[subject][snapshot.place])

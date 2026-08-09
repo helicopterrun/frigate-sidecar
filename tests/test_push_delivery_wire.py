@@ -474,6 +474,41 @@ async def test_zone_classes_from_settings_take_priority_over_the_guess_heuristic
 
 
 @pytest.mark.asyncio
+async def test_zone_override_via_settings_is_applied_to_a_real_card(sidecar_db_path: Path):
+    """Elsinore Phase 4 addendum: a `zone_overrides[zone][subject]` entry
+    reaches a real card evaluation one layer below the HTTP route
+    (`tests/test_push_settings_routes.py` covers the route itself)."""
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    # Base table says "thing"/"doors" is "log" (never pushed); the override
+    # forces "notify" for this specific zone regardless.
+    new_settings = policy_settings.default_settings()
+    new_settings["zone_classes"]["front_entry_person"] = "doors"
+    new_settings["zone_overrides"] = {"front_entry_person": {"thing": "notify"}}
+    policy_settings.apply_settings(new_settings)
+    assert new_settings["routing_table"]["thing"]["doors"] == "log"
+
+    await handle_delivery_event(
+        ReviewEvent(
+            review_id="r1", camera="cam-a", severity="alert", labels=("package",),
+            track_ids=("trkA",), zones=("front_entry_person",),
+        ),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+
+    row = conn.execute(
+        "SELECT level FROM push_cards WHERE card_key = 'cam-a:thing:trkA'"
+    ).fetchone()
+    assert row["level"] == "notify"
+    assert transport.sent[0]["payload"]["level"] == "notify"
+
+
+@pytest.mark.asyncio
 async def test_delivery_disabled_is_a_no_op(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()

@@ -76,20 +76,25 @@ def sidecar_db_path(tmp_path: Path) -> Iterator[Path]:
 @pytest.fixture(autouse=True)
 def _reset_ladder_policy() -> Iterator[None]:
     """Elsinore Phase 4 (`push/policy_settings.py`) made `ladder_policy.TABLE`
-    a mutable, process-wide global so the routing engine can pick up a
-    user-edited table without restarting -- `ladder.py` reads it as a bare
-    module attribute, unchanged, per that phase's design. That mutability
-    has to stop at the test boundary: without this, a test that calls
+    and `ladder_policy.ZONE_OVERRIDES` mutable, process-wide globals so the
+    routing engine can pick up a user-edited table/override without
+    restarting -- `ladder.py` reads both as bare module attributes,
+    unchanged, per that phase's design. That mutability has to stop at the
+    test boundary: without this, a test that calls
     `policy_settings.apply_settings`/`ladder_policy.set_table` would leak
     its table into every test that runs afterward in the same process,
     including `test_push_ladder.py`'s own golden-fixture suite. Snapshotting
-    and restoring the actual attribute (not a fixed constant) means this
+    and restoring the actual attributes (not a fixed constant) means this
     works regardless of what any given test starts from or which other
     tests already mutated it this session.
     """
     from frigate_sidecar.push import ladder_policy, policy_settings
 
     original_table = {subject: dict(row) for subject, row in ladder_policy.TABLE.items()}
+    original_overrides = {
+        zone: dict(row) for zone, row in ladder_policy.ZONE_OVERRIDES.items()
+    }
     yield
     ladder_policy.set_table(original_table)
+    ladder_policy.set_zone_overrides(original_overrides)
     policy_settings.reset_for_tests()

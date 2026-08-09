@@ -35,6 +35,7 @@ def test_default_settings_shape():
     settings = policy_settings.default_settings()
     assert settings["v"] == 1
     assert settings["zone_classes"] == {}
+    assert settings["zone_overrides"] == {}
     assert settings["live_activities"] == {
         "package": True, "bins": True, "openings": True, "person": True,
         "opening_picks": [],
@@ -78,6 +79,27 @@ def test_rejects_invalid_zone_class():
     data["zone_classes"] = {"driveway": "not_a_place"}
     errors = policy_settings.validate_settings(data)
     assert any("zone_classes.driveway" in e for e in errors)
+
+
+def test_rejects_invalid_subject_in_zone_overrides():
+    data = _valid()
+    data["zone_overrides"] = {"driveway": {"ghost_subject": "urgent"}}
+    errors = policy_settings.validate_settings(data)
+    assert any("zone_overrides.driveway" in e and "ghost_subject" in e for e in errors)
+
+
+def test_rejects_invalid_level_in_zone_overrides():
+    data = _valid()
+    data["zone_overrides"] = {"driveway": {"thing": "screaming"}}
+    errors = policy_settings.validate_settings(data)
+    assert any("zone_overrides.driveway.thing" in e for e in errors)
+
+
+def test_zone_overrides_allow_unknown_zone_names():
+    # The user may configure a zone before it appears in Frigate.
+    data = _valid()
+    data["zone_overrides"] = {"not_yet_a_real_zone": {"thing": "urgent"}}
+    assert policy_settings.validate_settings(data) == []
 
 
 def test_rejects_unknown_live_activity_family():
@@ -181,7 +203,38 @@ def test_load_settings_fills_in_missing_fields_from_an_older_partial_file(tmp_pa
     loaded = policy_settings.load_settings(path)
     assert loaded["routing_table"] == policy_settings.DEFAULT_ROUTING_TABLE
     assert loaded["zone_classes"] == {"driveway": "yard"}
+    assert loaded["zone_overrides"] == {}
     assert loaded["live_activities"]["package"] is True
+
+
+def test_normalize_settings_keeps_valid_zone_overrides():
+    data = policy_settings.default_settings()
+    data["zone_overrides"] = {"front_entry_person": {"thing": "notify"}}
+    normalized = policy_settings.normalize_settings(data)
+    assert normalized["zone_overrides"] == {"front_entry_person": {"thing": "notify"}}
+
+
+def test_normalize_settings_drops_invalid_entries_within_a_zone_override():
+    data = policy_settings.default_settings()
+    data["zone_overrides"] = {
+        "driveway": {"animal": "log", "ghost": "urgent", "thing": "not_a_level"},
+    }
+    normalized = policy_settings.normalize_settings(data)
+    assert normalized["zone_overrides"] == {"driveway": {"animal": "log"}}
+
+
+def test_normalize_settings_removes_empty_inner_dicts():
+    data = policy_settings.default_settings()
+    data["zone_overrides"] = {"driveway": {}}
+    normalized = policy_settings.normalize_settings(data)
+    assert normalized["zone_overrides"] == {}
+
+
+def test_normalize_settings_removes_zone_left_empty_after_filtering():
+    data = policy_settings.default_settings()
+    data["zone_overrides"] = {"driveway": {"ghost": "urgent"}}
+    normalized = policy_settings.normalize_settings(data)
+    assert normalized["zone_overrides"] == {}
 
 
 # -- applying to the routing engine ----------------------------------------
@@ -210,3 +263,52 @@ def test_get_active_lazily_defaults():
     policy_settings.reset_for_tests()
     active = policy_settings.get_active()
     assert active == policy_settings.default_settings()
+
+
+# -- zone overrides (Phase 4 addendum) -------------------------------------
+
+
+def test_zone_override_present_bypasses_the_base_table():
+    from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+
+    settings = policy_settings.default_settings()
+    settings["routing_table"]["thing"]["doors"] = "log"  # base table says log
+    settings["zone_overrides"] = {"front_entry_person": {"thing": "notify"}}
+    policy_settings.apply_settings(settings)
+
+    level = evaluate_ladder(
+        Snapshot(subject="thing", place="doors", zone="front_entry_person")
+    )
+    assert level == "notify"  # the override, not the base table's "log"
+
+
+def test_zone_override_absent_falls_through_to_the_base_table():
+    from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+
+    settings = policy_settings.default_settings()
+    settings["zone_overrides"] = {"front_entry_person": {"thing": "notify"}}
+    policy_settings.apply_settings(settings)
+
+    # Different zone -- no override applies, ordinary table lookup runs.
+    level = evaluate_ladder(Snapshot(subject="thing", place="doors", zone="side_door"))
+    assert level == settings["routing_table"]["thing"]["doors"]
+
+    # Same zone, different subject -- no override applies either.
+    level = evaluate_ladder(
+        Snapshot(subject="stranger", place="doors", zone="front_entry_person")
+    )
+    assert level == settings["routing_table"]["stranger"]["doors"]
+
+
+def test_zone_override_does_not_affect_other_zones_in_the_same_place_class():
+    from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+
+    settings = policy_settings.default_settings()
+    settings["zone_overrides"] = {"driveway": {"animal": "log"}}
+    policy_settings.apply_settings(settings)
+
+    assert evaluate_ladder(Snapshot(subject="animal", place="yard", zone="driveway")) == "log"
+    # Another yard-classified zone, no override for it -- base table applies.
+    assert evaluate_ladder(
+        Snapshot(subject="animal", place="yard", zone="parking_spot")
+    ) == settings["routing_table"]["animal"]["yard"]

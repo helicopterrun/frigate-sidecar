@@ -118,6 +118,35 @@ def test_put_persists_and_is_reflected_in_subsequent_get(client: TestClient, tmp
     assert on_disk["routing_table"]["thing"]["yard"] == "urgent"
 
 
+def test_put_persists_zone_overrides_and_get_returns_them(client: TestClient):
+    new_settings = policy_settings.default_settings()
+    new_settings["zone_overrides"] = {"front_entry_person": {"thing": "notify"}}
+
+    put_resp = client.put("/v1/push/settings", json=new_settings)
+    assert put_resp.status_code == 200
+
+    stored = client.get("/v1/push/settings").json()["settings"]
+    assert stored["zone_overrides"] == {"front_entry_person": {"thing": "notify"}}
+
+
+def test_put_rejects_invalid_zone_override(client: TestClient):
+    bad = policy_settings.default_settings()
+    bad["zone_overrides"] = {"driveway": {"thing": "screaming"}}
+    resp = client.put("/v1/push/settings", json=bad)
+    assert resp.status_code == 400
+    assert any("zone_overrides.driveway.thing" in d for d in resp.json()["detail"]["detail"])
+
+
+def test_put_cleans_up_empty_zone_override_entries(client: TestClient):
+    settings = policy_settings.default_settings()
+    settings["zone_overrides"] = {"driveway": {}}
+    resp = client.put("/v1/push/settings", json=settings)
+    assert resp.status_code == 200
+
+    stored = client.get("/v1/push/settings").json()["settings"]
+    assert stored["zone_overrides"] == {}
+
+
 def test_put_applies_immediately_to_the_routing_engine(client: TestClient):
     from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
 

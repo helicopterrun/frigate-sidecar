@@ -56,6 +56,22 @@ CALM_REASONS = ("known_role", "low_confidence", "no_recognition_capability")
 #: nudge, floor, or caps.
 SYSTEM_CARD_LEVEL = "notify"
 
+#: `{zone: {subject: level}}` (Elsinore Phase 4 addendum, `push/
+#: policy_settings.py`'s `zone_overrides`). Empty by default -- pure base-
+#: table lookup, unchanged from before this addendum existed. Checked by
+#: `ladder.evaluate_ladder` before the base table, replacing (not
+#: modifying) whatever the table would have said for that exact
+#: `(zone, subject)` pair.
+ZONE_OVERRIDES: dict[str, dict[str, str]] = {}
+
+
+def set_zone_overrides(overrides: dict[str, dict[str, str]]) -> None:
+    """Replace the live zone-override map. Same rebind-a-module-global
+    mechanism as `set_table` -- `ladder.py` reads `policy.ZONE_OVERRIDES` as
+    a module attribute at call time, so nothing there needs to change."""
+    global ZONE_OVERRIDES
+    ZONE_OVERRIDES = overrides
+
 
 def set_table(table: dict[str, dict[str, str]]) -> None:
     """Replace the base subject x place table (Elsinore Phase 4: user-

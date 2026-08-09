@@ -111,6 +111,7 @@ def default_settings() -> dict[str, Any]:
         "v": SETTINGS_VERSION,
         "routing_table": {subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE.items()},
         "zone_classes": {},
+        "zone_overrides": {},
         "live_activities": {family: True for family in FAMILIES} | {"opening_picks": []},
     }
 
@@ -159,6 +160,31 @@ def validate_settings(data: Any) -> list[str]:
                 if place not in PLACES:
                     errors.append(f"zone_classes.{zone} must be one of {PLACES}, got {place!r}")
 
+    zone_overrides = data.get("zone_overrides")
+    if zone_overrides is not None:
+        if not isinstance(zone_overrides, dict):
+            errors.append("zone_overrides must be an object")
+        else:
+            # Zone names themselves are unrestricted (design doc §4 -- the
+            # user might configure a zone before it appears in Frigate);
+            # only the inner subject/level vocabulary is closed.
+            for zone, row in zone_overrides.items():
+                if not isinstance(row, dict):
+                    errors.append(f"zone_overrides.{zone} must be an object")
+                    continue
+                for subject, level in row.items():
+                    if subject not in SUBJECTS:
+                        errors.append(
+                            f"zone_overrides.{zone} has unknown subject {subject!r}, "
+                            f"must be one of {SUBJECTS}"
+                        )
+                        continue
+                    if level not in LEVELS:
+                        errors.append(
+                            f"zone_overrides.{zone}.{subject} must be one of {LEVELS}, "
+                            f"got {level!r}"
+                        )
+
     live_activities = data.get("live_activities")
     if live_activities is not None:
         if not isinstance(live_activities, dict):
@@ -200,6 +226,24 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
         merged["zone_classes"] = {
             str(zone): place for zone, place in zone_classes.items() if place in PLACES
         }
+
+    zone_overrides = data.get("zone_overrides")
+    if isinstance(zone_overrides, dict):
+        cleaned: dict[str, dict[str, str]] = {}
+        for zone, row in zone_overrides.items():
+            if not isinstance(row, dict):
+                continue
+            valid_row = {
+                subject: level
+                for subject, level in row.items()
+                if subject in SUBJECTS and level in LEVELS
+            }
+            # An override that ends up empty after filtering (or was saved
+            # empty to begin with) is removed, not kept as a no-op entry
+            # (design doc §4's "cleaned up on save").
+            if valid_row:
+                cleaned[str(zone)] = valid_row
+        merged["zone_overrides"] = cleaned
 
     live_activities = data.get("live_activities")
     if isinstance(live_activities, dict):
@@ -249,14 +293,17 @@ _active: dict[str, Any] | None = None
 
 
 def apply_settings(settings: dict[str, Any]) -> None:
-    """Make `settings` the live policy. `ladder_policy.set_table` is called
-    with a fresh copy (never the caller's own dict) so a later in-place edit
-    to `settings["routing_table"]` on the caller's side can't silently
+    """Make `settings` the live policy. `ladder_policy.set_table`/
+    `set_zone_overrides` are called with fresh copies (never the caller's
+    own dicts) so a later in-place edit on the caller's side can't silently
     mutate what the evaluator is using. Everything else
     (`zone_classes`/`live_activities`) is read through `get_active()` at
     call time by `delivery_wire.py`, so there's nothing further to push."""
     global _active
     ladder_policy.set_table({s: dict(row) for s, row in settings["routing_table"].items()})
+    ladder_policy.set_zone_overrides(
+        {zone: dict(row) for zone, row in settings.get("zone_overrides", {}).items()}
+    )
     _active = settings
 
 

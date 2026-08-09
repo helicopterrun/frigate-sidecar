@@ -131,9 +131,10 @@ def snapshot_from_review(
     alongside the level the snapshot evaluates to."""
     subject_kind = classify_subject(event)
     place_class = classify_place(event, zone_classes)
+    zone = event.zones[0] if event.zones else ""
     label = event.labels[0] if event.labels else ""
     snapshot = Snapshot(
-        subject=subject_kind, place=place_class, label=label,
+        subject=subject_kind, place=place_class, zone=zone, label=label,
         nobody_home=nobody_home, night=night, dwell_exceeded=dwell_exceeded, muted=muted,
     )
     return snapshot, subject_kind, place_class

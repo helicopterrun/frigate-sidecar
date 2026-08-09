@@ -619,10 +619,40 @@ distinction is invisible -- it only matters to tests, which is exactly why
 ### Routing engine wiring
 
 `ladder_policy.set_table` rebinds the module-level `TABLE` dict.
-`ladder.py` itself is completely unchanged -- it already reads
-`policy.TABLE` as a bare module attribute at call time (not at import
-time), so simply rebinding it is enough for `evaluate_ladder` to pick up
-the new table on its very next call, no plumbing required.
+`ladder.py`'s own evaluation order otherwise didn't need to change to make
+the table live -- it already reads `policy.TABLE` as a bare module
+attribute at call time (not at import time), so simply rebinding it is
+enough for `evaluate_ladder` to pick up the new table on its very next
+call. The one addition to `ladder.py` itself is the per-zone override
+below, which needed a new `Snapshot.zone` field to have a zone name to key
+on at all.
+
+### Per-zone subject overrides (addendum)
+
+A zone can be assigned an area type (`zone_classes`, above) *and*
+separately override specific subjects within it to a different level --
+"front porch is Semi-private [doors], but Things [packages] there should
+always Banner [notify] with sound" without changing how every other doors
+zone, or every other subject in this one, routes.
+
+`settings.zone_overrides` (`{zone: {subject: level}}`) is checked by
+`ladder.evaluate_ladder` right after the dangerous-animal reclassification
+and before the base table lookup (`ladder_policy.ZONE_OVERRIDES`, the same
+rebind-a-module-global mechanism as `TABLE`). A hit returns that level
+directly -- it bypasses the base table *and* the nudge/floor/caps that
+would otherwise run on a table-derived result, because "always" is the
+whole point of an override; it does not stack with or modulate the base
+level, it replaces it outright. It's checked after mute/system-card/safety-
+exception handling, though, since those are hard invariants the override
+mechanism was never meant to relax.
+
+Validation is deliberately looser on the outer key than everywhere else in
+this document: a zone name in `zone_overrides` doesn't have to exist in
+`available_zones` (the user may configure an override before the matching
+camera/zone exists in Frigate), but the inner subject/level vocabulary is
+exactly as closed as the base table's. An override entry that ends up
+empty (explicitly saved empty, or emptied by validation dropping an
+invalid inner key) is removed on save rather than kept as a no-op entry.
 
 ### Zone classification
 
@@ -680,24 +710,39 @@ rather than rejected, so an older-shaped file keeps working forever.
 
 ### What did not change
 
-The routing evaluator's exception/nudge/cap logic (`ladder.py`), the card
-push delivery pipeline, the card identity key scheme, the APNs payload
-format, cross-camera dedup, and the LA push payload format -- only the base
-routing table, zone-class assignment, and LA family toggles became
-user-editable this phase.
+The routing evaluator's nudge/floor/cap logic (`ladder.py`) is unchanged in
+substance -- the one addition is the per-zone override check itself (the
+addendum above), which is a new, explicit, user-controlled bypass, not a
+change to how the existing exceptions/nudges/caps behave when no override
+applies. The card push delivery pipeline, the card identity key scheme, the
+APNs payload format, cross-camera dedup, and the LA push payload format are
+all unchanged -- only the base routing table, zone-class assignment,
+per-zone subject overrides, and LA family toggles became user-editable
+this phase. Wire-format vocabulary (`street`/`yard`/`doors`/`private`/
+`off_limits`, `log`/`quiet`/`notify`/`urgent`, `stranger`/`known`/`animal`/
+`thing`) is unchanged; any display-label renaming (e.g. "Street" →
+"Public") is the app's own presentation layer and never reaches the wire.
 
 ### Tests
 
 `tests/test_push_policy_settings.py` covers defaults, validation, the
 zone-guessing heuristic (every pattern plus the default and collision
-cases), persistence (missing/corrupt/partial file), and that
-`apply_settings` actually changes what `evaluate_ladder` returns.
-`tests/test_push_settings_routes.py` covers the HTTP surface end to end
-(`GET` defaults and creates the file, `available_zones`/`available_openings`
-from a fake Frigate config, `PUT` persists/validates/applies immediately).
-`tests/test_push_delivery_wire.py` and `tests/test_push_live_activities_wire.py`
-each carry one integration test confirming a `PUT`-equivalent
-`apply_settings` call changes real card evaluation output one layer below
+cases), persistence (missing/corrupt/partial file), that `apply_settings`
+actually changes what `evaluate_ladder` returns, and the per-zone override
+addendum specifically: present bypasses the base table, absent falls
+through unchanged, a different zone or a different subject in the same
+overridden zone is unaffected, invalid inner subject/level values are
+rejected, and an empty (or emptied-by-filtering) override entry is dropped
+on normalize. `tests/test_push_settings_routes.py` covers the HTTP surface
+end to end (`GET` defaults and creates the file,
+`available_zones`/`available_openings` from a fake Frigate config, `PUT`
+persists/validates/applies immediately, including `zone_overrides`
+specifically).
+`tests/test_push_delivery_wire.py` carries integration tests confirming a
+`PUT`-equivalent `apply_settings` call changes real card evaluation output
+one layer below the route -- for the routing table, for zone classes, and
+for a zone override reaching a real card end to end.
+`tests/test_push_live_activities_wire.py` carries the same one layer below
 the HTTP route.
 
 ## Live Activities (Phase 2)

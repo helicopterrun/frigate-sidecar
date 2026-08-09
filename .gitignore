@@ -40,6 +40,10 @@ Thumbs.db
 config/sidecar.yml
 .env
 
+# User-editable attention-ladder policy (Elsinore Phase 4) -- runtime data
+# written by PUT /v1/push/settings, not code.
+config/push_settings.json
+
 # Logs
 *.log
 
