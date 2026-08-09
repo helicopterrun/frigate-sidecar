@@ -309,7 +309,7 @@ def print_decisions(decisions: list[dict[str, Any]]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# MQTT publisher (same pattern as replay_situation.py)
+# MQTT publisher
 # ---------------------------------------------------------------------------
 
 class _MqttPublisher:
