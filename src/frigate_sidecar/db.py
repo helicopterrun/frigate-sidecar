@@ -242,6 +242,61 @@ CREATE TABLE IF NOT EXISTS push_activity_sends (
 );
 CREATE INDEX IF NOT EXISTS idx_push_activity_sends
     ON push_activity_sends(activity_id, sent_at);
+
+-- One row per card (Elsinore Phase 2: delivery pipeline,
+-- docs/push-notifications.md "Attention ladder: delivery pipeline"). A card
+-- is the unit of user-facing state for one ongoing subject -- five
+-- detections of the same tracked object mutate one row, they do not create
+-- five. `card_key` is also the APNs collapse id, so a device's Notification
+-- Center is keyed the same way this table is.
+--
+-- `sound_count` and `resound_count` are the entire anti-spam policy's state:
+-- the former caps ordinary sound at two per card (create + first escalate,
+-- `cards.SOUND_BUDGET`), the latter caps the urgent-only re-sound at one.
+-- `handled`/`handled_at` are a hook for multi-device dismissal sync, which
+-- does not exist yet -- today only the sidecar's own re-sound timer sets
+-- them.
+CREATE TABLE IF NOT EXISTS push_cards (
+    card_key      TEXT PRIMARY KEY,
+    level         TEXT NOT NULL,
+    subject_kind  TEXT NOT NULL DEFAULT '',
+    place_class   TEXT NOT NULL DEFAULT '',
+    camera        TEXT NOT NULL DEFAULT '',
+    zone_name     TEXT NOT NULL DEFAULT '',
+    created_at    REAL NOT NULL,
+    updated_at    REAL NOT NULL,
+    -- When the *current* level became true (resets on create/escalate/
+    -- deescalate, held across enrich/resolve). Feeds the payload's
+    -- `state_since_ts` -- elapsed time is how long the state has been true,
+    -- not since the first detector event.
+    state_since_at REAL NOT NULL,
+    sound_count   INTEGER NOT NULL DEFAULT 0,
+    handled       INTEGER NOT NULL DEFAULT 0,
+    handled_at    REAL,
+    last_sound_at REAL,
+    resound_count INTEGER NOT NULL DEFAULT 0,
+    resolved      INTEGER NOT NULL DEFAULT 0,
+    closed        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_push_cards_open
+    ON push_cards(closed, level, last_sound_at);
+
+-- Cross-camera dedup (docs/push-notifications.md "Cross-camera
+-- deduplication"). When a fresh (camera, track_id) is matched onto an
+-- *existing* card owned by a different camera/track (same subject_kind,
+-- same zone_name, within the dedup window), this row remembers that mapping
+-- so every subsequent event for this track routes straight to the merged
+-- card instead of re-running the dedup query -- and so a still-tracking
+-- second camera keeps enriching the same card even after the window that
+-- created the alias has long since closed. One row per contributing track;
+-- deleted once that track resolves or its target card closes.
+CREATE TABLE IF NOT EXISTS push_card_track_aliases (
+    camera     TEXT NOT NULL,
+    track_id   TEXT NOT NULL,
+    card_key   TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (camera, track_id)
+);
 """
 
 # Columns added to `push_devices` / `push_handles` after those tables first

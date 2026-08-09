@@ -1,0 +1,95 @@
+"""The attention ladder: given a detection snapshot, how loud is it?
+
+Pure routing logic -- no APNs, no delivery, no Live Activity, no HTTP. One
+function, `evaluate_ladder`, answers a single question: which of four
+attention levels (`log` < `quiet` < `notify` < `urgent`, `ladder_policy.LEVELS`)
+a snapshot earns, or whether it's suppressed outright. All policy (the base
+table, which reasons nudge which way, dangerous-animal labels, the system-card
+level) lives in `ladder_policy.py` as data; this module is just the fixed
+evaluation order that data plugs into, so a policy change is a data edit, not
+a code change.
+
+Evaluation order:
+
+1. Muted -> suppressed, unconditionally -- beats even a system card or a
+   safety exception.
+2. `source == "system"` (no subject/place, e.g. "camera offline") ->
+   `ladder_policy.SYSTEM_CARD_LEVEL`, bypassing everything below.
+3. Safety exceptions (`audio_safety`, `ai_flagged`) -> `urgent`, bypassing the
+   table, nudge, floor, and the caps in step 7 -- including for `known`
+   subjects.
+4. Reclassify: a dangerous-animal `label` makes `subject` a `stranger` from
+   here on.
+5. Base table lookup (`subject` x `place`).
+6. One nudge: net worry vs. calm reasons moves the result at most one step.
+   `animal` subjects never nudge; `known` subjects never nudge up (down is
+   fine).
+7. Floor: a person subject in a `child_hazard_zone` is at least `notify`.
+8. Caps: `street` caps at `quiet`; an unconfirmed detector caps at `quiet`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from frigate_sidecar.push import ladder_policy as policy
+
+SUPPRESSED = "suppressed"
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """One detection (or system card) to route. `subject`/`place` are unused
+    (leave as "") when `source == "system"`."""
+
+    source: str = "detection"  # "detection" | "system"
+    subject: str = ""  # "stranger" | "known" | "animal" | "thing"
+    place: str = ""  # "street" | "yard" | "doors" | "private" | "off_limits"
+    label: str = ""  # raw Frigate label
+    nobody_home: bool = False
+    night: bool = False
+    dwell_exceeded: bool = False
+    seen_before_still_unrecognized: bool = False
+    known_role: bool = False
+    low_confidence: bool = False
+    no_recognition_capability: bool = False
+    muted: bool = False
+    audio_safety: bool = False
+    ai_flagged: bool = False
+    child_hazard_zone: bool = False
+    detector_confirmed: bool = True
+
+
+def evaluate_ladder(snapshot: Snapshot) -> str:
+    """Return one of `ladder_policy.LEVELS`, or `SUPPRESSED`."""
+    if snapshot.muted:
+        return SUPPRESSED
+    if snapshot.source == "system":
+        return policy.SYSTEM_CARD_LEVEL
+    if snapshot.audio_safety or snapshot.ai_flagged:
+        return "urgent"
+
+    subject = snapshot.subject
+    if snapshot.label in policy.DANGEROUS_ANIMAL_LABELS:
+        subject = "stranger"
+
+    levels = policy.LEVELS
+    idx = levels.index(policy.TABLE[subject][snapshot.place])
+
+    if subject != "animal":
+        worry = sum(1 for r in policy.WORRY_REASONS if getattr(snapshot, r))
+        calm = sum(1 for r in policy.CALM_REASONS if getattr(snapshot, r))
+        step = 1 if worry > calm else -1 if calm > worry else 0
+        if step == 1 and subject == "known":
+            step = 0
+        idx = max(0, min(len(levels) - 1, idx + step))
+
+    if subject in ("stranger", "known") and snapshot.child_hazard_zone:
+        idx = max(idx, levels.index("notify"))
+
+    if snapshot.place == "street":
+        idx = min(idx, levels.index("quiet"))
+    if not snapshot.detector_confirmed:
+        idx = min(idx, levels.index("quiet"))
+
+    return levels[idx]

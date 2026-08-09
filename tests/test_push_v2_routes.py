@@ -317,13 +317,29 @@ def test_expired_handle_yields_no_thumbnail(
     assert client.get(f"/v1/push/thumbnail/{handle}").status_code == 404
 
 
-def test_thumbnail_requires_auth_like_every_other_v1_route(
+def test_thumbnail_is_exempt_from_frigate_auth(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path
+) -> None:
+    """Unlike every other `/v1/push` route: the iOS Notification Service
+    Extension fetches this one and holds no Frigate session (`auth.py`'s
+    `EXEMPT_PREFIXES` docstring has the full rationale -- the handle itself,
+    opaque/unguessable/short-lived, is the access control). A miss still
+    404s rather than hanging or leaking whether a handle ever existed.
+    """
+    settings = _settings(frigate_db_path, sidecar_db_path, tmp_path)
+    settings.sidecar.require_frigate_auth = True
+    authed = TestClient(create_app(settings))
+    assert authed.get("/v1/push/thumbnail/h_x").status_code == 404
+
+
+def test_other_push_routes_still_require_auth(
     frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path
 ) -> None:
     settings = _settings(frigate_db_path, sidecar_db_path, tmp_path)
     settings.sidecar.require_frigate_auth = True
     authed = TestClient(create_app(settings))
-    assert authed.get("/v1/push/thumbnail/h_x").status_code in (401, 403)
+    assert authed.get("/v1/push/handle/h_x").status_code in (401, 403)
+    assert authed.get("/v1/push/situations/library").status_code in (401, 403)
 
 
 def test_unknown_registration_fields_are_logged_not_swallowed(

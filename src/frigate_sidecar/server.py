@@ -19,6 +19,8 @@ from frigate_sidecar import __version__
 from frigate_sidecar.auth import FrigateAuthMiddleware
 from frigate_sidecar.config import Settings, load_settings
 from frigate_sidecar.frigate_api import FrigateClient
+from frigate_sidecar.push import delivery, delivery_wire
+from frigate_sidecar.push import store as push_store
 from frigate_sidecar.push.engine import PushEngine
 from frigate_sidecar.push.mqtt import MqttReviewSubscriber
 from frigate_sidecar.push.transport import LogTransport, RelayTransport
@@ -178,6 +180,39 @@ async def _activity_sweep_loop(app: FastAPI) -> None:
             logger.exception("push: activity sweep failed")
 
 
+async def _delivery_resound_sweep_loop(app: FastAPI) -> None:
+    """The urgent-only re-sound timer (design doc §3): an `urgent` card
+    still unhandled after `delivery_urgent_resound_s` gets exactly one more
+    sound. Only ever adds a sound to a card that already exists and already
+    sounded once -- it never creates or ends anything, so it's the same
+    kind of "only tightens, never a keep-alive" sweep as
+    `_activity_sweep_loop`.
+    """
+    engine: PushEngine = app.state.push_engine
+    settings: Settings = app.state.settings
+    interval = settings.push.delivery_resound_sweep_interval_s
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            from frigate_sidecar import db
+
+            conn = db.open_sidecar(engine.db_path)
+            try:
+                devices = push_store.list_devices(conn)
+                await delivery.sweep_urgent_resound(
+                    conn, engine.transport, devices,
+                    interval_s=settings.push.delivery_urgent_resound_s,
+                    enabled=settings.push.delivery_urgent_resound_enabled,
+                    payload_for_resound=delivery_wire.resound_payload_for,
+                )
+            finally:
+                conn.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("push: delivery re-sound sweep failed")
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
@@ -212,7 +247,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     push_task: asyncio.Task[None] | None = None
     sweep_task: asyncio.Task[None] | None = None
+    delivery_sweep_task: asyncio.Task[None] | None = None
     if settings.push.enabled:
+        from frigate_sidecar import db
+        from frigate_sidecar.push import card_store
+
+        _conn = db.open_sidecar(str(settings.sidecar.db_path))
+        try:
+            collapsed = card_store.migrate_drop_zone_from_card_keys(_conn)
+            if collapsed:
+                logger.info(
+                    "push: collapsed %d zone-bearing card row(s) onto the "
+                    "camera/subject-kind/track-id identity", collapsed,
+                )
+        finally:
+            _conn.close()
+
         server_id = settings.push.server_id or f"s_{id(app):x}"
         transport = _build_push_transport(settings)
         app.state.push_transport = transport
@@ -234,6 +284,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             activity_dismissal_tail_s=settings.push.activity_dismissal_tail_s,
             activity_updates_per_hour=settings.push.activity_updates_per_hour,
             activity_reap_after_s=settings.push.activity_reap_after_s,
+            push_config=settings.push,
         )
         app.state.push_engine = engine
         subscriber = MqttReviewSubscriber(
@@ -242,11 +293,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.push_subscriber = subscriber
         push_task = asyncio.create_task(_push_subscriber_loop(app))
         sweep_task = asyncio.create_task(_activity_sweep_loop(app))
+        if settings.push.delivery_enabled:
+            delivery_sweep_task = asyncio.create_task(_delivery_resound_sweep_loop(app))
 
     try:
         yield
     finally:
-        for pending in (task, probe_task, push_task, sweep_task):
+        for pending in (task, probe_task, push_task, sweep_task, delivery_sweep_task):
             if pending is not None:
                 pending.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

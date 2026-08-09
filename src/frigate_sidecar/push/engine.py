@@ -35,8 +35,9 @@ from typing import Any
 
 import httpx
 
+from frigate_sidecar.config import PushSection
 from frigate_sidecar.push import activity as activity_payload
-from frigate_sidecar.push import store
+from frigate_sidecar.push import delivery_wire, store
 from frigate_sidecar.push.decision import (
     devices_for_event,
     matches,
@@ -113,6 +114,15 @@ class PushEngine:
     #: How long an ended activity's row survives before reaping, measured past
     #: its dismissal so a late token upload still finds something.
     activity_reap_after_s: float = 300.0
+
+    # -- Attention ladder: delivery pipeline (Elsinore Phase 2) --
+    # The whole `PushSection`, not individual fields: `delivery_wire`'s
+    # functions take the config object directly (`delivery_enabled`,
+    # `delivery_zone_place_map`, ...), and threading each field through the
+    # engine's constructor separately would just be another way to get out
+    # of sync with `config.py`. `None` (the default, e.g. in tests that build
+    # a `PushEngine` directly) behaves exactly like `delivery_enabled=False`.
+    push_config: PushSection | None = None
 
     _http: httpx.AsyncClient | None = None
     _warned_undeliverable: set[str] = field(default_factory=set)
@@ -212,6 +222,16 @@ class PushEngine:
             # activities have to be ended before the track state they are
             # keyed on is dropped.
             ended = await self._end_activities_for_track(obj.camera, obj.track_id)
+            if self.push_config is not None and self.push_config.delivery_enabled:
+                conn = self._conn()
+                try:
+                    devices = store.list_devices(conn)
+                    await delivery_wire.handle_delivery_resolve(
+                        obj.camera, obj.track_id, conn=conn, devices=devices,
+                        transport=self.transport, config=self.push_config,
+                    )
+                finally:
+                    conn.close()
             self.tracks.forget(obj.camera, obj.track_id)
             self._pending.pop(key, None)
             self._pending_since.pop(key, None)
@@ -285,6 +305,20 @@ class PushEngine:
                 # full tail rather than the short one (handoff item 8).
                 self._mark_promoted(event)
             sent += await self._dispatch_situations(v2, event, now=now)
+
+        if self.push_config is not None and self.push_config.delivery_enabled:
+            # Independent of the v1/v2 count above: the delivery pipeline
+            # runs its own card state and its own budget, to every
+            # registered device (no per-device situations/camera filter yet
+            # -- see docs/push-notifications.md). Ships dark until enabled.
+            conn = self._conn()
+            try:
+                await delivery_wire.handle_delivery_event(
+                    event, conn=conn, devices=devices, transport=self.transport,
+                    config=self.push_config, engine=self, now=now,
+                )
+            finally:
+                conn.close()
 
         self._maybe_gc(now)
         return sent

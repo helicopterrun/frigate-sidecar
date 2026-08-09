@@ -168,6 +168,410 @@ loses a push on upgrade.
   cache. The fetch runs *in parallel* with the send, never in series, and every
   failure path costs the notification its image rather than its existence.
 
+## Attention ladder (Elsinore Phase 1: routing engine)
+
+`frigate_sidecar/push/ladder.py` answers one question, statelessly: given a
+detection snapshot, how loud is it? It has no APNs, delivery, Live Activity,
+or HTTP surface of its own — later phases wrap `evaluate_ladder` rather than
+duplicate its policy.
+
+- **Output:** one of four ordinal attention levels, `log < quiet < notify <
+  urgent` (`ladder_policy.LEVELS`), or `ladder.SUPPRESSED` for a muted
+  snapshot.
+- **Input:** `ladder.Snapshot` — a pre-classified `subject`
+  (`stranger`/`known`/`animal`/`thing`) and `place`
+  (`street`/`yard`/`doors`/`private`/`off_limits`), the raw Frigate `label`,
+  and a set of context/exception booleans. `source == "system"` (e.g. a
+  camera-offline card) has no subject or place and short-circuits to a fixed
+  level instead of touching the table.
+- **All policy is data, in `ladder_policy.py`:** the subject x place base
+  table, which reasons nudge the result up (`WORRY_REASONS`) or down
+  (`CALM_REASONS`), which Frigate labels reclassify as `stranger`
+  (`DANGEROUS_ANIMAL_LABELS`), and the system-card level
+  (`SYSTEM_CARD_LEVEL`). Retuning any of these is a data edit; `ladder.py`
+  itself should not need to change.
+- **Evaluation order** (see `ladder.py`'s module docstring for the full
+  rationale): mute → system-card short-circuit → safety exceptions
+  (`audio_safety`, `ai_flagged`, unconditional `urgent`) → dangerous-animal
+  reclassification → base table lookup → one net-worry/calm nudge (`animal`
+  never nudges; `known` never nudges up) → child-hazard-zone floor (at least
+  `notify`) → `street`/unconfirmed-detector caps (at most `quiet`).
+
+**To change policy:** edit `ladder_policy.py`, then run the golden suite:
+
+```sh
+pytest tests/test_push_ladder.py
+```
+
+`fixtures/ladder/ladder_cases.json` is the golden suite — one row per
+precedence rule the engine has to get right (e.g. "a known-subject nudge never
+crosses the up direction", "a safety exception beats the street cap"). It's
+hand-authored, not generated: a policy change that alters a case's outcome
+must update its `expected` value deliberately, in the same commit as the
+policy edit, not be silently re-blessed.
+
+## Attention ladder: delivery pipeline (Elsinore Phase 2)
+
+*Not to be confused with the "Live Activities (Phase 2)" section below --
+that is the notification-experience plan's own Phase 2, already shipped.
+This section is the attention ladder project's Phase 2: the stateful layer
+that wraps Phase 1's `evaluate_ladder` (previous section) and turns a
+stream of detection snapshots into ordinary alert/silent APNs pushes.*
+
+`push/cards.py` (pure), `push/card_store.py` (sqlite), `push/delivery.py`
+(payload + orchestration), and `push/delivery_wire.py` (live wire-up) --
+config-gated behind `push.delivery_enabled` (default **off**), independent
+of `push.enabled` and the situations/Live-Activity machinery below. It
+ships dark: enabling it does not change anything about the v1 or v2
+(situations) paths, which are untouched.
+
+### The card model
+
+A **card** is the unit of user-facing state: one card per subject. Five
+detections of the same person over two minutes mutate one card, they don't
+create five. `card_key` is stable per ongoing subject and doubles as the
+`apns-collapse-id`:
+
+```
+{camera}:{subject_kind}:{tracked_object_id-or-opening-id}
+{camera}:system:{reason}                                          # system cards
+```
+
+**Zone is deliberately not part of identity**, unlike the design brief's
+literal example. An earlier version keyed on
+`{camera}:{zone}:{subject_kind}:{subject_id}`; the first supervised live run
+(2026-08-08) showed exactly the failure that predicts -- a car first seen
+with no zone, then entering `parking_spot`, produced two cards
+(`alley-wide:_:thing:...-m0d7oe` then `alley-wide:parking_spot:thing:...
+-m0d7oe`) for the same tracked object, because the zone-bearing key changed
+out from under it. Zone still travels on every payload as `zone_name` and
+still drives mutation classification when it changes the routed level (an
+enrich, or an escalate/deescalate if the level moves) -- it's mutation
+context, not identity. See `delivery.build_card_key`'s docstring.
+
+A card (`cards.Card`) holds exactly what the mutation classifier and sound
+accounting need: `level`, `created_at`/`updated_at`, `state_since_at` (when
+the *current* level became true -- resets on create/escalate/deescalate,
+held steady across enrich/resolve), `sound_count`, `handled`/`handled_at`,
+`last_sound_at`, `resound_count`, `resolved`, `closed`. Everything else
+(camera, zone, copy) is threaded through the payload builder by the caller
+rather than duplicated on the card -- see `card_store.list_open_urgent_cards`
+for where that context is actually persisted (the `push_cards` table has
+it; the `Card` dataclass doesn't).
+
+### Mutation classification
+
+Each new ladder evaluation against a card key is classified
+(`cards.classify_mutation`):
+
+| Mutation | Condition | Push |
+|---|---|---|
+| `create` | no existing (or closed) card | alert at the routed level, sound per budget |
+| `enrich` | same level, new facts | silent, same collapse id |
+| `escalate` | new level > old level | alert with sound, subject to the budget |
+| `deescalate` | new level < old level | silent, same collapse id |
+| `resolve` | explicit `resolved=True` signal | silent, never a sound |
+| `suppressed` | ladder returns `SUPPRESSED` (muted) | no push; card closes |
+
+**`resolved` is not derived from the level.** A `thing` at a non-street
+place never evaluates below `quiet` (`ladder_policy.TABLE`), so there is no
+`new_level` a caller could pass that would mean "the subject is gone" --
+that has to be an explicit signal from whatever the real end-of-condition
+source is (a Frigate object `end`, a door-closed sensor, `frigate/available`
+coming back). `advance_card(..., resolved=True)` is how the wire-up says so;
+`classify_mutation`'s docstring has the full rationale. Mute beats resolve,
+matching the ladder's own "mute beats everything" rule.
+
+### Sound accounting -- the entire anti-spam policy
+
+- Sound **at most twice per card**: once at `create` (only if the level is
+  `notify`/`urgent` -- a `quiet` create never sounds), once at the first
+  `escalate` past `quiet`.
+- Budget is spent by *sounds emitted*, not by beats: a silent `quiet`
+  create doesn't spend it, so the card's first-ever escalation can still be
+  sound #1, and a second escalation (`quiet` → `notify` → `urgent`, say)
+  can legitimately be sound #2.
+- Further escalations after the budget is spent still update level and
+  content, silently.
+- **Urgent re-sound, once:** an `urgent` card unhandled after
+  `push.delivery_urgent_resound_s` (default 120s) may re-alert exactly
+  once (`cards.urgent_resound_due`, `delivery.apply_urgent_resound`),
+  config-gated by `push.delivery_urgent_resound_enabled` (default on).
+  "Handled" is a hook, not a solved problem -- multi-device dismissal sync
+  doesn't exist yet, so today only the sidecar's own timer sets `handled`
+  (there is no client-facing "mark handled" endpoint in this phase). The
+  re-sound is a third, urgent-only sound; it doesn't touch `sound_count`.
+- All accounting lives on the card row, keyed by `card_key`.
+
+### Level → APNs mapping
+
+| Level | Push? | `interruption-level` | Sound |
+|---|---|---|---|
+| `urgent` | yes | `time-sensitive` | default sound (no Critical Alerts entitlement -- `critical` is never attempted) |
+| `notify` | yes | `active` | default sound |
+| `quiet` | yes | `passive` | none |
+| `log` | no | -- | -- (recorded for the timeline/digest, out of scope this phase) |
+| `suppressed` | no, card invisible | -- | -- |
+
+Silent mutations reuse the same alert-push channel with `aps.sound` omitted
+and the same `apns-collapse-id`, so the card replaces in place --
+`content-available` background pushes are not needed for this.
+
+### Payload contract
+
+`docs/apns-payload-spec.md` is the versioned (`"v": 1`) contract the app and
+NSE build against: `card_key`, `mutation`, `level`, `subject_kind`,
+`place_class`, `camera`, `zone_name`, a semantic `glyph` id (icon mapping is
+entirely client-side), `primary`/`secondary` copy (state-what-is-true
+grammar -- never asserts an identity that hasn't resolved), `event_ts`,
+`state_since_ts`, and optional `media`/`deep_link`. `delivery.build_card_payload`
+implements it; `delivery.py`'s module docstring has the layering.
+
+### Wire-up (ships dark)
+
+`push/delivery_wire.py` hooks into the two entry points every
+`frigate/reviews` and `frigate/events` message already passes through --
+`PushEngine.handle_event` and `handle_object_payload`'s object-end branch --
+guarded by `push.delivery_enabled`. No new transport (sends through the
+existing `PushTransport.send_situation`, same as the situations payload)
+and no new MQTT subscription.
+
+**Snapshot media** (`media`, `docs/apns-payload-spec.md`): on `create`/`enrich`
+only (never `escalate`/`deescalate`/`resolve` -- see the spec doc for why),
+`delivery_wire._media_for` mints a handle (`store.mint_handle`, same table
+situations use) and fires `PushEngine.prewarm_thumbnail` concurrently with
+the send, exactly like the situations path's `_fire_group` -- the push
+carries the URL optimistically and a slow/failed Frigate fetch costs the
+notification its image, never its existence. Unlike situations (which send
+just `handle` + `server_id` and let the already-registered app resolve the
+base URL itself), the card contract documents `media` as one complete,
+self-authorizing URL, so building it needs the sidecar's own phone-reachable
+address -- `push.external_base_url` (empty by default; `media` is simply
+omitted until it's set to something real, e.g. `http://192.168.50.207:5001`
+on this deployment). This is never Frigate's own address -- Frigate stays
+LAN-internal (`frigate.base_url`) and the sidecar re-hosts the fetched
+snapshot behind the handle, same trust boundary as every other push image
+this codebase sends.
+
+**Subject/place classification is a deliberate MVP**, not the full-fidelity
+mapping the ladder deserves: `classify_subject` reads `person` +
+`sub_labels` (known if present, stranger if not -- never the reverse) or an
+animal-label set off `frigate/reviews` alone; `classify_place` looks up
+`event.zones` against `push.delivery_zone_place_map` (falling back to
+`yard` if any zone is present, else `street`). Both are heuristics,
+documented as such, safe to ship because the whole pipeline defaults off.
+Tightening them is a config/data change in `delivery_wire.py`, not a change
+to `ladder.py` or `delivery.py` -- the same policy/evaluation split
+`ladder_policy.py` already established.
+
+Resolution rides on `frigate/events`' object `end` message
+(`handle_delivery_resolve`) rather than being derived from a review, since
+that is the actual "the subject is gone" signal Frigate provides (see the
+mutation-classification note above on why a ladder level can't say this by
+itself). It re-checks every subject-kind's card key for that track id,
+since the object stream alone doesn't carry which kind a review classified
+it as.
+
+The one-time urgent re-sound runs on its own sweep
+(`_delivery_resound_sweep_loop` in `server.py`, interval
+`push.delivery_resound_sweep_interval_s`, default 15s) -- the same "only
+ever tightens, never a keep-alive" shape as the Live Activity resolution
+sweeper below.
+
+### Cross-camera deduplication
+
+Overlapping fields of view mean the same physical event can produce several
+independent cards -- one per camera that happens to track it -- since each
+camera runs its own tracker with its own `track_id`. The first supervised
+run's own numbers made this concrete: one person walking the property
+generated five stranger cards in 30 seconds across `stairway-wide`,
+`stairway-tight`, `alley-wide`, `walkway`, and `street`.
+
+Frigate zone names are the correlation signal: two cameras with a zone
+named e.g. `driveway` are assumed to see the same physical space. When a
+*fresh* `(camera, track_id)` -- one with no card of its own yet -- carries a
+zone, `delivery_wire._resolve_card_for_track` looks for an open card with
+the same `subject_kind` and `zone_name` created within the last 15 seconds
+(`_DEDUP_WINDOW_S`; real-world gaps between cameras picking up the same
+walk-through measured 3-4s, so 15s is deliberately generous without risking
+merging genuinely separate events). If one exists, this track is *aliased*
+onto it (`push_card_track_aliases`, keyed on `(camera, track_id)`) instead
+of minting a new card key -- every later event for this track routes
+straight to the merged card via the alias, without re-running the query.
+The merged card's `camera` field stays whichever camera created it first
+(the app's timeline routing depends on that field naming a real,
+resolvable camera); the enriching camera is surfaced in the copy instead
+(`"... · also on {camera}"`).
+
+A subject changing zones mid-lifetime on its *own* already-existing card
+(no dedup involved -- see the zone-identity note above) just enriches that
+card's `zone_name` in place, the same as any other mutation; it never
+mints a new key. Three or more cameras sharing a zone all merge onto
+whichever card is oldest, not whichever alias was looked up last.
+
+No dedup is attempted when either side has no zone at all (Frigate hasn't
+told us where the object is, so there's nothing to correlate on) or when
+`subject_kind` or `zone_name` differ -- those always get independent cards.
+The 15s window is measured from the *candidate* card's `created_at`, so two
+detections of the same subject arriving more than 15s apart (a genuinely
+separate visit) correctly get separate cards.
+
+Resolution stays asymmetric on purpose: an aliased (non-owning) track
+resolving just drops its alias silently -- the owning camera may well still
+be tracking the subject, so the shared card is not touched. Only the
+*owning* camera's track resolving (its own natural card key, no alias)
+resolves the card, exactly as it always did before dedup existed. If a
+still-tracking secondary camera keeps reporting after that, it gets a fresh
+card under its own key on the next event, per the ordinary create path --
+by then it will typically have moved to a different zone anyway (the same
+walk-through scenario that motivated this feature in the first place).
+
+No configuration knob for v1 -- the zone-name-equality assumption is
+undocumented policy, not a setting: a camera that happens to reuse a zone
+name for a genuinely different physical space (a coincidence, not a
+correlated view) would incorrectly dedup against it. That's an explicit
+non-goal this phase, same spirit as every other MVP heuristic in this
+module.
+
+### Tests
+
+`fixtures/ladder/delivery_cases.json` + `tests/test_push_delivery.py`
+extend the ladder's golden-suite approach to **sequences**: each case is an
+ordered list of snapshots (plus, for the urgent case, timer checks and a
+"mark handled" event) against one card key, with an expected
+`(mutation, level, sound, push)` row per step. `tests/test_push_cards.py`
+and `tests/test_push_card_store.py` cover the pure classifier/sound-budget
+logic and the sqlite persistence directly; `tests/test_push_delivery_payload.py`
+covers payload construction and the send/sweep orchestration against
+`LogTransport`.
+
+### Not built this phase
+
+The daily digest and any settings/config UI surface for cards -- out of
+scope, per the design brief. `ladder.py`/`ladder_policy.py` are untouched.
+(Live Activity start/update/end and pushToStart tokens for cards *were*
+this phase's own "not built" list -- see "Live Activities for cards" below,
+Elsinore Phase 3.)
+
+## Live Activities for cards (Elsinore Phase 3)
+
+*Not the same feature as "Live Activities (Phase 2)" below -- that is the
+notification-experience plan's own Live Activity for **situations**
+(`push/activity.py`, `ATTRIBUTES_TYPE = "SituationActivityAttributes"`,
+already shipped). This is a Live Activity for **cards** (`push/cards.py`,
+the previous section), an additional output channel on the same card
+lifecycle -- create/enrich/escalate/deescalate/resolve -- the ordinary card
+push already drives. The two run independently and share nothing but the
+`push_activities` table.*
+
+`push/live_activities.py` (pure: family detection, glyph mapping, the three
+payload shapes) plus the wiring inside `push/delivery_wire.py`
+(`_deliver_live_activities`), gated by `push.delivery_la_enabled` (default
+**on**, but only ever reachable through `push.delivery_enabled` -- an LA is
+additive to a card, never a substitute for it).
+
+### Family detection
+
+A card qualifies for a Live Activity when it maps to one of four families
+(`live_activities.should_start_activity`, MVP hard-coded rules):
+
+| Family | Rule |
+|---|---|
+| `package` | `subject_kind == "thing"` and label `"package"` |
+| `bins` | `subject_kind == "thing"` and label `"waste_bin"` or `"garbage_truck"` |
+| `openings` | `subject_kind == "thing"` and label in `{"door", "gate", "garage"}` |
+| `person` | `subject_kind in ("stranger", "known")` and `place_class == "doors"` |
+
+`push.delivery_la_families` (`{family: bool}`, absent or `True` = enabled)
+is checked last, wrapping detection rather than replacing it -- a disabled
+family's cards never start an activity even when they'd otherwise match,
+but the rules above don't need config to exist at all. One activity per
+`(device, card)`: a card already running one for a device gets updates, not
+a second start.
+
+### Push-to-start, updates, and end
+
+Three payload shapes (`live_activities.build_la_start_payload` /
+`build_la_update_payload` / `build_la_end_payload`), all
+`apns-push-type: liveactivity`, `apns-topic:
+com.houseofpaimon.Elsinore.push-type.liveactivity`:
+
+* **start** -- to the device's push-to-start token, on a qualifying card's
+  `create`. Carries `attributes`/`attributes-type` (`"ElsinoreActivityAttributes"`
+  exactly -- the Swift type ActivityKit routes the push by) and
+  `content-state`.
+* **update** -- to the per-activity token the app uploads via the existing
+  `POST /v1/push/activity/token` after the activity starts, on every later
+  mutation (`enrich`/`escalate`/`deescalate`). Silent by construction (no
+  `alert` key).
+* **end** -- on `resolve`. `dismissal-date` is `timestamp + 4`: the resolved
+  state shows briefly, then iOS clears it from the lock screen (the
+  activity itself lingers in the recent-activities area up to 4h more,
+  system-controlled). Sent via the per-activity token if the app ever
+  uploaded one, else the push-to-start token -- APNs accepts an `end` push
+  there too, so a card resolving before the token ever arrives still
+  dismisses the activity instead of leaving it stuck open.
+
+`content-state` (`live_activities.build_content_state`) field names are
+snake_case to match the Swift type's `CodingKeys` exactly: `level`,
+`mutation`, `glyph`, `primary`, `secondary`, `elapsed_seconds`,
+`deep_link_card_key`, `thumbnail_handle`, `thumbnail_revision`.
+`elapsed_seconds` is `int(now - card.state_since_at)`, the same clock the
+ordinary card payload's `state_since_ts` reports. `glyph`
+(`live_activities.glyph_for`) is a semantic SF-Symbol-or-documented-custom-
+name id; `resolve` always reports `checkmark.circle.fill` regardless of
+family, checked before any family-specific branch.
+
+**Thumbnails reuse the existing handle/prewarm infrastructure unchanged**
+(`_media_for`, same section above): the bare handle minted for the ordinary
+card push's `media` field is threaded through as `thumbnail_handle` too,
+bumping `thumbnail_revision` whenever a fresh one is minted (never on
+`escalate`/`deescalate`/`resolve`, same `_MEDIA_MUTATIONS` gate). No second
+handle is minted for the same snapshot.
+
+### Where the activity lives: `push_activities`, not a `push_cards` column
+
+Reuses the *situations* Live Activity's own table and `store.py` helpers
+(`open_activity`/`find_activity`/`touch_activity`/`close_activity`/
+`record_activity_send`) rather than adding a column to `push_cards`.
+`situation_id` is just a text column, and a card's `card_key` fits it
+exactly as well as a situation id does. This is a deliberate departure from
+a `push_cards.la_activity_id` column: a Live Activity is one per
+**(device, card)**, and `push_cards` is one row per card -- a card with two
+push-to-start-registered devices runs two independent activities on two
+different tokens, which a single nullable column cannot represent, but
+`push_activities`, keyed on `(apns_token, situation_id, track_id)`, already
+does. The track id used for that key is parsed back out of `card_key`
+(its final `:`-separated component) rather than whatever camera's event
+triggered the current mutation -- stable across cross-camera dedup, so a
+card merged onto by a second camera keeps updating the same activity
+instead of forking a second one that would never get a token.
+
+### What ends an activity
+
+`resolve` is the only path that ends a card-model activity -- there's no
+separate resolution sweep the way the situations Live Activity has one,
+because a card's own resolve signal (`delivery_wire.handle_delivery_resolve`,
+`frigate/events` object `end`) already is that authoritative "gone" signal.
+Cross-camera dedup's asymmetric resolve applies unchanged: a merged
+(non-owning) track resolving drops its alias and touches neither the card
+nor its activity; only the owning track's resolve ends both.
+
+### Tests
+
+`tests/test_push_live_activities.py` covers the pure logic (family
+detection, glyph mapping, the three payload shapes) directly.
+`tests/test_push_live_activities_wire.py` runs full lifecycles through
+`handle_delivery_event`/`handle_delivery_resolve` against `LogTransport`:
+create → enrich → escalate → resolve with incrementing `elapsed_seconds`
+and the right event/mutation at each step, a non-qualifying card producing
+zero activity pushes, a device with no push-to-start token getting no
+activity while its ordinary card push is unaffected, a late per-activity
+token dropping (not buffering) the update it missed, a resolve landing
+before any per-activity token arriving falling back to the push-to-start
+token, and cross-camera dedup producing exactly one activity for the
+surviving card.
+
 ## Live Activities (Phase 2)
 
 Present-tier situations stop being silent and start living in a Live Activity:

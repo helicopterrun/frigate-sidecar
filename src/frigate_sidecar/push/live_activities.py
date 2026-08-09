@@ -1,0 +1,239 @@
+"""Card-model Live Activities (Elsinore Phase 3).
+
+Parallel output channel to the ordinary card push (`delivery.py`): the same
+card lifecycle (create/enrich/escalate/deescalate/resolve,
+`push/cards.py`/`push/delivery_wire.py`) additionally drives a Live Activity
+for cards that fall into one of four "families" worth a Dynamic
+Island/lock-screen presence. This module is pure -- family detection, glyph
+mapping, and the three APNs payload shapes -- with no I/O; wiring the result
+into `push_activities` rows and actually sending lives in `delivery_wire.py`,
+mirroring the pure/orchestration split `delivery.py` already uses for the
+ordinary card push.
+
+**Not the same Live Activity as `push/activity.py`.** That module is the
+notification-experience plan's *situations* Live Activity (`stage`,
+`dwell_seconds`, `title`, `subtitle`; `attributes-type:
+"SituationActivityAttributes"`), already shipped and untouched by this
+phase. This one is shaped for the card model (`level`, `mutation`, `glyph`,
+`primary`/`secondary`, `elapsed_seconds`, `deep_link_card_key`,
+`thumbnail_handle`/`thumbnail_revision`) and uses the app's renamed
+`ElsinoreActivityAttributes` type. They run independently; a device could in
+principle have both kinds of activity live at once (not exercised today
+since the two card sources -- ladder cards and situations -- are separate
+features).
+
+Both kinds of activity share the same `push_activities` table and
+`push/store.py` helpers (`open_activity`/`find_activity`/`touch_activity`/
+`close_activity`/`record_activity_send`): `situation_id` is just a text
+column, and a card's `card_key` fits it exactly as well as a situation id
+does. Reusing it (over a new `la_activity_id` column on `push_cards`) is
+deliberate -- `push_cards` is one row per *card*, but a Live Activity is one
+per *(device, card)*: a card with two registered push-to-start devices runs
+two independent activities on two different token, and a single nullable
+column on the card row cannot represent that. `push_activities`, keyed on
+`(apns_token, situation_id, track_id)`, already does.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from typing import Any
+
+from frigate_sidecar.push.cards import RESOLVE
+from frigate_sidecar.push.payload import APNS_MAX_PAYLOAD_BYTES
+
+#: The app's `ActivityAttributes` conformer for card-model activities.
+#: iOS matches the push-to-start push to a registered attributes type by
+#: this exact string -- it must equal the Swift type name.
+ATTRIBUTES_TYPE = "ElsinoreActivityAttributes"
+
+PACKAGE = "package"
+BINS = "bins"
+OPENINGS = "openings"
+PERSON = "person"
+FAMILIES = (PACKAGE, BINS, OPENINGS, PERSON)
+
+#: Frigate labels that make a `thing` card an opening (door/gate/garage).
+_OPENING_LABELS = frozenset({"door", "gate", "garage"})
+#: Frigate labels that make a `thing` card the bins family -- either the bin
+#: itself or the correlated truck event.
+_BIN_LABELS = frozenset({"waste_bin", "garbage_truck"})
+
+#: Semantic glyph ids (SF Symbol names, or a documented custom name the app's
+#: asset catalog resolves) per family/state. Resolve always wins regardless
+#: of family -- a card leaving the screen shows the same "done" glyph no
+#: matter what it was.
+_RESOLVED_GLYPH = "checkmark.circle.fill"
+_PERSON_KNOWN_GLYPH = "figure.wave"
+_PERSON_STRANGER_GLYPH = "figure.walk"
+_PACKAGE_GLYPH = "shippingbox.fill"
+_BINS_GLYPH = "trash.fill"
+_OPENING_GLYPH = {
+    "garage": "door.garage.open.trianglebadge.exclamationmark",
+    "gate": "pedestrian.gate.open",
+    "door": "door.left.hand.open",
+}
+
+
+def should_start_activity(
+    *,
+    subject_kind: str,
+    label: str,
+    place_class: str,
+    families_enabled: dict[str, bool] | None = None,
+) -> str | None:
+    """Which LA family this card qualifies for, or `None`.
+
+    Hard-coded MVP rules (design doc §1) -- a config-driven per-family
+    override (`push.delivery_la_families`) is checked last so a disabled
+    family never starts an activity even when it would otherwise match, but
+    the detection itself doesn't depend on config existing.
+    """
+    family: str | None = None
+    if subject_kind == "thing" and label == "package":
+        family = PACKAGE
+    elif subject_kind == "thing" and label in _BIN_LABELS:
+        family = BINS
+    elif subject_kind == "thing" and label in _OPENING_LABELS:
+        family = OPENINGS
+    elif subject_kind in ("stranger", "known") and place_class == "doors":
+        family = PERSON
+
+    if family is None:
+        return None
+    if families_enabled is not None and families_enabled.get(family) is False:
+        return None
+    return family
+
+
+def glyph_for(family: str, *, subject_kind: str, label: str, mutation: str) -> str:
+    """The `content-state.glyph` for one mutation of a qualifying card.
+
+    Resolve is the same glyph for every family (design doc §3) -- checked
+    first so it short-circuits the family-specific branches below rather
+    than duplicating the check into each of them.
+    """
+    if mutation == RESOLVE:
+        return _RESOLVED_GLYPH
+    if family == PERSON:
+        return _PERSON_KNOWN_GLYPH if subject_kind == "known" else _PERSON_STRANGER_GLYPH
+    if family == PACKAGE:
+        return _PACKAGE_GLYPH
+    if family == BINS:
+        return _BINS_GLYPH
+    if family == OPENINGS:
+        return _OPENING_GLYPH.get(label, _OPENING_GLYPH["door"])
+    return _RESOLVED_GLYPH
+
+
+def build_content_state(
+    *,
+    level: str,
+    mutation: str,
+    glyph: str,
+    primary: str,
+    secondary: str,
+    elapsed_seconds: int,
+    card_key: str,
+    thumbnail_handle: str | None,
+    thumbnail_revision: int,
+) -> dict[str, Any]:
+    """The dynamic half of the activity, snake_case to match the Swift
+    type's `CodingKeys` exactly -- these field names are load-bearing wire
+    contract, not a style choice."""
+    return {
+        "level": level,
+        "mutation": mutation,
+        "glyph": glyph,
+        "primary": primary,
+        "secondary": secondary,
+        "elapsed_seconds": int(elapsed_seconds),
+        "deep_link_card_key": card_key,
+        "thumbnail_handle": thumbnail_handle,
+        "thumbnail_revision": thumbnail_revision,
+    }
+
+
+def build_la_start_payload(
+    *,
+    content_state: dict[str, Any],
+    family: str,
+    camera: str,
+    track_id: str,
+    card_key: str,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """The push-to-start payload asking iOS to create the activity. Only
+    this shape carries `attributes`/`attributes-type` -- the static half,
+    fixed for the activity's whole lifetime."""
+    sent_at = time.time() if now is None else now
+    payload = {
+        "aps": {
+            "timestamp": int(sent_at),
+            "event": "start",
+            "content-state": content_state,
+            "attributes-type": ATTRIBUTES_TYPE,
+            "attributes": {
+                "card_key": card_key,
+                "family": family,
+                "camera": camera,
+                "track_id": track_id,
+            },
+        },
+    }
+    return _fit(payload)
+
+
+def build_la_update_payload(
+    *, content_state: dict[str, Any], now: float | None = None,
+) -> dict[str, Any]:
+    """A silent content-state advance over the per-activity token."""
+    sent_at = time.time() if now is None else now
+    payload = {
+        "aps": {
+            "timestamp": int(sent_at),
+            "event": "update",
+            "content-state": content_state,
+        },
+    }
+    return _fit(payload)
+
+
+def build_la_end_payload(
+    *,
+    content_state: dict[str, Any],
+    now: float | None = None,
+    dismissal_offset: float = 4.0,
+) -> dict[str, Any]:
+    """Resolution. `dismissal-date` is `timestamp + dismissal_offset` --
+    show the resolved state briefly, then iOS clears it from the lock
+    screen; the activity itself lingers in the recent-activities area for up
+    to 4h on its own, system-controlled schedule."""
+    sent_at = time.time() if now is None else now
+    payload = {
+        "aps": {
+            "timestamp": int(sent_at),
+            "event": "end",
+            "dismissal-date": int(sent_at) + int(dismissal_offset),
+            "content-state": content_state,
+        },
+    }
+    return _fit(payload)
+
+
+def _payload_size(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload, separators=(",", ":")).encode())
+
+
+def _fit(payload: dict[str, Any]) -> dict[str, Any]:
+    """Same trim rule as `delivery.py`/`activity.py`'s own `_fit_to_budget`:
+    `primary`/`secondary` are the only unbounded, user-facing strings in
+    this shape."""
+    if _payload_size(payload) <= APNS_MAX_PAYLOAD_BYTES:
+        return payload
+    state = payload["aps"].get("content-state")
+    if isinstance(state, dict):
+        state["primary"] = str(state.get("primary", ""))[:120]
+        state["secondary"] = str(state.get("secondary", ""))[:180]
+    return payload

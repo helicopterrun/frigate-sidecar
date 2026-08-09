@@ -448,6 +448,51 @@ class PushSection(BaseModel):
     # it is not the clock-driven keep-alive the plan forbids.
     activity_sweep_interval_s: float = 5.0
 
+    # -- Attention ladder: delivery pipeline (Elsinore Phase 2) --
+    # Off by default, independent of `enabled` -- this wraps the ladder
+    # evaluator with card state and ordinary alert/silent pushes; it ships
+    # dark until the wire-up's subject/place classification (currently an
+    # MVP heuristic off `frigate/reviews` labels and `delivery_zone_place_map`)
+    # is trusted against a live deployment. See docs/push-notifications.md.
+    delivery_enabled: bool = False
+    # `frigate/reviews` zone name -> ladder place class
+    # (street/yard/doors/private/off_limits). A zone absent from this map
+    # falls back to "yard" if the review carries any zone at all, else
+    # "street" -- see push/delivery_wire.py.
+    delivery_zone_place_map: dict[str, str] = Field(default_factory=dict)
+    # Design doc §3: an unhandled `urgent` card may re-alert once, this long
+    # after its last sound.
+    delivery_urgent_resound_s: float = 120.0
+    delivery_urgent_resound_enabled: bool = True
+    # How often the urgent re-sound sweep runs. Only ever emits the one
+    # re-sound a card is owed -- not a keep-alive.
+    delivery_resound_sweep_interval_s: float = 15.0
+    # Phone-reachable base URL for *this sidecar instance*, e.g.
+    # "http://192.168.50.207:5001" or "https://sidecar.example.com". Used to
+    # build the complete URL the card contract's `media` field documents
+    # (docs/apns-payload-spec.md) -- unlike the v1/situations flow, which
+    # only ever sends `handle` + `server_id` and lets the already-registered
+    # app resolve the base URL itself, the card contract is a single
+    # self-authorizing URL, so the sidecar has to know its own externally
+    # reachable address to build it. Never Frigate's address -- Frigate is
+    # never exposed to the phone directly; the sidecar fetches the snapshot
+    # itself (`frigate.base_url`, LAN-internal) and re-hosts it behind a
+    # minted handle at `/v1/push/thumbnail/{handle}`, same as situations.
+    # Empty (the default) omits `media` entirely -- no broken link.
+    external_base_url: str = ""
+
+    # -- Live Activities for cards (Elsinore Phase 3) --
+    # Master switch, independent of `delivery_enabled` (which must also be
+    # on -- a card LA is an additional output channel for the same card
+    # lifecycle, never a substitute for it). Off doesn't undo `delivery_la_families`;
+    # it's the fast, whole-feature kill switch.
+    delivery_la_enabled: bool = True
+    # Per-family opt-out (design doc §1's "future: per-family user toggles",
+    # brought forward as a config knob since it's nearly free to support).
+    # Absent or `True` = enabled; only an explicit `False` turns a family
+    # off. Keys: "package", "bins", "openings", "person".
+    delivery_la_families: dict[str, bool] = Field(default_factory=dict)
+
     @field_validator("dwell_source")
     @classmethod
     def _known_dwell_source(cls, v: str) -> str:

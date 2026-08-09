@@ -1,0 +1,90 @@
+[
+  {
+    "id": 1,
+    "name": "Package: delivered, dwell after dark, collected",
+    "card_key": "front:thing:pkg-1",
+    "steps": [
+      {"kind": "snapshot", "now": 0, "inputs": {"subject": "thing", "place": "yard"}},
+      {"kind": "snapshot", "now": 3600, "inputs": {"subject": "thing", "place": "yard", "night": true, "dwell_exceeded": true}},
+      {"kind": "snapshot", "now": 4200, "inputs": {"subject": "thing", "place": "yard"}, "resolved": true}
+    ],
+    "expected": [
+      {"mutation": "create", "level": "quiet", "sound": false, "push": true},
+      {"mutation": "escalate", "level": "notify", "sound": true, "push": true},
+      {"mutation": "resolve", "level": "notify", "sound": false, "push": true}
+    ]
+  },
+  {
+    "id": 2,
+    "name": "Person: stranger at door, identity resolves, leaves",
+    "card_key": "front:stranger:track-9",
+    "steps": [
+      {"kind": "snapshot", "now": 0, "inputs": {"subject": "stranger", "place": "doors"}},
+      {"kind": "snapshot", "now": 8, "inputs": {"subject": "known", "place": "doors"}},
+      {"kind": "snapshot", "now": 40, "inputs": {"subject": "known", "place": "doors"}, "resolved": true}
+    ],
+    "expected": [
+      {"mutation": "create", "level": "notify", "sound": true, "push": true},
+      {"mutation": "deescalate", "level": "quiet", "sound": false, "push": true},
+      {"mutation": "resolve", "level": "quiet", "sound": false, "push": true}
+    ]
+  },
+  {
+    "id": 3,
+    "name": "Opening: gate open, dwell, further worsening -- sound budget is 2, not spent by the silent create",
+    "card_key": "garage:thing:gate-1",
+    "steps": [
+      {"kind": "snapshot", "now": 0, "inputs": {"subject": "thing", "place": "doors"}},
+      {"kind": "snapshot", "now": 900, "inputs": {"subject": "thing", "place": "doors", "dwell_exceeded": true}},
+      {"kind": "snapshot", "now": 1800, "inputs": {"subject": "thing", "place": "doors", "ai_flagged": true}}
+    ],
+    "expected": [
+      {"mutation": "create", "level": "quiet", "sound": false, "push": true},
+      {"mutation": "escalate", "level": "notify", "sound": true, "push": true},
+      {"mutation": "escalate", "level": "urgent", "sound": true, "push": true}
+    ]
+  },
+  {
+    "id": 4,
+    "name": "Urgent re-sound: stranger at pool, 120s unhandled re-sound, then handled stops it",
+    "card_key": "pool:stranger:track-4",
+    "steps": [
+      {"kind": "snapshot", "now": 0, "inputs": {"subject": "stranger", "place": "off_limits"}},
+      {"kind": "resound_check", "now": 120, "interval_s": 120, "enabled": true},
+      {"kind": "mark_handled", "now": 130},
+      {"kind": "resound_check", "now": 999, "interval_s": 120, "enabled": true}
+    ],
+    "expected": [
+      {"mutation": "create", "level": "urgent", "sound": true, "push": true},
+      {"mutation": "escalate", "level": "urgent", "sound": true, "push": true, "resound": true},
+      null,
+      {"mutation": null, "level": "urgent", "sound": false, "push": false}
+    ]
+  },
+  {
+    "id": 5,
+    "name": "Mute mid-card: create then user mutes -- suppressed, closed, no further pushes",
+    "card_key": "front:stranger:track-2",
+    "steps": [
+      {"kind": "snapshot", "now": 0, "inputs": {"subject": "stranger", "place": "doors"}},
+      {"kind": "snapshot", "now": 5, "inputs": {"subject": "stranger", "place": "doors", "muted": true}}
+    ],
+    "expected": [
+      {"mutation": "create", "level": "notify", "sound": true, "push": true},
+      {"mutation": "suppressed", "level": "suppressed", "sound": false, "push": false}
+    ]
+  },
+  {
+    "id": 6,
+    "name": "System card: camera offline, then back online",
+    "card_key": "front:system:offline",
+    "steps": [
+      {"kind": "snapshot", "now": 0, "inputs": {"source": "system"}},
+      {"kind": "snapshot", "now": 60, "inputs": {"source": "system"}, "resolved": true}
+    ],
+    "expected": [
+      {"mutation": "create", "level": "notify", "sound": true, "push": true},
+      {"mutation": "resolve", "level": "notify", "sound": false, "push": true}
+    ]
+  }
+]

@@ -3,7 +3,10 @@
 Auth is the shared Frigate session (`frigate_sidecar.auth`), same as every
 other sidecar-owned route -- there is no second credential for push (spec
 §1: "the sidecar just attaches the device token to that session's
-identity"). Nothing here is exempted in `auth.EXEMPT_PATHS`.
+identity"). The one exception is `GET /v1/push/thumbnail/{handle}`
+(`auth.EXEMPT_PREFIXES`): the iOS Notification Service Extension fetches it
+and holds no Frigate session, so it's protected by the handle itself being
+opaque, unguessable, and short-lived instead.
 """
 
 from __future__ import annotations

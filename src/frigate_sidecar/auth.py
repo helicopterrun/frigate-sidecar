@@ -14,7 +14,14 @@ Deliberately NOT gated here:
 * the reverse-proxy catch-all -- Frigate authenticates that traffic itself and
   its 401/`WWW-Authenticate` challenge has to reach the client intact;
 * `/v1/capabilities`, `/healthz`, `/version` -- reachability probes a client
-  needs *before* it has a session, and `/static`.
+  needs *before* it has a session, and `/static`;
+* `/v1/push/thumbnail/` -- fetched by the iOS Notification Service Extension
+  (docs/push-notifications.md), which has no Frigate session and cannot
+  acquire one (it runs in its own short-lived, network-isolated sandbox).
+  Safe to leave open: a handle is an opaque, unguessable, short-lived
+  (`push.handle_ttl_s`/`situation_handle_ttl_s`) token that maps only to a
+  pre-fetched thumbnail image, never to anything the sidecar or Frigate can
+  be made to do -- the same trust model as a signed download link.
 
 The gate is applied as raw ASGI middleware rather than a router dependency so
 it can't be forgotten on a newly added route, and so it doesn't wrap the
@@ -45,7 +52,11 @@ ERR_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
 
 # Reachability probes a client may need before it holds a Frigate session.
 EXEMPT_PATHS = frozenset({"/healthz", "/version", "/v1/capabilities"})
-EXEMPT_PREFIXES = ("/static/",)
+# Trailing slash on the push-thumbnail prefix on purpose: exempts only
+# `/v1/push/thumbnail/{handle}` fetches, not `/v1/push/thumbnail` itself or
+# any other `/v1/push/...` route (device registration, handle redemption,
+# snooze, etc. all stay gated).
+EXEMPT_PREFIXES = ("/static/", "/v1/push/thumbnail/")
 
 
 def _cache(app: FastAPI) -> dict[str, float]:

@@ -1,0 +1,421 @@
+"""Wire-up tests for `push/delivery_wire.py`.
+
+Covers the zone-identity fix (a tracked object that gains a zone mid-
+lifetime must mutate its existing card, not fork a new one) and
+cross-camera dedup (docs/push-notifications.md "Cross-camera
+deduplication").
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from frigate_sidecar import db
+from frigate_sidecar.config import PushSection
+from frigate_sidecar.push.delivery_wire import handle_delivery_event, handle_delivery_resolve
+from frigate_sidecar.push.engine import PushEngine
+from frigate_sidecar.push.models import Device, ReviewEvent
+from frigate_sidecar.push.transport import LogTransport
+
+EXTERNAL_BASE_URL = "http://192.168.50.207:5001"
+
+
+def make_device(token: str = "tok1") -> Device:
+    return Device(
+        apns_token=token, device_id=f"d_{token}", bundle_id="com.pondhouse.Elsinore",
+        environment="sandbox",
+    )
+
+
+@pytest.mark.asyncio
+async def test_zone_change_mutates_same_card_not_a_new_one(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    engine = PushEngine(db_path=str(sidecar_db_path), transport=transport, server_id="s_test")
+    # external_base_url + engine are both present here on purpose: proves
+    # `escalate` gets no `media` even when the infrastructure for it exists,
+    # not merely because nothing was configured.
+    config = PushSection(delivery_enabled=True, external_base_url=EXTERNAL_BASE_URL)
+
+    no_zone_event = ReviewEvent(
+        review_id="r1", camera="alley-wide", severity="alert", labels=("car",),
+        track_ids=("trk1",), zones=(),
+    )
+    zoned_event = ReviewEvent(
+        review_id="r1", camera="alley-wide", severity="alert", labels=("car",),
+        track_ids=("trk1",), zones=("parking_spot",),
+    )
+
+    # First evaluation: no zone yet -- thing/street caps at `log`, no push.
+    await handle_delivery_event(
+        no_zone_event, conn=conn, devices=[device], transport=transport,
+        config=config, engine=engine, now=0.0,
+    )
+    rows = conn.execute("SELECT card_key, level FROM push_cards").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["card_key"] == "alley-wide:thing:trk1"
+    assert rows[0]["level"] == "log"
+    assert transport.sent == []  # log never pushes
+
+    # Second evaluation: same track id, now carries a zone -- thing/yard is
+    # `quiet`. This must be the SAME card (escalate), not a second one.
+    await handle_delivery_event(
+        zoned_event, conn=conn, devices=[device], transport=transport,
+        config=config, engine=engine, now=10.0,
+    )
+    rows = conn.execute("SELECT card_key, level, zone_name FROM push_cards").fetchall()
+    assert len(rows) == 1, "a zone change must mutate the existing card, not fork a new one"
+    assert rows[0]["card_key"] == "alley-wide:thing:trk1"
+    assert rows[0]["level"] == "quiet"
+    assert rows[0]["zone_name"] == "parking_spot"
+
+    # log -> quiet is a level rise, so the mutation is `escalate` (an
+    # unchanged level in the same situation would be `enrich`); it's the
+    # first push this card ever sent.
+    assert len(transport.sent) == 1
+    sent = transport.sent[0]
+    assert sent["collapse_id"] == "alley-wide:thing:trk1"
+    assert sent["payload"]["card_key"] == "alley-wide:thing:trk1"
+    assert sent["payload"]["mutation"] == "escalate"
+    assert sent["payload"]["level"] == "quiet"
+    assert "sound" not in sent["payload"]["aps"]  # quiet never sounds
+    assert "media" not in sent["payload"]  # escalate never gets a snapshot
+
+
+@pytest.mark.asyncio
+async def test_media_present_on_create_and_points_at_external_base(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    engine = PushEngine(db_path=str(sidecar_db_path), transport=transport, server_id="s_test")
+    config = PushSection(delivery_enabled=True, external_base_url=EXTERNAL_BASE_URL)
+    event = ReviewEvent(
+        review_id="r1", camera="front", severity="alert", labels=("person",),
+        track_ids=("trk1",), zones=("front_yard",),  # non-empty -> place=yard, not street/log
+    )
+
+    await handle_delivery_event(
+        event, conn=conn, devices=[make_device()], transport=transport,
+        config=config, engine=engine, now=0.0,
+    )
+
+    assert len(transport.sent) == 1
+    payload = transport.sent[0]["payload"]
+    assert payload["mutation"] == "create"
+    media = payload.get("media")
+    assert media is not None
+    assert media.startswith(f"{EXTERNAL_BASE_URL}/v1/push/thumbnail/h_")
+    assert "localhost" not in media
+    assert "127.0.0.1" not in media
+
+    # The handle in the URL is real, minted server-side against this event.
+    handle = media.rsplit("/", 1)[-1]
+    row = conn.execute(
+        "SELECT camera, event_id FROM push_handles WHERE handle = ?", (handle,)
+    ).fetchone()
+    assert row is not None
+    assert row["camera"] == "front"
+    assert row["event_id"] == event.event_id
+
+
+@pytest.mark.asyncio
+async def test_media_present_on_enrich_too(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    engine = PushEngine(db_path=str(sidecar_db_path), transport=transport, server_id="s_test")
+    config = PushSection(delivery_enabled=True, external_base_url=EXTERNAL_BASE_URL)
+    event = ReviewEvent(
+        review_id="r1", camera="front", severity="alert", labels=("person",),
+        track_ids=("trk1",), zones=("front_yard",),
+    )
+
+    await handle_delivery_event(
+        event, conn=conn, devices=[make_device()], transport=transport,
+        config=config, engine=engine, now=0.0,
+    )
+    await handle_delivery_event(
+        event, conn=conn, devices=[make_device()], transport=transport,
+        config=config, engine=engine, now=1.0,
+    )
+
+    assert len(transport.sent) == 2
+    enrich_payload = transport.sent[1]["payload"]
+    assert enrich_payload["mutation"] == "enrich"
+    media = enrich_payload.get("media")
+    assert media is not None
+    assert media.startswith(f"{EXTERNAL_BASE_URL}/v1/push/thumbnail/h_")
+
+
+@pytest.mark.asyncio
+async def test_media_absent_without_external_base_url_even_with_engine(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    engine = PushEngine(db_path=str(sidecar_db_path), transport=transport, server_id="s_test")
+    config = PushSection(delivery_enabled=True)  # external_base_url left at "" (default)
+    event = ReviewEvent(
+        review_id="r1", camera="front", severity="alert", labels=("person",),
+        track_ids=("trk1",), zones=("front_yard",),
+    )
+
+    await handle_delivery_event(
+        event, conn=conn, devices=[make_device()], transport=transport,
+        config=config, engine=engine, now=0.0,
+    )
+
+    assert len(transport.sent) == 1
+    assert "media" not in transport.sent[0]["payload"]
+    assert conn.execute("SELECT COUNT(*) FROM push_handles").fetchone()[0] == 0
+
+
+def make_event(camera: str, track_id: str, zones: tuple[str, ...] = ()) -> ReviewEvent:
+    return ReviewEvent(
+        review_id=f"r_{camera}_{track_id}", camera=camera, severity="alert",
+        labels=("person",), track_ids=(track_id,), zones=zones,
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_cameras_same_zone_within_window_merge_into_one_card(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    await handle_delivery_event(
+        make_event("cam-a", "trkA", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    await handle_delivery_event(
+        make_event("cam-b", "trkB", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=5.0,
+    )
+
+    rows = conn.execute("SELECT card_key, camera FROM push_cards").fetchall()
+    assert len(rows) == 1, "same subject_kind + zone within the window must merge onto one card"
+    assert rows[0]["card_key"] == "cam-a:stranger:trkA"
+    assert rows[0]["camera"] == "cam-a", "merged card keeps the originating camera"
+
+    assert len(transport.sent) == 2
+    assert transport.sent[0]["payload"]["mutation"] == "create"
+    merged_payload = transport.sent[1]["payload"]
+    assert merged_payload["mutation"] == "enrich"
+    assert merged_payload["card_key"] == "cam-a:stranger:trkA"
+    assert merged_payload["camera"] == "cam-a"
+    assert "also on Cam-B" in merged_payload["secondary"]
+
+    alias = conn.execute(
+        "SELECT card_key FROM push_card_track_aliases WHERE camera = 'cam-b' AND track_id = 'trkB'"
+    ).fetchone()
+    assert alias is not None
+    assert alias["card_key"] == "cam-a:stranger:trkA"
+
+
+@pytest.mark.asyncio
+async def test_different_zones_do_not_merge(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    await handle_delivery_event(
+        make_event("cam-a", "trkA", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    await handle_delivery_event(
+        make_event("cam-b", "trkB", zones=("back_yard",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=5.0,
+    )
+
+    rows = conn.execute("SELECT card_key FROM push_cards").fetchall()
+    assert {r["card_key"] for r in rows} == {"cam-a:stranger:trkA", "cam-b:stranger:trkB"}
+
+
+@pytest.mark.asyncio
+async def test_same_zone_different_subject_kind_does_not_merge(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    person_event = make_event("cam-a", "trkA", zones=("driveway",))
+    car_event = ReviewEvent(
+        review_id="r2", camera="cam-b", severity="alert", labels=("car",),
+        track_ids=("trkB",), zones=("driveway",),
+    )
+
+    await handle_delivery_event(
+        person_event, conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    await handle_delivery_event(
+        car_event, conn=conn, devices=[device], transport=transport, config=config, now=5.0,
+    )
+
+    rows = conn.execute("SELECT card_key FROM push_cards").fetchall()
+    assert {r["card_key"] for r in rows} == {"cam-a:stranger:trkA", "cam-b:thing:trkB"}
+
+
+@pytest.mark.asyncio
+async def test_no_zone_on_either_side_does_not_dedup(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    await handle_delivery_event(
+        make_event("cam-a", "trkA"), conn=conn, devices=[device], transport=transport,
+        config=config, now=0.0,
+    )
+    await handle_delivery_event(
+        make_event("cam-b", "trkB"), conn=conn, devices=[device], transport=transport,
+        config=config, now=5.0,
+    )
+
+    rows = conn.execute("SELECT card_key FROM push_cards").fetchall()
+    assert {r["card_key"] for r in rows} == {"cam-a:stranger:trkA", "cam-b:stranger:trkB"}
+
+
+@pytest.mark.asyncio
+async def test_dedup_window_expired_creates_separate_card(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    await handle_delivery_event(
+        make_event("cam-a", "trkA", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    await handle_delivery_event(
+        make_event("cam-b", "trkB", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=20.0,
+    )
+
+    rows = conn.execute("SELECT card_key FROM push_cards").fetchall()
+    assert {r["card_key"] for r in rows} == {"cam-a:stranger:trkA", "cam-b:stranger:trkB"}
+
+
+@pytest.mark.asyncio
+async def test_three_cameras_sharing_a_zone_all_merge_onto_the_first(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    await handle_delivery_event(
+        make_event("cam-a", "trkA", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    await handle_delivery_event(
+        make_event("cam-b", "trkB", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=4.0,
+    )
+    await handle_delivery_event(
+        make_event("cam-c", "trkC", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=8.0,
+    )
+
+    rows = conn.execute("SELECT card_key FROM push_cards").fetchall()
+    assert [r["card_key"] for r in rows] == ["cam-a:stranger:trkA"]
+
+
+@pytest.mark.asyncio
+async def test_subject_changing_zones_enriches_the_same_card_no_new_one(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    await handle_delivery_event(
+        make_event("cam-a", "trkA", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    await handle_delivery_event(
+        make_event("cam-a", "trkA", zones=("back_walkway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=5.0,
+    )
+
+    rows = conn.execute("SELECT card_key, zone_name FROM push_cards").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["zone_name"] == "back_walkway"
+    assert transport.sent[1]["payload"]["mutation"] == "enrich"
+
+
+@pytest.mark.asyncio
+async def test_resolving_the_merged_secondary_track_leaves_the_primary_card_open(
+    sidecar_db_path: Path,
+):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    await handle_delivery_event(
+        make_event("cam-a", "trkA", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    await handle_delivery_event(
+        make_event("cam-b", "trkB", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=5.0,
+    )
+
+    resolved = await handle_delivery_resolve(
+        "cam-b", "trkB", conn=conn, devices=[device], transport=transport, config=config, now=6.0,
+    )
+    assert resolved == 0, "a merged contributor resolving must not resolve the shared card"
+
+    card = conn.execute(
+        "SELECT closed, resolved FROM push_cards WHERE card_key = 'cam-a:stranger:trkA'"
+    ).fetchone()
+    assert card["closed"] == 0
+    assert card["resolved"] == 0
+
+    alias = conn.execute(
+        "SELECT 1 FROM push_card_track_aliases WHERE camera = 'cam-b' AND track_id = 'trkB'"
+    ).fetchone()
+    assert alias is None
+
+
+@pytest.mark.asyncio
+async def test_resolving_the_primary_track_resolves_the_card_normally(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    await handle_delivery_event(
+        make_event("cam-a", "trkA", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    await handle_delivery_event(
+        make_event("cam-b", "trkB", zones=("driveway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=5.0,
+    )
+
+    resolved = await handle_delivery_resolve(
+        "cam-a", "trkA", conn=conn, devices=[device], transport=transport, config=config, now=6.0,
+    )
+    assert resolved == 1
+
+    card = conn.execute(
+        "SELECT closed, resolved FROM push_cards WHERE card_key = 'cam-a:stranger:trkA'"
+    ).fetchone()
+    assert card["closed"] == 1
+    assert card["resolved"] == 1
+
+
+@pytest.mark.asyncio
+async def test_delivery_disabled_is_a_no_op(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=False)
+    event = ReviewEvent(
+        review_id="r1", camera="front", severity="alert", labels=("person",),
+        track_ids=("trk1",),
+    )
+    mutated = await handle_delivery_event(
+        event, conn=conn, devices=[make_device()], transport=transport, config=config, now=0.0,
+    )
+    assert mutated == 0
+    assert conn.execute("SELECT COUNT(*) FROM push_cards").fetchone()[0] == 0
