@@ -152,7 +152,10 @@ async def test_dry_run_scenario_notify_resolve():
     assert len(decisions) == 3
     assert decisions[0]["mutation"] == "create"
     assert decisions[0]["level"] == "notify"
-    assert decisions[0]["sounded"] is True
+    # LA start accepted → card push demoted to silent (LA is the alerting
+    # surface); the notification still lands in NC for history.
+    assert decisions[0]["sounded"] is False
+    assert decisions[0]["interruption_level"] == "passive"
     assert decisions[0]["la_action"] == "start"
 
     assert decisions[1]["mutation"] == "enrich"

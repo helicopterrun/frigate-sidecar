@@ -150,7 +150,9 @@ def default_settings() -> dict[str, Any]:
         "zone_overrides": {},
         "live_activities": {family: True for family in FAMILIES} | {
             "opening_picks": [],
-            "alert_all_changes": True,
+            # Quiet by default: only a real escalation (level rising to
+            # notify/urgent) banners over a running Live Activity.
+            "alert_all_changes": False,
         },
         "mute_sounds": False,
         "quiet_hours": None,

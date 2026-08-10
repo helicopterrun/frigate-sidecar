@@ -484,7 +484,8 @@ async def upload_activity_token(
     settings = request.app.state.settings
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:
-        if store.get_device(conn, body.apns_token) is None:
+        device = store.get_device(conn, body.apns_token)
+        if device is None:
             raise HTTPException(
                 status_code=404,
                 detail={"error": _ERR_DEVICE_NOT_FOUND, "message": "token not registered"},
@@ -498,6 +499,18 @@ async def upload_activity_token(
             token=body.token,
         )
         conn.commit()
+        # Fast create→resolve race: the card may already be closed by the
+        # time this token arrives. End the activity now rather than leaving
+        # it stranded on the lock screen until its stale-date.
+        engine = getattr(request.app.state, "push_engine", None)
+        if engine is not None:
+            from frigate_sidecar.push.delivery_wire import end_activity_if_card_closed
+
+            await end_activity_if_card_closed(
+                conn, device, engine.transport,
+                card_key=body.situation_id, track_id=body.track_id, token=body.token,
+            )
+            conn.commit()
     finally:
         conn.close()
     return {"accepted": True, "activity_id": body.activity_id}

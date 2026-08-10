@@ -444,8 +444,8 @@ async def test_relay_situation_carries_priority_and_expiration():
         dev, payload={"aps": {}}, collapse_id="c1",
         apns_priority=10, apns_expiration=99999,
     )
-    assert captured["json"]["apns-priority"] == 10
-    assert captured["json"]["apns-expiration"] == 99999
+    assert captured["json"]["apns_priority"] == 10
+    assert captured["json"]["apns_expiration"] == 99999
     await relay.aclose()
 
 
@@ -461,8 +461,8 @@ async def test_relay_situation_omits_priority_when_none():
     relay = RelayTransport("https://relay.test", client=client)
     dev = _device()
     await relay.send_situation(dev, payload={"aps": {}}, collapse_id="c1")
-    assert "apns-priority" not in captured["json"]
-    assert "apns-expiration" not in captured["json"]
+    assert "apns_priority" not in captured["json"]
+    assert "apns_expiration" not in captured["json"]
     await relay.aclose()
 
 
@@ -481,8 +481,8 @@ async def test_relay_la_carries_priority_and_expiration():
         dev, token="tok", payload={"aps": {}}, collapse_id="c1",
         event="update", apns_priority=5, apns_expiration=88888,
     )
-    assert captured["json"]["apns-priority"] == 5
-    assert captured["json"]["apns-expiration"] == 88888
+    assert captured["json"]["apns_priority"] == 5
+    assert captured["json"]["apns_expiration"] == 88888
     await relay.aclose()
 
 

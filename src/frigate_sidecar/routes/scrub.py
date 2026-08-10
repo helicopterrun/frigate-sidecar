@@ -303,6 +303,7 @@ async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
     the header is unconditional (no freshness reasoning exists anywhere in
     this path)."""
     settings = request.app.state.settings
+    _require_known_camera(request, camera)
     try:
         start, interval, count = grid.parse_sheet_spec(spec)
     except ValueError as exc:
@@ -365,6 +366,7 @@ async def motion(camera: str, start: float, end: float, scale: float, request: R
     Frigate's two measured cliffs (all-zero wide scale, short-window
     truncation) by fetching at a safe scale and aggregating ourselves."""
     _require_series(start, end, scale)
+    _require_known_camera(request, camera)
     values = await _fetch_and_aggregate_motion(request, camera, start, end, scale)
     return {"start": start, "interval": scale, "values": values}
 

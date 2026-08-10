@@ -198,6 +198,7 @@ def build_card_payload(
     event_ts: float,
     media: str | None = None,
     deep_link: str | None = None,
+    la_active: bool = False,
 ) -> dict[str, Any]:
     """The full APNs body for one card mutation (`docs/apns-payload-spec.md`).
 
@@ -211,6 +212,12 @@ def build_card_payload(
     interruption_level = LEVEL_APNS.get(card.level, {}).get("interruption_level")
     # Silent enriches: same level, new facts — no new banner/sound (§2).
     if mutation == ENRICH:
+        interruption_level = "passive"
+        sound = False
+    # A *confirmed* Live Activity is the alerting surface for this card:
+    # demote the card push to a silent Notification Center entry rather
+    # than dropping it, so the history survives even if the LA later dies.
+    if la_active:
         interruption_level = "passive"
         sound = False
     aps: dict[str, Any] = {

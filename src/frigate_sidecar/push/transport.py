@@ -331,9 +331,9 @@ class RelayTransport:
             "payload": payload,
         }
         if apns_priority is not None:
-            body["apns-priority"] = apns_priority
+            body["apns_priority"] = apns_priority
         if apns_expiration is not None:
-            body["apns-expiration"] = apns_expiration
+            body["apns_expiration"] = apns_expiration
         url = f"{self.base_url}/v1/relay/situation"
         try:
             resp = await self._client.post(url, json=body, headers=self._headers())
@@ -354,10 +354,12 @@ class RelayTransport:
             "event": event,
             "payload": payload,
         }
+        # Underscored keys are the relay's wire contract (checkDeliveryHints);
+        # hyphenated variants are silently ignored there.
         if apns_priority is not None:
-            body["apns-priority"] = apns_priority
+            body["apns_priority"] = apns_priority
         if apns_expiration is not None:
-            body["apns-expiration"] = apns_expiration
+            body["apns_expiration"] = apns_expiration
         url = f"{self.base_url}/v1/relay/liveactivity"
         try:
             resp = await self._client.post(url, json=body, headers=self._headers())
@@ -374,9 +376,9 @@ class RelayTransport:
         fixed literal alert with neither. `/v1/relay/push` validates `handle` as
         required, so a test send cannot go through it at all.
 
-        NOTE: the relay must implement this route. As of elsinore-push-relay
-        HEAD it does not, so a test send against today's relay returns 404 here
-        and surfaces as `test_send_failed` -- not a silent success.
+        Implemented in elsinore-push-relay (`/v1/relay/test`); a relay that
+        predates it returns 404 here and surfaces as `test_send_failed` --
+        not a silent success.
         """
         payload = {
             "device_token": device.apns_token,
@@ -402,5 +404,16 @@ class RelayTransport:
             return TransportResult(
                 ok=False, unregistered=True, error=f"HTTP {resp.status_code}",
                 status_code=resp.status_code,
+            )
+        if resp.status_code in (422, 429):
+            # 422: relay rejected the payload shape; 429: per-token rate
+            # limit (60/rolling hour) — both mean the push never reached
+            # Apple, which otherwise looks identical to a delivered-but-
+            # throttled LA update. Make them loud.
+            logger.warning(
+                "push: relay %s (%s) body: %s",
+                resp.status_code,
+                "rate limited" if resp.status_code == 429 else "rejected payload",
+                resp.text[:500],
             )
         return TransportResult(ok=False, error=f"HTTP {resp.status_code}: {resp.text[:200]}")

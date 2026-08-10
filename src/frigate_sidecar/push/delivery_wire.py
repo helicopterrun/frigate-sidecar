@@ -278,7 +278,8 @@ async def _deliver_live_activities(
     elapsed_seconds: int,
     media_handle: str | None,
     now: float,
-) -> None:
+    sound_allowed: bool = True,
+) -> bool:
     """The Live Activity side of one card mutation, one iteration per
     registered device (Elsinore Phase 3, `docs/push-notifications.md` "Live
     Activity lifecycle"). Independent of the ordinary card push above: a
@@ -298,10 +299,17 @@ async def _deliver_live_activities(
     is a no-op for every device -- `store.find_activity` never finds a row
     either) or on `resolve` (ending an already-running activity needs no
     re-qualification).
+
+    Returns True when the Live Activity *demonstrably* covers this mutation
+    for at least one device: a start APNs accepted, or an update/end sent to
+    a confirmed per-activity token. The caller uses this to demote the
+    ordinary card push to a silent one -- gating on confirmation (not
+    intent) is what keeps a silently-failed LA from eating notifications.
     """
+    covered = False
     if not config.delivery_la_enabled:
         logger.info("push: LA skipped — delivery_la_enabled=False")
-        return
+        return covered
     logger.info(
         "push: LA enter mutation=%s family=%s card_key=%s devices=%d",
         mutation, family, card.card_key, len(devices),
@@ -313,7 +321,7 @@ async def _deliver_live_activities(
     la_track_id = card_key.split(":", 2)[-1]
 
     policy = policy_settings.get_active()
-    alert_all = policy.get("live_activities", {}).get("alert_all_changes", True)
+    alert_all = policy.get("live_activities", {}).get("alert_all_changes", False)
     stale_s = config.delivery_la_stale_s
 
     for device in devices:
@@ -338,11 +346,22 @@ async def _deliver_live_activities(
             )
             token = row["token"]
             if token:
-                await transport.send_live_activity(
+                result = await transport.send_live_activity(
                     device, token=token, payload=payload, collapse_id=card_key, event="end",
                     apns_priority=5,
                 )
-            store.close_activity(conn, row["activity_id"], now=now)
+                if result.ok:
+                    covered = True
+                store.close_activity(conn, row["activity_id"], now=now)
+            else:
+                # Fast create→resolve: the app hasn't uploaded the
+                # per-activity token yet, and iOS only accepts `start` on
+                # the p2s token (commit 0916731) — an end sent there is
+                # rejected. Leave the row open, flagged pending-end; the
+                # token-upload route sends the deferred end the moment the
+                # token lands, instead of stranding the LA on the lock
+                # screen until its stale-date.
+                store.touch_activity(conn, row["activity_id"], stage="pending_end", now=now)
             continue
 
         if row is None:
@@ -366,7 +385,14 @@ async def _deliver_live_activities(
                 primary=primary, secondary=secondary, elapsed_seconds=elapsed_seconds,
                 card_key=card_key, thumbnail_handle=media_handle, thumbnail_revision=1,
             )
-            la_start_sound = sound_name_for_card(card.level, subject_kind, label)
+            # Honor the card path's sound accounting (mute, quiet hours,
+            # per-card budget): the start's required `alert` dict stays,
+            # but sound is only attached when a card push would have
+            # sounded too.
+            la_start_sound = (
+                sound_name_for_card(card.level, subject_kind, label)
+                if sound_allowed else None
+            )
             payload = live_activities.build_la_start_payload(
                 content_state=content_state, family=family, camera=camera,
                 track_id=la_track_id, card_key=card_key, now=now, stale_s=stale_s,
@@ -386,6 +412,7 @@ async def _deliver_live_activities(
             )
             if not result.ok:
                 continue
+            covered = True
             activity_id = f"a_{secrets.token_urlsafe(8)}"
             store.open_activity(
                 conn, activity_id=activity_id, apns_token=device.apns_token,
@@ -396,6 +423,9 @@ async def _deliver_live_activities(
             continue
 
         if not row["token"]:
+            # No per-activity token yet (app hasn't confirmed the start) --
+            # keep the row alive so the sweep doesn't reap a young LA.
+            store.touch_activity(conn, row["activity_id"], now=now)
             continue
         revision = int(row["thumbnail_revision"] or 1)
         if media_handle:
@@ -416,9 +446,10 @@ async def _deliver_live_activities(
         la_interruption = None
         if mutation == ESCALATE and card.level in ("notify", "urgent"):
             wants_alert = True
-            la_sound = sound_name_for_card(card.level, subject_kind, label)
+            if sound_allowed:
+                la_sound = sound_name_for_card(card.level, subject_kind, label)
             la_interruption = "time-sensitive" if card.level == "urgent" else "active"
-        elif alert_all and mutation in (ESCALATE, "deescalate"):
+        elif alert_all and mutation == ESCALATE:
             wants_alert = True
 
         priority = 10 if wants_alert else 5
@@ -427,14 +458,70 @@ async def _deliver_live_activities(
             alert=wants_alert, alert_title=primary, alert_body=secondary,
             sound=la_sound, interruption_level=la_interruption,
         )
-        await transport.send_live_activity(
+        result = await transport.send_live_activity(
             device, token=row["token"], payload=payload, collapse_id=card_key, event="update",
             apns_priority=priority, apns_expiration=int(now + 900),
         )
+        if result.ok:
+            covered = True
         store.touch_activity(
             conn, row["activity_id"], thumbnail_revision=revision, pushed=True, now=now,
         )
         store.record_activity_send(conn, activity_id=row["activity_id"], now=now)
+
+    return covered
+
+
+async def end_activity_if_card_closed(
+    conn: sqlite3.Connection,
+    device: Device,
+    transport: PushTransport,
+    *,
+    card_key: str,
+    track_id: str,
+    token: str,
+    now: float | None = None,
+) -> bool:
+    """Deferred end for the fast create→resolve race.
+
+    When a card resolves before the app has uploaded the per-activity token,
+    `_deliver_live_activities` can't send the end (iOS rejects end on the
+    p2s token) and leaves the row open. The token-upload route calls this
+    the moment the token lands: if the card is already closed, end the
+    activity now instead of stranding it until its stale-date.
+    """
+    now = time.time() if now is None else now
+    card = card_store.get_card(conn, card_key)
+    if card is None or not card.closed:
+        return False
+    ctx = card_store.get_card_context(conn, card_key) or {}
+    kind = ctx.get("subject_kind", "")
+    elapsed = max(0.0, now - card.state_since_at)
+    primary, secondary = _copy(kind, "", ctx.get("camera", ""), ctx.get("zone_name", ""), elapsed)
+    content_state = live_activities.build_content_state(
+        level=card.level, mutation=RESOLVE,
+        glyph=live_activities.glyph_for("", subject_kind=kind, label="", mutation=RESOLVE),
+        primary=primary, secondary=secondary, elapsed_seconds=int(elapsed),
+        card_key=card_key, thumbnail_handle=None, thumbnail_revision=1,
+    )
+    payload = live_activities.build_la_end_payload(
+        content_state=content_state, now=now, dismissal_offset=30.0,
+    )
+    result = await transport.send_live_activity(
+        device, token=token, payload=payload, collapse_id=card_key, event="end",
+        apns_priority=5,
+    )
+    while True:
+        row = store.find_activity(
+            conn, apns_token=device.apns_token, situation_id=card_key, track_id=track_id,
+        )
+        if row is None:
+            break
+        store.close_activity(conn, row["activity_id"], now=now)
+    logger.info(
+        "push: LA deferred end card_key=%s ok=%s error=%s", card_key, result.ok, result.error,
+    )
+    return result.ok
 
 
 async def handle_delivery_event(
@@ -519,15 +606,43 @@ async def handle_delivery_event(
         payload = None
         warm_task = None
         media_handle = None
+        media = None
         if should_push(card.level):
             media_handle, media, warm_task = _media_for(
                 mutation, event, conn=conn, engine=engine, config=config,
             )
+
+        # Live Activities go first so the card push below knows whether an
+        # LA demonstrably covers this mutation (start accepted by APNs, or
+        # an update landed on a confirmed per-activity token). Only then is
+        # the card push demoted to a silent NC entry -- an LA that failed
+        # anywhere along the way leaves the normal banner intact.
+        family = live_activities.should_start_activity(
+            subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
+            families_enabled=policy["live_activities"],
+            opening_picks=policy["live_activities"].get("opening_picks"),
+            opening_ids=(zone_name, owning_camera) if zone_name else (owning_camera,),
+        )
+        la_covered = await _deliver_live_activities(
+            conn, devices, transport, config=config, card=card, mutation=mutation,
+            family=family, camera=owning_camera, subject_kind=subject_kind,
+            label=snapshot.label, primary=primary, secondary=secondary,
+            elapsed_seconds=int(elapsed), media_handle=media_handle, now=now,
+            sound_allowed=sound,
+        )
+        if la_covered:
+            logger.info(
+                "push: card push demoted to silent — LA covers %s mutation=%s",
+                card_key, mutation,
+            )
+
+        if should_push(card.level):
             payload = build_card_payload(
                 card, mutation, sound=sound, subject_kind=subject_kind, place_class=place_class,
                 label=snapshot.label, camera=owning_camera, zone_name=zone_name,
                 glyph=_glyph_for(subject_kind, snapshot.label),
                 primary=primary, secondary=secondary, event_ts=now, media=media,
+                la_active=la_covered,
             )
 
         await send_card_mutation(
@@ -537,25 +652,12 @@ async def handle_delivery_event(
             labels=event.labels, now=now,
         )
         if warm_task is not None:
-            # Runs concurrently with the send above, not in series (plan §4
+            # Runs concurrently with the sends above, not in series (plan §4
             # lever 4's rule, reused here): the push already carries the
             # `media` URL optimistically, so a slow or failed Frigate fetch
             # costs the notification its image, never its existence.
             with contextlib.suppress(Exception):
                 await warm_task
-
-        family = live_activities.should_start_activity(
-            subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
-            families_enabled=policy["live_activities"],
-            opening_picks=policy["live_activities"].get("opening_picks"),
-            opening_ids=(zone_name, owning_camera) if zone_name else (owning_camera,),
-        )
-        await _deliver_live_activities(
-            conn, devices, transport, config=config, card=card, mutation=mutation,
-            family=family, camera=owning_camera, subject_kind=subject_kind,
-            label=snapshot.label, primary=primary, secondary=secondary,
-            elapsed_seconds=int(elapsed), media_handle=media_handle, now=now,
-        )
         conn.commit()
         mutated += 1
 
@@ -634,22 +736,25 @@ async def handle_delivery_resolve(
         )
         elapsed = max(0.0, now - card.state_since_at)
         primary, secondary = _copy(kind, "", camera, zone_name, elapsed)
+        # End the LA first; if the end landed on a confirmed activity, the
+        # resolve card push goes out quiet (NC text only, no banner).
+        la_covered = await _deliver_live_activities(
+            conn, devices, transport, config=config, card=card, mutation=mutation,
+            family=None, camera=camera, subject_kind=kind, label="",
+            primary=primary, secondary=secondary, elapsed_seconds=int(elapsed),
+            media_handle=None, now=now, sound_allowed=sound,
+        )
         payload = None
         if should_push(card.level):
             payload = build_card_payload(
                 card, mutation, sound=sound, subject_kind=kind, place_class="",
                 camera=camera, zone_name=zone_name, glyph=_glyph_for(kind, ""),
                 primary=primary, secondary=secondary, event_ts=now,
+                la_active=la_covered,
             )
         await send_card_mutation(
             conn, transport, devices, card, mutation, payload,
             subject_kind=kind, camera=camera, zone_name=zone_name,
-        )
-        await _deliver_live_activities(
-            conn, devices, transport, config=config, card=card, mutation=mutation,
-            family=None, camera=camera, subject_kind=kind, label="",
-            primary=primary, secondary=secondary, elapsed_seconds=int(elapsed),
-            media_handle=None, now=now,
         )
         conn.commit()
         resolved += 1

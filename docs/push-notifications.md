@@ -79,9 +79,10 @@ restatement of the full spec — see that doc for the complete rationale
   as `{device_token, environment, "apns-collapse-id", event, payload}`.
   `event` is `start` | `update` | `end`, passed so the relay can validate the
   shape (a `start` must carry `attributes` and `attributes-type`) rather than
-  letting Apple 400 it. **Not yet implemented in elsinore-push-relay** — until
-  it is, LA pushes 404 and Present-tier situations are silent on
-  LA-capable devices, while every Phase 1 path keeps working.
+  letting Apple 400 it. Implemented in elsinore-push-relay: the route derives
+  the topic from `APNS_TOPIC` and flips the push type to `liveactivity`.
+  Delivery hints ride as `apns_priority`/`apns_expiration` (underscores — the
+  relay's `checkDeliveryHints` key spelling; hyphenated keys are ignored).
 
   **Test push needs a second relay route.** `send_test` posts
   `{device_token, environment}` to `POST {relay_base_url}/v1/relay/test`:
@@ -504,13 +505,14 @@ com.houseofpaimon.Elsinore.push-type.liveactivity`:
   `POST /v1/push/activity/token` after the activity starts, on every later
   mutation (`enrich`/`escalate`/`deescalate`). Silent by construction (no
   `alert` key).
-* **end** -- on `resolve`. `dismissal-date` is `timestamp + 4`: the resolved
+* **end** -- on `resolve`. `dismissal-date` is `timestamp + 30`: the resolved
   state shows briefly, then iOS clears it from the lock screen (the
   activity itself lingers in the recent-activities area up to 4h more,
-  system-controlled). Sent via the per-activity token if the app ever
-  uploaded one, else the push-to-start token -- APNs accepts an `end` push
-  there too, so a card resolving before the token ever arrives still
-  dismisses the activity instead of leaving it stuck open.
+  system-controlled). Sent via the per-activity token only -- iOS rejects
+  update/end on the push-to-start token. A card that resolves before the
+  token arrives leaves its row open flagged `pending_end`; the
+  `POST /v1/push/activity/token` route sends the deferred end the moment
+  the token lands (`delivery_wire.end_activity_if_card_closed`).
 
 `content-state` (`live_activities.build_content_state`) field names are
 snake_case to match the Swift type's `CodingKeys` exactly: `level`,
