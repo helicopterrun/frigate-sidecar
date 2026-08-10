@@ -361,7 +361,7 @@ class TestLaPayloadContract:
             )
             payload = build_la_start_payload(
                 content_state=state, family="person", camera="c",
-                card_key="k", now=1000.0,
+                track_id="t", card_key="k", now=1000.0,
             )
             assert payload["aps"]["relevance-score"] == expected, f"level={level}"
 
@@ -373,7 +373,7 @@ class TestLaPayloadContract:
         )
         payload = build_la_start_payload(
             content_state=state, family="person", camera="c",
-            card_key="k", now=1000.0, stale_s=900.0,
+            track_id="t", card_key="k", now=1000.0, stale_s=900.0,
         )
         assert payload["aps"]["stale-date"] == 1900
 
@@ -589,18 +589,28 @@ class TestSoundFilenames:
         )
         payload = build_la_start_payload(
             content_state=state, family="person", camera="doorbell",
-            card_key="doorbell:stranger:t1", now=1000.0,
+            track_id="t1", card_key="doorbell:stranger:t1", now=1000.0,
         )
         attrs = payload["aps"]["attributes"]
-        assert set(attrs) == {"cardKey", "family", "camera"}
+        assert set(attrs) == {"card_key", "family", "camera", "track_id"}
         cs = payload["aps"]["content-state"]
         expected_cs_keys = {
             "level", "mutation", "glyph", "primary", "secondary",
-            "elapsedSeconds", "deepLinkCardKey",
-            "thumbnailHandle", "thumbnailRevision",
+            "elapsed_seconds", "deep_link_card_key",
+            "thumbnail_handle", "thumbnail_revision",
         }
         assert set(cs) == expected_cs_keys
         assert payload["aps"]["attributes-type"] == "ElsinoreActivityAttributes"
+
+    def test_la_content_state_thumbnail_revision_always_present(self):
+        state = build_content_state(
+            level="notify", mutation="create", glyph="g",
+            primary="P", secondary="S", elapsed_seconds=0,
+            card_key="k", thumbnail_handle=None, thumbnail_revision=0,
+        )
+        assert "thumbnail_revision" in state
+        assert state["thumbnail_revision"] == 0
+        assert "thumbnail_handle" not in state
 
     def test_build_card_payload_sound_uses_label(self):
         card = Card(

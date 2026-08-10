@@ -164,12 +164,12 @@ def build_content_state(
         "glyph": glyph,
         "primary": primary,
         "secondary": secondary,
-        "elapsedSeconds": int(elapsed_seconds),
-        "deepLinkCardKey": card_key,
+        "elapsed_seconds": int(elapsed_seconds),
+        "deep_link_card_key": card_key,
+        "thumbnail_revision": thumbnail_revision,
     }
     if thumbnail_handle is not None:
-        state["thumbnailHandle"] = thumbnail_handle
-    state["thumbnailRevision"] = thumbnail_revision
+        state["thumbnail_handle"] = thumbnail_handle
     return state
 
 
@@ -178,6 +178,7 @@ def build_la_start_payload(
     content_state: dict[str, Any],
     family: str,
     camera: str,
+    track_id: str,
     card_key: str,
     now: float | None = None,
     stale_s: float = 900.0,
@@ -194,9 +195,10 @@ def build_la_start_payload(
             "content-state": content_state,
             "attributes-type": ATTRIBUTES_TYPE,
             "attributes": {
-                "cardKey": card_key,
+                "card_key": card_key,
                 "family": family,
                 "camera": camera,
+                "track_id": track_id,
             },
         },
     }

@@ -368,7 +368,7 @@ async def _deliver_live_activities(
             )
             payload = live_activities.build_la_start_payload(
                 content_state=content_state, family=family, camera=camera,
-                card_key=card_key, now=now, stale_s=stale_s,
+                track_id=la_track_id, card_key=card_key, now=now, stale_s=stale_s,
             )
             logger.info(
                 "push: LA start device=%s family=%s pts_token=%s...",
