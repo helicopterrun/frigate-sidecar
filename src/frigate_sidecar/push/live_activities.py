@@ -40,7 +40,7 @@ import json
 import time
 from typing import Any
 
-from frigate_sidecar.push.cards import ESCALATE, RESOLVE
+from frigate_sidecar.push.cards import RESOLVE
 from frigate_sidecar.push.payload import APNS_MAX_PAYLOAD_BYTES
 
 #: The app's `ActivityAttributes` conformer for card-model activities.
@@ -182,26 +182,37 @@ def build_la_start_payload(
     card_key: str,
     now: float | None = None,
     stale_s: float = 900.0,
+    sound: str | None = None,
 ) -> dict[str, Any]:
-    """The push-to-start payload asking iOS to create the activity."""
+    """The push-to-start payload asking iOS to create the activity.
+
+    iOS requires ``aps.alert`` on every push-to-start push — without it
+    ``liveactivitiesd`` rejects the payload with "Received start without
+    an alert configuration".
+    """
     sent_at = time.time() if now is None else now
     level = content_state.get("level", "log")
-    payload = {
-        "aps": {
-            "timestamp": int(sent_at),
-            "event": "start",
-            "relevance-score": _RELEVANCE_SCORE.get(level, 0.25),
-            "stale-date": int(sent_at + stale_s),
-            "content-state": content_state,
-            "attributes-type": ATTRIBUTES_TYPE,
-            "attributes": {
-                "card_key": card_key,
-                "family": family,
-                "camera": camera,
-                "track_id": track_id,
-            },
+    aps: dict[str, Any] = {
+        "timestamp": int(sent_at),
+        "event": "start",
+        "relevance-score": _RELEVANCE_SCORE.get(level, 0.25),
+        "stale-date": int(sent_at + stale_s),
+        "alert": {
+            "title": content_state.get("primary", ""),
+            "body": content_state.get("secondary", ""),
+        },
+        "content-state": content_state,
+        "attributes-type": ATTRIBUTES_TYPE,
+        "attributes": {
+            "card_key": card_key,
+            "family": family,
+            "camera": camera,
+            "track_id": track_id,
         },
     }
+    if sound:
+        aps["sound"] = sound
+    payload = {"aps": aps}
     return _fit(payload)
 
 

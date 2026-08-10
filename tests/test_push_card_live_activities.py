@@ -154,19 +154,44 @@ def test_build_la_start_payload_shape():
     payload = la.build_la_start_payload(
         content_state=state, family="person", camera="doorbell",
         track_id="1786235300-aywxqj", card_key="doorbell:stranger:1786235300-aywxqj",
-        now=1786235302,
+        now=1786235302, sound="at-the-door.caf",
     )
     aps = payload["aps"]
     assert aps["timestamp"] == 1786235302
     assert aps["event"] == "start"
     assert aps["content-state"] == state
     assert aps["attributes-type"] == "ElsinoreActivityAttributes"
+    assert aps["alert"] == {"title": "Person at front door", "body": "Just now"}
+    assert aps["sound"] == "at-the-door.caf"
     assert aps["attributes"] == {
         "card_key": "doorbell:stranger:1786235300-aywxqj",
         "family": "person",
         "camera": "doorbell",
         "track_id": "1786235300-aywxqj",
     }
+
+
+def test_build_la_start_payload_alert_required():
+    """iOS rejects push-to-start without aps.alert."""
+    state = _content_state()
+    payload = la.build_la_start_payload(
+        content_state=state, family="package", camera="yard",
+        track_id="t1", card_key="yard:thing:t1", now=1000,
+    )
+    alert = payload["aps"]["alert"]
+    assert isinstance(alert, dict)
+    assert alert["title"]
+    assert alert["body"]
+    assert "sound" not in payload["aps"]
+
+
+def test_build_la_start_payload_no_sound_when_omitted():
+    state = _content_state()
+    payload = la.build_la_start_payload(
+        content_state=state, family="person", camera="doorbell",
+        track_id="t1", card_key="k", now=1000,
+    )
+    assert "sound" not in payload["aps"]
 
 
 def test_build_la_update_payload_shape():

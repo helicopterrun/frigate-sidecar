@@ -80,6 +80,8 @@ async def test_full_la_lifecycle_create_enrich_escalate_resolve(sidecar_db_path:
     assert sends[0]["payload"]["aps"]["attributes"]["family"] == "package"
     assert "relevance-score" in sends[0]["payload"]["aps"]
     assert "stale-date" in sends[0]["payload"]["aps"]
+    assert sends[0]["payload"]["aps"]["alert"]["title"]
+    assert sends[0]["payload"]["aps"]["alert"]["body"]
 
     attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perActivity1")
 
@@ -177,7 +179,10 @@ async def test_late_per_activity_token_drops_update_until_it_arrives(sidecar_db_
 
 
 @pytest.mark.asyncio
-async def test_resolve_before_token_arrives_ends_via_push_to_start_token(sidecar_db_path: Path):
+async def test_resolve_before_token_arrives_skips_end_push(sidecar_db_path: Path):
+    """End pushes must NOT fall back to the push-to-start token — iOS rejects
+    update/end on the p2s token. If no per-activity token has arrived yet,
+    the end push is simply skipped (the activity row is still closed)."""
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device()
@@ -193,9 +198,7 @@ async def test_resolve_before_token_arrives_ends_via_push_to_start_token(sidecar
     )
     assert resolved == 1
     sends = la_sends(transport)
-    assert len(sends) == 2
-    assert sends[1]["event"] == "end"
-    assert sends[1]["token"] == "pts1"  # push-to-start, since no per-activity token ever arrived
+    assert len(sends) == 1  # only the start; no end sent without per-activity token
 
 
 @pytest.mark.asyncio

@@ -31,7 +31,6 @@ from typing import TYPE_CHECKING
 
 from frigate_sidecar.push import card_store, live_activities, policy_settings, store
 from frigate_sidecar.push.cards import CREATE, ENRICH, ESCALATE, RESOLVE, Card
-from frigate_sidecar.push.delivery import advance_card as _advance_card
 from frigate_sidecar.push.delivery import (
     _device_eligible,
     _is_snoozed,
@@ -41,6 +40,7 @@ from frigate_sidecar.push.delivery import (
     should_push,
     sound_name_for_card,
 )
+from frigate_sidecar.push.delivery import advance_card as _advance_card
 from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
 from frigate_sidecar.push.models import ReviewEvent
 from frigate_sidecar.push.payload import pretty_label
@@ -336,7 +336,7 @@ async def _deliver_live_activities(
             payload = live_activities.build_la_end_payload(
                 content_state=content_state, now=now, dismissal_offset=30.0,
             )
-            token = row["token"] or device.push_to_start_token
+            token = row["token"]
             if token:
                 await transport.send_live_activity(
                     device, token=token, payload=payload, collapse_id=card_key, event="end",
@@ -366,9 +366,11 @@ async def _deliver_live_activities(
                 primary=primary, secondary=secondary, elapsed_seconds=elapsed_seconds,
                 card_key=card_key, thumbnail_handle=media_handle, thumbnail_revision=1,
             )
+            la_start_sound = sound_name_for_card(card.level, subject_kind, label)
             payload = live_activities.build_la_start_payload(
                 content_state=content_state, family=family, camera=camera,
                 track_id=la_track_id, card_key=card_key, now=now, stale_s=stale_s,
+                sound=la_start_sound,
             )
             logger.info(
                 "push: LA start device=%s family=%s pts_token=%s...",

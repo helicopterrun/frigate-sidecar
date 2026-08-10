@@ -601,6 +601,9 @@ class TestSoundFilenames:
         }
         assert set(cs) == expected_cs_keys
         assert payload["aps"]["attributes-type"] == "ElsinoreActivityAttributes"
+        assert "alert" in payload["aps"]
+        assert payload["aps"]["alert"]["title"] == "P"
+        assert payload["aps"]["alert"]["body"] == "S"
 
     def test_la_content_state_thumbnail_revision_always_present(self):
         state = build_content_state(
