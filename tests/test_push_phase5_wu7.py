@@ -255,7 +255,7 @@ async def test_resound_stops_on_resolve(sidecar_db_path: Path):
 async def test_quiet_hours_cap_quiet_caps_notify_to_quiet(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
-    device = _device()
+    device = _device(push_to_start="")
     config = PushSection(delivery_enabled=True)
 
     settings = policy_settings.default_settings()
@@ -297,7 +297,7 @@ async def test_quiet_hours_cap_quiet_exempts_urgent(sidecar_db_path: Path):
 async def test_quiet_hours_mute_sounds_strips_sound(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
-    device = _device()
+    device = _device(push_to_start="")
     config = PushSection(delivery_enabled=True)
 
     settings = policy_settings.default_settings()
