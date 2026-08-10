@@ -150,12 +150,14 @@ async def test_dry_run_scenario_notify_resolve():
     decisions = await replay_card.dry_run_scenario(messages, speed=100.0)
 
     assert len(decisions) == 3
-    # create card push suppressed — LA start is the alerting surface
-    assert decisions[0]["mutation"] == "(no push)"
+    assert decisions[0]["mutation"] == "create"
+    assert decisions[0]["level"] == "notify"
+    assert decisions[0]["sounded"] is True
     assert decisions[0]["la_action"] == "start"
 
-    # enrich also suppressed while LA is active
-    assert decisions[1]["mutation"] == "(no push)"
+    assert decisions[1]["mutation"] == "enrich"
+    assert decisions[1]["sounded"] is False
+    assert decisions[1]["interruption_level"] == "passive"
 
     assert decisions[2]["mutation"] == "resolve"
     assert decisions[2]["level"] == "notify"
@@ -204,8 +206,8 @@ def test_cli_dry_run_prints_decisions(capsys):
     ])
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "LA=start" in out
-    assert "(no push)" in out
+    assert "create" in out
+    assert "enrich" in out
     assert "resolve" in out
 
 

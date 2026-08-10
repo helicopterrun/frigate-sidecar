@@ -396,7 +396,6 @@ async def _deliver_live_activities(
             continue
 
         if not row["token"]:
-            store.touch_activity(conn, row["activity_id"], now=now)
             continue
         revision = int(row["thumbnail_revision"] or 1)
         if media_handle:
@@ -517,42 +516,10 @@ async def handle_delivery_event(
         if qh_active and qh_mode == "mute_sounds" and card.level != "urgent":
             sound = False
 
-        # Detect LA family before card push so we know whether to suppress.
-        family = live_activities.should_start_activity(
-            subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
-            families_enabled=policy["live_activities"],
-            opening_picks=policy["live_activities"].get("opening_picks"),
-            opening_ids=(zone_name, owning_camera) if zone_name else (owning_camera,),
-        )
-
-        # §2: the LA is the alerting surface — suppress the card push
-        # when an LA is or will be active. On create, suppress if an LA
-        # will start (family detected + device has push-to-start token).
-        # On escalate/deescalate/enrich, suppress if an LA row exists.
-        # Resolve sends a quiet card update so NC text shows resolution.
-        la_track_id = card_key.split(":", 2)[-1]
-        if mutation == CREATE:
-            la_will_start = family is not None and any(
-                dev.push_to_start_token for dev in devices
-            )
-            la_suppressed = la_will_start
-        elif mutation == RESOLVE:
-            la_suppressed = False
-        else:
-            la_active = any(
-                store.find_activity(
-                    conn, apns_token=dev.apns_token, situation_id=card_key, track_id=la_track_id,
-                ) is not None
-                for dev in devices
-            )
-            la_suppressed = la_active
-
         payload = None
         warm_task = None
         media_handle = None
-        if la_suppressed:
-            logger.info("push: card push suppressed — LA covers %s mutation=%s", card_key, mutation)
-        elif should_push(card.level):
+        if should_push(card.level):
             media_handle, media, warm_task = _media_for(
                 mutation, event, conn=conn, engine=engine, config=config,
             )
@@ -561,7 +528,6 @@ async def handle_delivery_event(
                 label=snapshot.label, camera=owning_camera, zone_name=zone_name,
                 glyph=_glyph_for(subject_kind, snapshot.label),
                 primary=primary, secondary=secondary, event_ts=now, media=media,
-                la_active=False,
             )
 
         await send_card_mutation(
@@ -571,9 +537,19 @@ async def handle_delivery_event(
             labels=event.labels, now=now,
         )
         if warm_task is not None:
+            # Runs concurrently with the send above, not in series (plan §4
+            # lever 4's rule, reused here): the push already carries the
+            # `media` URL optimistically, so a slow or failed Frigate fetch
+            # costs the notification its image, never its existence.
             with contextlib.suppress(Exception):
                 await warm_task
 
+        family = live_activities.should_start_activity(
+            subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
+            families_enabled=policy["live_activities"],
+            opening_picks=policy["live_activities"].get("opening_picks"),
+            opening_ids=(zone_name, owning_camera) if zone_name else (owning_camera,),
+        )
         await _deliver_live_activities(
             conn, devices, transport, config=config, card=card, mutation=mutation,
             family=family, camera=owning_camera, subject_kind=subject_kind,
@@ -658,20 +634,12 @@ async def handle_delivery_resolve(
         )
         elapsed = max(0.0, now - card.state_since_at)
         primary, secondary = _copy(kind, "", camera, zone_name, elapsed)
-        la_track_id = card_key.split(":", 2)[-1]
-        la_active = any(
-            store.find_activity(
-                conn, apns_token=dev.apns_token, situation_id=card_key, track_id=la_track_id,
-            ) is not None
-            for dev in devices
-        )
         payload = None
         if should_push(card.level):
             payload = build_card_payload(
                 card, mutation, sound=sound, subject_kind=kind, place_class="",
                 camera=camera, zone_name=zone_name, glyph=_glyph_for(kind, ""),
                 primary=primary, secondary=secondary, event_ts=now,
-                la_active=la_active,
             )
         await send_card_mutation(
             conn, transport, devices, card, mutation, payload,

@@ -38,10 +38,6 @@ def la_sends(transport: LogTransport) -> list[dict]:
     return [r for r in transport.sent if r.get("live_activity")]
 
 
-def card_sends(transport: LogTransport) -> list[dict]:
-    return [r for r in transport.sent if not r.get("live_activity") and not r.get("test")]
-
-
 def find_activity_row(conn, *, apns_token: str, card_key: str, track_id: str):
     return conn.execute(
         "SELECT * FROM push_activities WHERE apns_token = ? AND situation_id = ? "
@@ -294,48 +290,3 @@ async def test_settings_opening_picks_restrict_which_openings_get_an_activity(
     )
     starts = [r for r in la_sends(transport) if r["event"] == "start"]
     assert len(starts) == 1
-
-
-@pytest.mark.asyncio
-async def test_card_push_suppressed_while_la_active(sidecar_db_path: Path):
-    """§2: while a Live Activity is running, escalation rides the LA update —
-    the card push is demoted to silent (no sound, passive) so there's exactly
-    one alerting surface per mutation."""
-    conn = db.open_sidecar(sidecar_db_path)
-    transport = LogTransport()
-    device = make_device()
-    config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:stranger:trk1"
-
-    # create: person at front_door -> notify, LA starts
-    await handle_delivery_event(
-        make_event("doorbell", "trk1", "person", zones=("front_door",)),
-        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
-    )
-    assert len(la_sends(transport)) == 1
-    assert la_sends(transport)[0]["event"] == "start"
-    # create card push suppressed — LA start is the alerting surface
-    assert len(card_sends(transport)) == 0
-
-    # Attach per-activity token so updates flow
-    attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perActivity1")
-
-    # enrich: same zone, same level — LA active, card push suppressed
-    await handle_delivery_event(
-        make_event("doorbell", "trk1", "person", zones=("front_door",)),
-        conn=conn, devices=[device], transport=transport, config=config, now=5.0,
-    )
-    assert len(card_sends(transport)) == 0  # still no card pushes
-
-    # escalate: person moves to pool (off_limits -> urgent)
-    await handle_delivery_event(
-        make_event("doorbell", "trk1", "person", zones=("pool",)),
-        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
-    )
-    all_la = la_sends(transport)
-    assert all_la[-1]["event"] == "update"
-    # LA update carries the escalation alert
-    assert all_la[-1]["payload"]["aps"].get("alert") is not None
-
-    # Card push fully suppressed while LA active — no duplicate banner
-    assert len(card_sends(transport)) == 0
