@@ -38,7 +38,7 @@ def test_default_settings_shape():
     assert settings["zone_overrides"] == {}
     assert settings["live_activities"] == {
         "package": True, "bins": True, "openings": True, "person": True,
-        "opening_picks": [], "alert_all_changes": False,
+        "opening_picks": [], "alert_all_changes": False, "la_only": False,
     }
     assert settings["mute_sounds"] is False
     assert settings["quiet_hours"] is None

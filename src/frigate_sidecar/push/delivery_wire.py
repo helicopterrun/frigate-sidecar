@@ -321,7 +321,9 @@ async def _deliver_live_activities(
     la_track_id = card_key.split(":", 2)[-1]
 
     policy = policy_settings.get_active()
-    alert_all = policy.get("live_activities", {}).get("alert_all_changes", False)
+    la_settings = policy.get("live_activities", {})
+    alert_all = la_settings.get("alert_all_changes", False)
+    la_only = la_settings.get("la_only", False)
     stale_s = config.delivery_la_stale_s
 
     for device in devices:
@@ -391,7 +393,7 @@ async def _deliver_live_activities(
             # sounded too.
             la_start_sound = (
                 sound_name_for_card(card.level, subject_kind, label)
-                if sound_allowed else None
+                if sound_allowed and not la_only else None
             )
             payload = live_activities.build_la_start_payload(
                 content_state=content_state, family=family, camera=camera,
@@ -444,7 +446,11 @@ async def _deliver_live_activities(
         wants_alert = False
         la_sound = None
         la_interruption = None
-        if mutation == ESCALATE and card.level in ("notify", "urgent"):
+        if la_only:
+            # No banner ever: the LA's own state change (level color, copy)
+            # is the whole signal; alert dicts on updates are what banner.
+            pass
+        elif mutation == ESCALATE and card.level in ("notify", "urgent"):
             wants_alert = True
             if sound_allowed:
                 la_sound = sound_name_for_card(card.level, subject_kind, label)
@@ -617,11 +623,15 @@ async def handle_delivery_event(
         # an update landed on a confirmed per-activity token). Only then is
         # the card push demoted to a silent NC entry -- an LA that failed
         # anywhere along the way leaves the normal banner intact.
+        la_only = bool(policy["live_activities"].get("la_only", False))
         family = live_activities.should_start_activity(
             subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
             families_enabled=policy["live_activities"],
             opening_picks=policy["live_activities"].get("opening_picks"),
             opening_ids=(zone_name, owning_camera) if zone_name else (owning_camera,),
+            # Catch-all only for cards that would have pushed at all --
+            # log-level noise shouldn't mint activities.
+            catch_all=la_only and should_push(card.level),
         )
         la_covered = await _deliver_live_activities(
             conn, devices, transport, config=config, card=card, mutation=mutation,
@@ -638,11 +648,14 @@ async def handle_delivery_event(
 
         if should_push(card.level):
             payload = build_card_payload(
-                card, mutation, sound=sound, subject_kind=subject_kind, place_class=place_class,
+                card, mutation, sound=sound and not la_only,
+                subject_kind=subject_kind, place_class=place_class,
                 label=snapshot.label, camera=owning_camera, zone_name=zone_name,
                 glyph=_glyph_for(subject_kind, snapshot.label),
                 primary=primary, secondary=secondary, event_ts=now, media=media,
-                la_active=la_covered,
+                # la_only: never banner, even when the LA is unconfirmed --
+                # the user has chosen activities as the sole surface.
+                la_active=la_covered or la_only,
             )
 
         await send_card_mutation(
@@ -676,8 +689,11 @@ def resound_payload_for(card, context: dict[str, str]) -> dict:
     primary, secondary = _copy(
         subject_kind, "", context.get("camera", ""), context.get("zone_name", ""), elapsed,
     )
+    la_only = bool(
+        policy_settings.get_active().get("live_activities", {}).get("la_only", False)
+    )
     return build_card_payload(
-        card, "escalate", sound=True,
+        card, "escalate", sound=not la_only, la_active=la_only,
         subject_kind=subject_kind, place_class=context.get("place_class", ""),
         label=context.get("label", ""), camera=context.get("camera", ""),
         zone_name=context.get("zone_name", ""),
@@ -744,13 +760,17 @@ async def handle_delivery_resolve(
             primary=primary, secondary=secondary, elapsed_seconds=int(elapsed),
             media_handle=None, now=now, sound_allowed=sound,
         )
+        la_only = bool(
+            policy_settings.get_active().get("live_activities", {}).get("la_only", False)
+        )
         payload = None
         if should_push(card.level):
             payload = build_card_payload(
-                card, mutation, sound=sound, subject_kind=kind, place_class="",
-                camera=camera, zone_name=zone_name, glyph=_glyph_for(kind, ""),
+                card, mutation, sound=sound and not la_only, subject_kind=kind,
+                place_class="", camera=camera, zone_name=zone_name,
+                glyph=_glyph_for(kind, ""),
                 primary=primary, secondary=secondary, event_ts=now,
-                la_active=la_covered,
+                la_active=la_covered or la_only,
             )
         await send_card_mutation(
             conn, transport, devices, card, mutation, payload,

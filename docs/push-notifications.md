@@ -482,6 +482,15 @@ A card qualifies for a Live Activity when it maps to one of four families
 | `bins` | `subject_kind == "thing"` and label `"waste_bin"` or `"garbage_truck"` |
 | `openings` | `subject_kind == "thing"` and label in `{"door", "gate", "garage"}` |
 | `person` | `subject_kind in ("stranger", "known")` and `place_class == "doors"` |
+| `activity` | catch-all, only in `live_activities.la_only` mode: any pushable card the rules above miss |
+
+`live_activities.la_only` (settings, default `false`): Live Activities are
+the sole surface. Every pushable card gets an activity (the `activity`
+catch-all family, glyphed per subject kind), every card push is demoted to
+passive/silent regardless of LA confirmation, LA starts carry no sound, LA
+updates never carry an alert dict, and the urgent re-sound is silent. The
+flag is sticky across `PUT /v1/push/settings` calls that omit it, because
+the app's settings model round-trips through a fixed Codable type.
 
 `push.delivery_la_families` (`{family: bool}`, absent or `True` = enabled)
 is checked last, wrapping detection rather than replacing it -- a disabled

@@ -648,6 +648,15 @@ async def put_push_settings(request: Request) -> dict[str, Any]:
 
     settings = request.app.state.settings
     merged = policy_settings.normalize_settings(body)
+    # la_only is sticky: normalize fills absent keys from *defaults*, and the
+    # app's settings model round-trips through a fixed Codable type that drops
+    # keys it doesn't know — so a client that omits la_only must not silently
+    # reset it. Only an explicit boolean in the body changes it.
+    la_body = body.get("live_activities") if isinstance(body, dict) else None
+    if not (isinstance(la_body, dict) and isinstance(la_body.get("la_only"), bool)):
+        merged["live_activities"]["la_only"] = bool(
+            policy_settings.get_active().get("live_activities", {}).get("la_only", False)
+        )
     policy_settings.save_settings(settings.push.push_settings_path, merged)
     policy_settings.apply_settings(merged)
     return {"ok": True}

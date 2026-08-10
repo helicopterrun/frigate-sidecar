@@ -55,6 +55,12 @@ BINS = "bins"
 OPENINGS = "openings"
 PERSON = "person"
 FAMILIES = (PACKAGE, BINS, OPENINGS, PERSON)
+#: Catch-all family for `la_only` mode: any pushable card that matches no
+#: curated family still gets an activity. The app treats `family` as an
+#: opaque string by design ("lets a new family ship server-side without an
+#: app rebuild" -- ElsinoreActivityAttributes.swift), so no app change is
+#: needed for this value to work.
+CATCH_ALL = "activity"
 
 #: Frigate labels that make a `thing` card an opening (door/gate/garage).
 _OPENING_LABELS = frozenset({"door", "gate", "garage"})
@@ -76,6 +82,16 @@ _OPENING_GLYPH = {
     "gate": "pedestrian.gate.open",
     "door": "door.left.hand.open",
 }
+#: Catch-all glyphs by subject kind. Must be real SF Symbol names -- the
+#: widget renders content-state.glyph via Image(systemName:) with no
+#: fallback, so an invalid name is an empty Dynamic Island.
+_CATCH_ALL_GLYPH = {
+    "stranger": "figure.walk",
+    "known": "figure.wave",
+    "animal": "pawprint.fill",
+    "thing": "cube.fill",
+}
+_CATCH_ALL_DEFAULT_GLYPH = "dot.radiowaves.left.and.right"
 
 
 def should_start_activity(
@@ -86,6 +102,7 @@ def should_start_activity(
     families_enabled: dict[str, bool] | None = None,
     opening_picks: list[str] | None = None,
     opening_ids: tuple[str, ...] = (),
+    catch_all: bool = False,
 ) -> str | None:
     """Which LA family this card qualifies for, or `None`.
 
@@ -112,6 +129,10 @@ def should_start_activity(
         family = OPENINGS
     elif subject_kind in ("stranger", "known") and place_class == "doors":
         family = PERSON
+    elif catch_all:
+        # la_only mode: every card gets an activity; the curated families
+        # above still win when they match so their glyphs/copy stay.
+        family = CATCH_ALL
 
     if family is None:
         return None
@@ -140,6 +161,8 @@ def glyph_for(family: str, *, subject_kind: str, label: str, mutation: str) -> s
         return _BINS_GLYPH
     if family == OPENINGS:
         return _OPENING_GLYPH.get(label, _OPENING_GLYPH["door"])
+    if family == CATCH_ALL:
+        return _CATCH_ALL_GLYPH.get(subject_kind, _CATCH_ALL_DEFAULT_GLYPH)
     return _RESOLVED_GLYPH
 
 

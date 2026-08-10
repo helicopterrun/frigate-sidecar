@@ -445,3 +445,71 @@ async def test_deferred_end_when_token_arrives_after_resolve(sidecar_db_path: Pa
         conn, apns_token=device.apns_token, card_key=card_key, track_id="trk1",
     )
     assert row["ended_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_la_only_mode_no_banner_ever_and_catch_all_family(sidecar_db_path: Path):
+    """live_activities.la_only: every pushable card gets an activity (the
+    catch-all family covers events outside the curated four) and every card
+    push is passive/silent — no banner, no sound, even before the LA is
+    confirmed and even on escalation."""
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    settings = policy_settings.default_settings()
+    settings["live_activities"]["la_only"] = True
+    policy_settings.apply_settings(settings)
+
+    # An animal in the yard matches no curated family — catch-all covers it.
+    await handle_delivery_event(
+        make_event("driveway", "trk9", "dog", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    start = la_sends(transport)[0]
+    assert start["event"] == "start"
+    assert start["payload"]["aps"]["attributes"]["family"] == "activity"
+    assert start["payload"]["aps"]["content-state"]["glyph"] == "pawprint.fill"
+    assert "sound" not in start["payload"]["aps"]  # fully silent start
+    aps = card_sends(transport)[0]["payload"]["aps"]
+    assert aps["interruption-level"] == "passive"
+    assert "sound" not in aps
+
+    # Escalation: LA update stays silent (no alert dict), card push passive.
+    attach_token(conn, device=device, card_key="driveway:animal:trk9",
+                 track_id="trk9", token="tokLA")
+    await handle_delivery_event(
+        make_event("driveway", "trk9", "dog", zones=("charger",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+    for send in la_sends(transport):
+        if send["event"] == "update":
+            assert "alert" not in send["payload"]["aps"]
+    for send in card_sends(transport):
+        assert send["payload"]["aps"]["interruption-level"] == "passive"
+        assert "sound" not in send["payload"]["aps"]
+
+
+@pytest.mark.asyncio
+async def test_la_only_mode_skips_log_level_cards(sidecar_db_path: Path):
+    """Catch-all must not mint activities for log-level noise."""
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    settings = policy_settings.default_settings()
+    settings["live_activities"]["la_only"] = True
+    policy_settings.apply_settings(settings)
+
+    # thing on street = log level -> no push, no activity
+    await handle_delivery_event(
+        make_event("alley-cam", "trk1", "car", zones=()),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    assert la_sends(transport) == []

@@ -153,6 +153,11 @@ def default_settings() -> dict[str, Any]:
             # Quiet by default: only a real escalation (level rising to
             # notify/urgent) banners over a running Live Activity.
             "alert_all_changes": False,
+            # la_only: Live Activities are the ONLY surface -- every
+            # pushable card gets an activity (catch-all family for events
+            # outside the curated four) and every card push and LA update
+            # is silent/passive. No banner ever.
+            "la_only": False,
         },
         "mute_sounds": False,
         "quiet_hours": None,
@@ -233,7 +238,9 @@ def validate_settings(data: Any) -> list[str]:
         if not isinstance(live_activities, dict):
             errors.append("live_activities must be an object")
         else:
-            unknown_keys = set(live_activities) - set(FAMILIES) - {"opening_picks", "alert_all_changes"}
+            unknown_keys = set(live_activities) - set(FAMILIES) - {
+                "opening_picks", "alert_all_changes", "la_only",
+            }
             if unknown_keys:
                 errors.append(f"live_activities has unknown key(s): {sorted(unknown_keys)}")
             for family in FAMILIES:
@@ -247,6 +254,9 @@ def validate_settings(data: Any) -> list[str]:
             aac = live_activities.get("alert_all_changes")
             if aac is not None and not isinstance(aac, bool):
                 errors.append("live_activities.alert_all_changes must be a boolean")
+            lao = live_activities.get("la_only")
+            if lao is not None and not isinstance(lao, bool):
+                errors.append("live_activities.la_only must be a boolean")
 
     mute_sounds = data.get("mute_sounds")
     if mute_sounds is not None and not isinstance(mute_sounds, bool):
@@ -320,6 +330,8 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
             merged["live_activities"]["opening_picks"] = [str(p) for p in picks]
         if isinstance(live_activities.get("alert_all_changes"), bool):
             merged["live_activities"]["alert_all_changes"] = live_activities["alert_all_changes"]
+        if isinstance(live_activities.get("la_only"), bool):
+            merged["live_activities"]["la_only"] = live_activities["la_only"]
 
     if isinstance(data.get("mute_sounds"), bool):
         merged["mute_sounds"] = data["mute_sounds"]
