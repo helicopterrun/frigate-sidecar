@@ -544,3 +544,125 @@ async def test_relay_key_on_la_and_test_endpoints():
     assert all(h.get("x-relay-key") == "k1" for h in seen_headers)
     assert len(seen_headers) == 4
     await relay.aclose()
+
+
+# ── 8. Sound filename correctness ───────────────────────────────────────
+
+_VALID_SOUNDS = frozenset([
+    "at-the-door.caf", "confirmation.caf", "elevated.caf", "general.caf",
+    "investigate.caf", "package-delivery.caf", "urgent.caf", "watch.caf",
+])
+
+
+class TestSoundFilenames:
+    def test_sound_name_uses_label_not_place_class(self):
+        assert sound_name_for_card("notify", "stranger", "person") == "at-the-door.caf"
+        assert sound_name_for_card("notify", "stranger", "doors") == "general.caf"
+
+    def test_sound_name_package(self):
+        assert sound_name_for_card("notify", "thing", "package") == "package-delivery.caf"
+
+    def test_sound_name_urgent_always(self):
+        assert sound_name_for_card("urgent", "stranger", "person") == "urgent.caf"
+        assert sound_name_for_card("urgent", "thing", "package") == "urgent.caf"
+
+    def test_all_sound_names_are_bare_filenames(self):
+        cases = [
+            ("urgent", "stranger", "person"),
+            ("notify", "stranger", "person"),
+            ("notify", "thing", "package"),
+            ("notify", "thing", "car"),
+            ("notify", "animal", "dog"),
+            ("quiet", "stranger", "person"),
+        ]
+        for level, kind, label in cases:
+            name = sound_name_for_card(level, kind, label)
+            assert "/" not in name, f"sound name {name!r} contains a path separator"
+            assert name in _VALID_SOUNDS, f"sound name {name!r} not in app bundle catalog"
+
+    def test_build_card_payload_sound_uses_label(self):
+        card = Card(
+            card_key="doorbell:stranger:t1", level="notify", peak_level="notify",
+            sound_count=0, state_since_at=1000.0, created_at=1000.0, updated_at=1000.0,
+        )
+        payload = build_card_payload(
+            card, "create", sound=True, subject_kind="stranger",
+            place_class="doors", label="person", camera="doorbell",
+            zone_name="front_door", glyph="stranger.person",
+            primary="Someone at Front Door", secondary="Front Door · 0s",
+            event_ts=1000.0,
+        )
+        assert payload["aps"]["sound"] == "at-the-door.caf"
+
+
+# ── 9. LA activity persistence (conn.commit) ─────────────────────────────
+
+@pytest.mark.asyncio
+async def test_la_push_to_start_persists_across_mutations(tmp_path):
+    """Regression: open_activity must be committed so subsequent mutations
+    find the activity row. Without commit, conn.close() rolls it back."""
+    db_path = tmp_path / "sidecar.db"
+    conn = db.open_sidecar(db_path)
+    dev = _device()
+    store.upsert_device(
+        conn, apns_token=dev.apns_token, bundle_id=dev.bundle_id,
+        environment=dev.environment, cameras=[], min_severity="detection",
+        push_to_start_token=dev.push_to_start_token,
+    )
+    conn.commit()
+    conn.close()
+
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    policy_settings.apply_settings(policy_settings.default_settings())
+
+    event_create = _event(camera="doorbell", zones=("front_door",), label="person")
+    event_enrich = ReviewEvent(
+        review_id=event_create.review_id, camera="doorbell", severity="alert",
+        labels=("person",), track_ids=event_create.track_ids, zones=("front_door",),
+    )
+
+    from frigate_sidecar.push.engine import PushEngine
+    engine = PushEngine(db_path=str(db_path), transport=transport, server_id="test")
+    engine.push_config = config
+
+    conn1 = engine._conn()
+    await handle_delivery_event(
+        event_create, conn=conn1, devices=[dev], transport=transport,
+        config=config, now=1000.0,
+    )
+    conn1.close()
+
+    la_starts = [s for s in transport.sent if s.get("live_activity") and s.get("event") == "start"]
+    assert len(la_starts) == 1, "push-to-start should fire on create"
+
+    # Simulate the app attaching a per-activity token (iOS gives it after
+    # ActivityKit creates the Live Activity from the push-to-start).
+    conn_attach = engine._conn()
+    activity_row = store.find_activity(
+        conn_attach, apns_token=dev.apns_token,
+        situation_id="doorbell:stranger:trk1", track_id="trk1",
+    )
+    assert activity_row is not None, "activity row must survive conn1.close()"
+    store.attach_activity_token(
+        conn_attach, activity_id=activity_row["activity_id"],
+        apns_token=dev.apns_token, situation_id="doorbell:stranger:trk1",
+        track_id="trk1", token="per-activity-tok",
+    )
+    conn_attach.commit()
+    conn_attach.close()
+
+    conn2 = engine._conn()
+    await handle_delivery_event(
+        event_enrich, conn=conn2, devices=[dev], transport=transport,
+        config=config, now=1005.0,
+    )
+    conn2.close()
+
+    la_updates = [
+        s for s in transport.sent
+        if s.get("live_activity") and s.get("event") == "update"
+    ]
+    assert len(la_updates) >= 1, (
+        "LA update should fire on enrich (activity row must survive conn.close)"
+    )

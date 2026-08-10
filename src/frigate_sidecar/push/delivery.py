@@ -189,6 +189,7 @@ def build_card_payload(
     sound: bool,
     subject_kind: str,
     place_class: str,
+    label: str = "",
     camera: str,
     zone_name: str,
     glyph: str,
@@ -219,7 +220,7 @@ def build_card_payload(
     if interruption_level is not None:
         aps["interruption-level"] = interruption_level
     if sound:
-        aps["sound"] = sound_name_for_card(card.level, subject_kind, place_class)
+        aps["sound"] = sound_name_for_card(card.level, subject_kind, label)
     aps["thread-id"] = camera
     aps["category"] = f"card.{card.level}"
 
@@ -372,8 +373,10 @@ async def send_card_mutation(
                 )
                 conn.commit()
 
+        priority = 10 if bool(dev_payload.get("aps", {}).get("sound")) else 5
         result = await transport.send_situation(
             device, payload=dev_payload, collapse_id=card.card_key,
+            apns_priority=priority,
         )
         if not result.ok:
             logger.info(

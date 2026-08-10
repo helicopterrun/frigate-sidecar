@@ -505,7 +505,7 @@ async def handle_delivery_event(
             )
             payload = build_card_payload(
                 card, mutation, sound=sound, subject_kind=subject_kind, place_class=place_class,
-                camera=owning_camera, zone_name=zone_name,
+                label=snapshot.label, camera=owning_camera, zone_name=zone_name,
                 glyph=_glyph_for(subject_kind, snapshot.label),
                 primary=primary, secondary=secondary, event_ts=now, media=media,
             )
@@ -536,6 +536,7 @@ async def handle_delivery_event(
             label=snapshot.label, primary=primary, secondary=secondary,
             elapsed_seconds=int(elapsed), media_handle=media_handle, now=now,
         )
+        conn.commit()
         mutated += 1
 
     return mutated
@@ -556,7 +557,8 @@ def resound_payload_for(card, context: dict[str, str]) -> dict:
     return build_card_payload(
         card, "escalate", sound=True,
         subject_kind=subject_kind, place_class=context.get("place_class", ""),
-        camera=context.get("camera", ""), zone_name=context.get("zone_name", ""),
+        label=context.get("label", ""), camera=context.get("camera", ""),
+        zone_name=context.get("zone_name", ""),
         glyph=_glyph_for(subject_kind, ""), primary=primary, secondary=secondary, event_ts=now,
     )
 
@@ -629,5 +631,6 @@ async def handle_delivery_resolve(
             primary=primary, secondary=secondary, elapsed_seconds=int(elapsed),
             media_handle=None, now=now,
         )
+        conn.commit()
         resolved += 1
     return resolved
