@@ -361,7 +361,7 @@ class TestLaPayloadContract:
             )
             payload = build_la_start_payload(
                 content_state=state, family="person", camera="c",
-                track_id="t", card_key="k", now=1000.0,
+                card_key="k", now=1000.0,
             )
             assert payload["aps"]["relevance-score"] == expected, f"level={level}"
 
@@ -373,7 +373,7 @@ class TestLaPayloadContract:
         )
         payload = build_la_start_payload(
             content_state=state, family="person", camera="c",
-            track_id="t", card_key="k", now=1000.0, stale_s=900.0,
+            card_key="k", now=1000.0, stale_s=900.0,
         )
         assert payload["aps"]["stale-date"] == 1900
 
@@ -579,6 +579,28 @@ class TestSoundFilenames:
             name = sound_name_for_card(level, kind, label)
             assert "/" not in name, f"sound name {name!r} contains a path separator"
             assert name in _VALID_SOUNDS, f"sound name {name!r} not in app bundle catalog"
+
+    def test_la_start_attributes_match_swift_contract(self):
+        state = build_content_state(
+            level="notify", mutation="create", glyph="stranger.person",
+            primary="P", secondary="S", elapsed_seconds=0,
+            card_key="doorbell:stranger:t1",
+            thumbnail_handle="h_abc", thumbnail_revision=1,
+        )
+        payload = build_la_start_payload(
+            content_state=state, family="person", camera="doorbell",
+            card_key="doorbell:stranger:t1", now=1000.0,
+        )
+        attrs = payload["aps"]["attributes"]
+        assert set(attrs) == {"cardKey", "family", "camera"}
+        cs = payload["aps"]["content-state"]
+        expected_cs_keys = {
+            "level", "mutation", "glyph", "primary", "secondary",
+            "elapsedSeconds", "deepLinkCardKey",
+            "thumbnailHandle", "thumbnailRevision",
+        }
+        assert set(cs) == expected_cs_keys
+        assert payload["aps"]["attributes-type"] == "ElsinoreActivityAttributes"
 
     def test_build_card_payload_sound_uses_label(self):
         card = Card(

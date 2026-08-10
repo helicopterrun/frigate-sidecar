@@ -94,7 +94,7 @@ async def test_full_la_lifecycle_create_enrich_escalate_resolve(sidecar_db_path:
     assert sends[1]["token"] == "perActivity1"
     enrich_state = sends[1]["payload"]["aps"]["content-state"]
     assert enrich_state["mutation"] == "enrich"
-    assert enrich_state["elapsed_seconds"] == 10
+    assert enrich_state["elapsedSeconds"] == 10
 
     # resolve
     resolved = await handle_delivery_resolve(
@@ -109,7 +109,7 @@ async def test_full_la_lifecycle_create_enrich_escalate_resolve(sidecar_db_path:
     assert end_payload["dismissal-date"] == 60  # 30s dismissal
     assert end_payload["content-state"]["mutation"] == "resolve"
     assert end_payload["content-state"]["glyph"] == "checkmark.circle.fill"
-    assert end_payload["content-state"]["thumbnail_handle"] is None
+    assert "thumbnailHandle" not in end_payload["content-state"]
 
     row = find_activity_row(conn, apns_token=device.apns_token, card_key=card_key, track_id="trk1")
     assert row["ended_at"] is not None

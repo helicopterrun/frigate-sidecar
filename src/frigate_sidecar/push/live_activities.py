@@ -158,17 +158,19 @@ def build_content_state(
     """The dynamic half of the activity, snake_case to match the Swift
     type's `CodingKeys` exactly -- these field names are load-bearing wire
     contract, not a style choice."""
-    return {
+    state: dict[str, Any] = {
         "level": level,
         "mutation": mutation,
         "glyph": glyph,
         "primary": primary,
         "secondary": secondary,
-        "elapsed_seconds": int(elapsed_seconds),
-        "deep_link_card_key": card_key,
-        "thumbnail_handle": thumbnail_handle,
-        "thumbnail_revision": thumbnail_revision,
+        "elapsedSeconds": int(elapsed_seconds),
+        "deepLinkCardKey": card_key,
     }
+    if thumbnail_handle is not None:
+        state["thumbnailHandle"] = thumbnail_handle
+    state["thumbnailRevision"] = thumbnail_revision
+    return state
 
 
 def build_la_start_payload(
@@ -176,7 +178,6 @@ def build_la_start_payload(
     content_state: dict[str, Any],
     family: str,
     camera: str,
-    track_id: str,
     card_key: str,
     now: float | None = None,
     stale_s: float = 900.0,
@@ -193,10 +194,9 @@ def build_la_start_payload(
             "content-state": content_state,
             "attributes-type": ATTRIBUTES_TYPE,
             "attributes": {
-                "card_key": card_key,
+                "cardKey": card_key,
                 "family": family,
                 "camera": camera,
-                "track_id": track_id,
             },
         },
     }

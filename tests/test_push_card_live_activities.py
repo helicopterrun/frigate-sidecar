@@ -140,20 +140,20 @@ def _content_state(**overrides):
     return la.build_content_state(**base)
 
 
-def test_build_content_state_field_names_are_snake_case_and_exact():
+def test_build_content_state_field_names_are_camel_case_and_exact():
     state = _content_state()
     assert set(state) == {
-        "level", "mutation", "glyph", "primary", "secondary", "elapsed_seconds",
-        "deep_link_card_key", "thumbnail_handle", "thumbnail_revision",
+        "level", "mutation", "glyph", "primary", "secondary", "elapsedSeconds",
+        "deepLinkCardKey", "thumbnailHandle", "thumbnailRevision",
     }
-    assert state["deep_link_card_key"] == "doorbell:stranger:1786235300-aywxqj"
+    assert state["deepLinkCardKey"] == "doorbell:stranger:1786235300-aywxqj"
 
 
 def test_build_la_start_payload_shape():
     state = _content_state()
     payload = la.build_la_start_payload(
         content_state=state, family="person", camera="doorbell",
-        track_id="1786235300-aywxqj", card_key="doorbell:stranger:1786235300-aywxqj",
+        card_key="doorbell:stranger:1786235300-aywxqj",
         now=1786235302,
     )
     aps = payload["aps"]
@@ -162,10 +162,9 @@ def test_build_la_start_payload_shape():
     assert aps["content-state"] == state
     assert aps["attributes-type"] == "ElsinoreActivityAttributes"
     assert aps["attributes"] == {
-        "card_key": "doorbell:stranger:1786235300-aywxqj",
+        "cardKey": "doorbell:stranger:1786235300-aywxqj",
         "family": "person",
         "camera": "doorbell",
-        "track_id": "1786235300-aywxqj",
     }
 
 
@@ -187,4 +186,4 @@ def test_build_la_end_payload_dismissal_is_timestamp_plus_thirty():
     assert aps["timestamp"] == 1786235329
     assert aps["dismissal-date"] == 1786235359
     assert aps["relevance-score"] == 0.75  # default level is "notify"
-    assert aps["content-state"]["thumbnail_handle"] is None
+    assert "thumbnailHandle" not in aps["content-state"]

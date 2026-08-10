@@ -300,7 +300,12 @@ async def _deliver_live_activities(
     re-qualification).
     """
     if not config.delivery_la_enabled:
+        logger.info("push: LA skipped — delivery_la_enabled=False")
         return
+    logger.info(
+        "push: LA enter mutation=%s family=%s card_key=%s devices=%d",
+        mutation, family, card.card_key, len(devices),
+    )
     card_key = card.card_key
     # The primary/original subject id, stable across cross-camera dedup --
     # `card_key` is always `{camera}:{subject_kind}:{subject_id}`, so this is
@@ -342,10 +347,16 @@ async def _deliver_live_activities(
 
         if row is None:
             if mutation != CREATE or family is None or not device.push_to_start_token:
+                logger.info(
+                    "push: LA skip device=%s reason=no_row mutation=%s family=%s pts=%s",
+                    device.device_id, mutation, family, bool(device.push_to_start_token),
+                )
                 continue
             if not _device_eligible(device, camera=camera, labels=(label,), card_level=card.level):
+                logger.info("push: LA skip device=%s reason=not_eligible", device.device_id)
                 continue
             if _is_snoozed(conn, device, camera, now=now):
+                logger.info("push: LA skip device=%s reason=snoozed", device.device_id)
                 continue
             content_state = live_activities.build_content_state(
                 level=card.level, mutation=mutation,
@@ -357,12 +368,19 @@ async def _deliver_live_activities(
             )
             payload = live_activities.build_la_start_payload(
                 content_state=content_state, family=family, camera=camera,
-                track_id=la_track_id, card_key=card_key, now=now, stale_s=stale_s,
+                card_key=card_key, now=now, stale_s=stale_s,
+            )
+            logger.info(
+                "push: LA start device=%s family=%s pts_token=%s...",
+                device.device_id, family, (device.push_to_start_token or "")[:16],
             )
             result = await transport.send_live_activity(
                 device, token=device.push_to_start_token, payload=payload,
                 collapse_id=card_key, event="start",
                 apns_priority=10, apns_expiration=int(now + 900),
+            )
+            logger.info(
+                "push: LA start result ok=%s error=%s", result.ok, result.error,
             )
             if not result.ok:
                 continue
