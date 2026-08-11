@@ -288,9 +288,7 @@ def _device_eligible(
     if device.labels and not (set(device.labels) & set(labels)):
         return False
     card_sev = _LEVEL_TO_SEVERITY.get(card_level, "log")
-    if _SEVERITY_INDEX.get(card_sev, 0) < _SEVERITY_INDEX.get(device.min_severity, 2):
-        return False
-    return True
+    return _SEVERITY_INDEX.get(card_sev, 0) >= _SEVERITY_INDEX.get(device.min_severity, 2)
 
 
 def _is_snoozed(conn: Any, device: Device, camera: str, *, now: float) -> bool:
@@ -313,10 +311,17 @@ async def send_card_mutation(
     zone_name: str = "",
     labels: tuple[str, ...] = (),
     now: float | None = None,
+    demote_tokens: frozenset[str] | set[str] = frozenset(),
 ) -> int:
     """Persist `card` and send to eligible devices, honoring per-device
-    filtering, snooze, quiet resolves, and the global sounding rate cap."""
+    filtering, snooze, quiet resolves, and the global sounding rate cap.
+
+    `demote_tokens`: apns tokens whose own Live Activity demonstrably covers
+    this mutation -- their card push is demoted to passive/silent, while
+    devices without a working LA keep the full alerting card. Per-device on
+    purpose: one device's confirmed LA must not silence another's banner."""
     import time as _time
+
     from frigate_sidecar.push import store
 
     now = _time.time() if now is None else now
@@ -350,7 +355,13 @@ async def send_card_mutation(
             continue
 
         dev_payload = payload
-        if has_sound:
+        demoted = device.apns_token in demote_tokens
+        if demoted:
+            dev_payload = dict(payload)
+            dev_payload["aps"] = dict(dev_payload["aps"])
+            dev_payload["aps"].pop("sound", None)
+            dev_payload["aps"]["interruption-level"] = "passive"
+        if has_sound and not demoted:
             recent = store.count_sends_since(
                 conn, apns_token=device.apns_token, situation_id=_SOUND_RATE_KEY,
                 since=now - 3600.0,

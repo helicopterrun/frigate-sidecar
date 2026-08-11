@@ -513,3 +513,32 @@ async def test_la_only_mode_skips_log_level_cards(sidecar_db_path: Path):
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     assert la_sends(transport) == []
+
+
+@pytest.mark.asyncio
+async def test_multi_device_demotion_is_per_device(sidecar_db_path: Path):
+    """Coverage is per-device: device A's confirmed LA demotes only A's card
+    push; device B (no push-to-start token, so no LA) keeps the full
+    alerting card. A single OR-ed coverage bool would silence B entirely."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    dev_a = make_device(token="tokA")                      # LA-capable
+    dev_b = make_device(token="tokB", push_to_start="")    # no LA
+    config = PushSection(delivery_enabled=True)
+
+    # person at front_door -> notify: A gets an LA start, B cannot.
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[dev_a, dev_b], transport=transport, config=config, now=0.0,
+    )
+    starts = [r for r in la_sends(transport) if r["event"] == "start"]
+    assert [r["device_id"] for r in starts] == ["d_tokA"]
+
+    cards = {r["device_id"]: r for r in card_sends(transport)}
+    assert set(cards) == {"d_tokA", "d_tokB"}
+    # A: demoted — its LA start was APNs-accepted.
+    assert cards["d_tokA"]["payload"]["aps"]["interruption-level"] == "passive"
+    assert "sound" not in cards["d_tokA"]["payload"]["aps"]
+    # B: full alerting card — no LA covers it.
+    assert cards["d_tokB"]["payload"]["aps"]["interruption-level"] == "active"
+    assert cards["d_tokB"]["payload"]["aps"].get("sound")

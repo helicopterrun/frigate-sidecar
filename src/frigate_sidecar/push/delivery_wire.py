@@ -279,7 +279,7 @@ async def _deliver_live_activities(
     media_handle: str | None,
     now: float,
     sound_allowed: bool = True,
-) -> bool:
+) -> set[str]:
     """The Live Activity side of one card mutation, one iteration per
     registered device (Elsinore Phase 3, `docs/push-notifications.md` "Live
     Activity lifecycle"). Independent of the ordinary card push above: a
@@ -300,13 +300,14 @@ async def _deliver_live_activities(
     either) or on `resolve` (ending an already-running activity needs no
     re-qualification).
 
-    Returns True when the Live Activity *demonstrably* covers this mutation
-    for at least one device: a start APNs accepted, or an update/end sent to
-    a confirmed per-activity token. The caller uses this to demote the
-    ordinary card push to a silent one -- gating on confirmation (not
-    intent) is what keeps a silently-failed LA from eating notifications.
+    Returns the apns tokens of devices whose Live Activity *demonstrably*
+    covers this mutation: a start APNs accepted, or an update/end sent to a
+    confirmed per-activity token. The caller demotes the ordinary card push
+    to silent for exactly those devices -- per-device, so one phone's
+    working LA never silences another's banner, and gated on confirmation
+    (not intent) so a silently-failed LA never eats a notification.
     """
-    covered = False
+    covered: set[str] = set()
     if not config.delivery_la_enabled:
         logger.info("push: LA skipped — delivery_la_enabled=False")
         return covered
@@ -353,7 +354,7 @@ async def _deliver_live_activities(
                     apns_priority=5,
                 )
                 if result.ok:
-                    covered = True
+                    covered.add(device.apns_token)
                 store.close_activity(conn, row["activity_id"], now=now)
             else:
                 # Fast create→resolve: the app hasn't uploaded the
@@ -414,7 +415,7 @@ async def _deliver_live_activities(
             )
             if not result.ok:
                 continue
-            covered = True
+            covered.add(device.apns_token)
             activity_id = f"a_{secrets.token_urlsafe(8)}"
             store.open_activity(
                 conn, activity_id=activity_id, apns_token=device.apns_token,
@@ -469,7 +470,7 @@ async def _deliver_live_activities(
             apns_priority=priority, apns_expiration=int(now + 900),
         )
         if result.ok:
-            covered = True
+            covered.add(device.apns_token)
         store.touch_activity(
             conn, row["activity_id"], thumbnail_revision=revision, pushed=True, now=now,
         )
@@ -642,8 +643,8 @@ async def handle_delivery_event(
         )
         if la_covered:
             logger.info(
-                "push: card push demoted to silent — LA covers %s mutation=%s",
-                card_key, mutation,
+                "push: card push demoted to silent for %d device(s) — LA covers %s mutation=%s",
+                len(la_covered), card_key, mutation,
             )
 
         if should_push(card.level):
@@ -655,14 +656,15 @@ async def handle_delivery_event(
                 primary=primary, secondary=secondary, event_ts=now, media=media,
                 # la_only: never banner, even when the LA is unconfirmed --
                 # the user has chosen activities as the sole surface.
-                la_active=la_covered or la_only,
+                # Confirmed-LA demotion is per-device via demote_tokens below.
+                la_active=la_only,
             )
 
         await send_card_mutation(
             conn, transport, devices, card, mutation, payload,
             subject_kind=subject_kind, place_class=place_class,
             camera=owning_camera, zone_name=zone_name,
-            labels=event.labels, now=now,
+            labels=event.labels, now=now, demote_tokens=la_covered,
         )
         if warm_task is not None:
             # Runs concurrently with the sends above, not in series (plan §4
@@ -770,11 +772,12 @@ async def handle_delivery_resolve(
                 place_class="", camera=camera, zone_name=zone_name,
                 glyph=_glyph_for(kind, ""),
                 primary=primary, secondary=secondary, event_ts=now,
-                la_active=la_covered or la_only,
+                la_active=la_only,
             )
         await send_card_mutation(
             conn, transport, devices, card, mutation, payload,
             subject_kind=kind, camera=camera, zone_name=zone_name,
+            now=now, demote_tokens=la_covered,
         )
         conn.commit()
         resolved += 1
