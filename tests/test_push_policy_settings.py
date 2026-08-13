@@ -40,7 +40,7 @@ def test_default_settings_shape():
         "package": True, "bins": True, "openings": True, "person": True,
         "opening_picks": [], "alert_all_changes": False, "la_only": False,
     }
-    assert settings["mute_sounds"] is False
+    assert settings["mute_sounds"] is True
     assert settings["quiet_hours"] is None
 
 
@@ -246,7 +246,8 @@ def test_apply_settings_changes_what_the_ladder_evaluates_against():
     from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
 
     custom = policy_settings.default_settings()
-    custom["routing_table"]["thing"]["yard"] = "urgent"
+    table_key = "routing_table_v2" if "routing_table_v2" in custom else "routing_table"
+    custom[table_key]["thing"]["yard"] = "urgent"
     policy_settings.apply_settings(custom)
 
     assert ladder_policy.TABLE["thing"]["yard"] == "urgent"
@@ -257,7 +258,8 @@ def test_apply_settings_changes_what_the_ladder_evaluates_against():
 def test_apply_settings_copies_the_table_so_later_mutation_does_not_leak():
     custom = policy_settings.default_settings()
     policy_settings.apply_settings(custom)
-    custom["routing_table"]["thing"]["yard"] = "urgent"
+    table_key = "routing_table_v2" if "routing_table_v2" in custom else "routing_table"
+    custom[table_key]["thing"]["yard"] = "urgent"
     assert ladder_policy.TABLE["thing"]["yard"] != "urgent"
 
 
@@ -293,13 +295,16 @@ def test_zone_override_absent_falls_through_to_the_base_table():
 
     # Different zone -- no override applies, ordinary table lookup runs.
     level = evaluate_ladder(Snapshot(subject="thing", place="doors", zone="side_door"))
-    assert level == settings["routing_table"]["thing"]["doors"]
+    rt = settings.get("routing_table_v2") or settings["routing_table"]
+    assert level == rt["thing"]["doors"]
 
     # Same zone, different subject -- no override applies either.
     level = evaluate_ladder(
-        Snapshot(subject="stranger", place="doors", zone="front_entry_person")
+        Snapshot(subject="person", place="doors", zone="front_entry_person")
     )
-    assert level == settings["routing_table"]["stranger"]["doors"]
+    table_key = "routing_table_v2" if "routing_table_v2" in settings else "routing_table"
+    subj_key = "person" if table_key == "routing_table_v2" else "stranger"
+    assert level == settings[table_key][subj_key]["doors"]
 
 
 def test_zone_override_does_not_affect_other_zones_in_the_same_place_class():

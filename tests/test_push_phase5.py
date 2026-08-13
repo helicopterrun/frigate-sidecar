@@ -120,7 +120,7 @@ async def test_snoozed_camera_skips_push(sidecar_db_path: Path):
     assert situation_sends(transport) == []
     assert la_sends(transport) == []
     # Card state still advances despite snooze.
-    card = card_store.get_card(conn, "doorbell:stranger:trk1")
+    card = card_store.get_card(conn, "doorbell:person:trk1")
     assert card is not None
 
 
@@ -148,6 +148,8 @@ async def test_global_snooze_skips_push(sidecar_db_path: Path):
 
 @pytest.mark.asyncio
 async def test_rate_cap_silences_11th_sounding_push(sidecar_db_path: Path):
+    policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
+
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device()
@@ -171,6 +173,8 @@ async def test_rate_cap_silences_11th_sounding_push(sidecar_db_path: Path):
 
 @pytest.mark.asyncio
 async def test_rate_cap_plus_n_more_on_next_sounding(sidecar_db_path: Path):
+    policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
+
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device()
@@ -264,8 +268,10 @@ class TestQuietHours:
 
 
 @pytest.mark.asyncio
-async def test_mute_sounds_suppresses_card(sidecar_db_path: Path):
-    """mute_sounds feeds Snapshot.muted → ladder returns SUPPRESSED → no push."""
+async def test_mute_sounds_strips_sound_not_suppresses(sidecar_db_path: Path):
+    """mute_sounds is a sound-only control: the card pushes normally at its
+    evaluated level but with sound stripped. Previously mute fed
+    Snapshot.muted → SUPPRESSED; now it just drops the sound key."""
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device()
@@ -279,11 +285,11 @@ async def test_mute_sounds_suppresses_card(sidecar_db_path: Path):
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
-    assert situation_sends(transport) == []
-    # Card is still persisted (suppressed state).
-    card = card_store.get_card(conn, "doorbell:stranger:trk1")
-    assert card is not None
-    assert card.closed is True
+    sends = situation_sends(transport)
+    assert len(sends) == 1
+    aps = sends[0]["payload"]["aps"]
+    assert aps["interruption-level"] == "time-sensitive"
+    assert "sound" not in aps
 
 
 # ---------------------------------------------------------------------------
@@ -295,24 +301,24 @@ class TestPayloadFields:
     def _make_card(self):
         from frigate_sidecar.push.cards import Card
         return Card(
-            card_key="doorbell:stranger:trk1", level="notify",
+            card_key="doorbell:person:trk1", level="notify",
             created_at=0.0, updated_at=10.0, state_since_at=0.0,
         )
 
     def test_thread_id_is_camera(self):
         payload = build_card_payload(
-            self._make_card(), "create", sound=True, subject_kind="stranger",
+            self._make_card(), "create", sound=True, subject_kind="person",
             place_class="doors", camera="doorbell", zone_name="front_door",
-            glyph="person.stranger", primary="Person at Front Door",
+            glyph="person.detected", primary="Person at Front Door",
             secondary="Front Door · 10s", event_ts=10.0,
         )
         assert payload["aps"]["thread-id"] == "doorbell"
 
     def test_category_matches_level(self):
         payload = build_card_payload(
-            self._make_card(), "create", sound=True, subject_kind="stranger",
+            self._make_card(), "create", sound=True, subject_kind="person",
             place_class="doors", camera="doorbell", zone_name="front_door",
-            glyph="person.stranger", primary="Person", secondary="10s",
+            glyph="person.detected", primary="Person", secondary="10s",
             event_ts=10.0,
         )
         assert payload["aps"]["category"] == "card.notify"

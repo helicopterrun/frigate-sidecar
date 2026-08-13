@@ -229,7 +229,19 @@ class PushEngine:
         now = time.time()
         self.tracks.observe_object(obj.camera, obj.track_id, obj.current_zones, now=now)
         if obj.sub_label:
+            old_sub = self._sub_labels.get(key)
             self._sub_labels[key] = obj.sub_label
+            if obj.sub_label != old_sub and self.push_config is not None and self.push_config.delivery_enabled:
+                conn = self._conn()
+                try:
+                    devices = store.list_devices(conn)
+                    await delivery_wire.handle_recognition_event(
+                        obj.camera, obj.track_id, obj.sub_label,
+                        conn=conn, devices=devices, transport=self.transport,
+                        config=self.push_config, label=obj.label, now=now,
+                    )
+                finally:
+                    conn.close()
         self._maybe_gc(now)
         return 0
 

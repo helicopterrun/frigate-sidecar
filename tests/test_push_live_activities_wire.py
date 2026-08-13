@@ -305,7 +305,7 @@ async def test_card_push_demoted_to_silent_while_la_confirmed(sidecar_db_path: P
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:stranger:trk1"
+    card_key = "doorbell:person:trk1"
 
     # create: person at front_door -> notify; LA start accepted by the mock
     # transport, so the create card push is demoted.
@@ -343,6 +343,9 @@ async def test_card_push_not_demoted_when_la_unconfirmed(sidecar_db_path: Path):
     materializes must not eat the banner. A device with no push-to-start
     token gets a full-fat card push; so does an escalate whose LA row has
     no per-activity token yet."""
+    from frigate_sidecar.push import policy_settings
+    policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
+
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     no_pts = make_device(push_to_start="")
@@ -372,10 +375,9 @@ async def test_card_push_not_demoted_when_la_unconfirmed(sidecar_db_path: Path):
     )
     esc_aps = card_sends(transport2)[-1]["payload"]["aps"]
     assert esc_aps["interruption-level"] == "time-sensitive"  # urgent, undemoted
-    assert esc_aps.get("sound")
     # And the token-less row was kept alive for the sweeper.
     row = find_activity_row(
-        conn, apns_token=device.apns_token, card_key="porch:stranger:trkB", track_id="trkB",
+        conn, apns_token=device.apns_token, card_key="porch:person:trkB", track_id="trkB",
     )
     assert row is not None and row["ended_at"] is None
 
@@ -590,6 +592,7 @@ async def test_la_only_off_disabled_family_skips_without_fallback(sidecar_db_pat
     config = PushSection(delivery_enabled=True)
 
     settings = policy_settings.default_settings()
+    settings["mute_sounds"] = False
     settings["live_activities"]["person"] = False
     policy_settings.apply_settings(settings)
 
@@ -636,6 +639,9 @@ async def test_multi_device_demotion_is_per_device(sidecar_db_path: Path):
     """Coverage is per-device: device A's confirmed LA demotes only A's card
     push; device B (no push-to-start token, so no LA) keeps the full
     alerting card. A single OR-ed coverage bool would silence B entirely."""
+    from frigate_sidecar.push import policy_settings
+    policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
+
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     dev_a = make_device(token="tokA")                      # LA-capable
@@ -664,19 +670,32 @@ async def test_multi_device_demotion_is_per_device(sidecar_db_path: Path):
 async def test_urgent_escalation_la_update_carries_sound(sidecar_db_path: Path):
     """When a card escalates to urgent and an LA covers the device, the LA
     update alert must carry sound: urgent.caf — the card push is demoted to
-    silent, so the LA is the only surface that can sound."""
+    silent, so the LA is the only surface that can sound. Uses a custom
+    routing table where person+doors=quiet so the create doesn't spend
+    the one-sound budget while still qualifying for the person LA family."""
+    from frigate_sidecar.push import ladder_policy, policy_settings
+
+    settings = policy_settings.default_settings()
+    settings["mute_sounds"] = False
+    policy_settings.apply_settings(settings)
+    custom_table = {k: dict(v) for k, v in ladder_policy.TABLE.items()}
+    custom_table["person"]["doors"] = "quiet"
+    ladder_policy.set_table(custom_table)
+
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:stranger:trk1"
+    card_key = "doorbell:person:trk1"
 
+    # Create at quiet (person at front_door, custom table): LA starts, no sound.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
 
+    # Escalate to urgent (pool = off_limits): first sound.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
@@ -697,11 +716,14 @@ async def test_notify_escalation_la_update_alert_no_sound(sidecar_db_path: Path)
     only urgent escalation gets sound on the LA update. Verified via the
     person-at-doors create: the LA start (required by iOS) has the start
     sound, but any subsequent update at notify level carries no sound."""
+    from frigate_sidecar.push import policy_settings
+    policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
+
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:stranger:trk1"
+    card_key = "doorbell:person:trk1"
 
     # Create at notify: LA start carries a sound (at-the-door.caf).
     await handle_delivery_event(
@@ -726,23 +748,33 @@ async def test_notify_escalation_la_update_alert_no_sound(sidecar_db_path: Path)
 
 @pytest.mark.asyncio
 async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: Path):
-    """The per-card sound budget (2) caps the LA update sound the same way it
-    capped the card-push sound: after create (sound #1) + first escalation
-    (sound #2), a re-escalation gets an alert but no sound."""
+    """The per-card sound budget (1) caps the LA update sound: after the
+    first sounded escalation (quiet→urgent), a re-escalation gets an alert
+    but no sound. Uses custom routing (person+doors=quiet) so the create
+    doesn't spend the budget while still qualifying for the person LA."""
+    from frigate_sidecar.push import ladder_policy, policy_settings
+
+    settings = policy_settings.default_settings()
+    settings["mute_sounds"] = False
+    policy_settings.apply_settings(settings)
+    custom_table = {k: dict(v) for k, v in ladder_policy.TABLE.items()}
+    custom_table["person"]["doors"] = "quiet"
+    ladder_policy.set_table(custom_table)
+
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:stranger:trk1"
+    card_key = "doorbell:person:trk1"
 
-    # Sound #1: create at notify.
+    # Create at quiet (person at front_door, custom table): LA starts, no sound.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
 
-    # Sound #2: escalate to urgent.
+    # Sound #1: escalate to urgent.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
@@ -756,7 +788,7 @@ async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: P
         conn=conn, devices=[device], transport=transport, config=config, now=20.0,
     )
 
-    # Re-escalate to urgent: budget exhausted (sound_count=2), no sound.
+    # Re-escalate to urgent: budget exhausted (sound_count=1), no sound.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=30.0,
@@ -768,18 +800,25 @@ async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: P
 
 @pytest.mark.asyncio
 async def test_mute_sounds_strips_la_update_sound(sidecar_db_path: Path):
-    """Global mute_sounds prevents the LA from alerting or sounding —
-    the ladder returns SUPPRESSED, so the update carries no alert dict
-    and no sound key."""
-    from frigate_sidecar.push import policy_settings
+    """Global mute_sounds strips the sound key from urgent LA updates but
+    still carries the alert dict (title/body) for haptic pop — muted is a
+    sound-only control, not a suppression gate."""
+    from frigate_sidecar.push import ladder_policy, policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:stranger:trk1"
+    card_key = "doorbell:person:trk1"
 
-    # Create at notify without mute — LA starts.
+    # Custom table: person+doors=quiet so create doesn't spend sound budget.
+    unmuted = policy_settings.default_settings()
+    unmuted["mute_sounds"] = False
+    policy_settings.apply_settings(unmuted)
+    custom_table = {k: dict(v) for k, v in ladder_policy.TABLE.items()}
+    custom_table["person"]["doors"] = "quiet"
+    ladder_policy.set_table(custom_table)
+
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
@@ -798,14 +837,20 @@ async def test_mute_sounds_strips_la_update_sound(sidecar_db_path: Path):
     updates = [s for s in la_sends(transport) if s["event"] == "update"]
     assert len(updates) >= 1
     last = updates[-1]
-    assert "alert" not in last["payload"]["aps"]
-    assert "sound" not in last["payload"]["aps"]
+    alert = last["payload"]["aps"].get("alert")
+    assert alert is not None
+    assert alert["title"]
+    assert alert["body"]
+    assert "sound" not in alert
 
 
 @pytest.mark.asyncio
 async def test_uncovered_urgent_card_keeps_card_push_sound(sidecar_db_path: Path):
     """When no LA covers the device (no push-to-start token), the card push
     retains its sound — the demotion only fires for LA-covered devices."""
+    from frigate_sidecar.push import policy_settings
+    policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
+
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device(push_to_start="")
@@ -820,3 +865,97 @@ async def test_uncovered_urgent_card_keeps_card_push_sound(sidecar_db_path: Path
     assert len(cards) == 1
     assert cards[0]["payload"]["aps"]["sound"] == "urgent.caf"
     assert cards[0]["payload"]["aps"]["interruption-level"] == "time-sensitive"
+
+
+@pytest.mark.asyncio
+async def test_muted_urgent_escalation_la_carries_alert_without_sound(sidecar_db_path: Path):
+    """Change 1: muted urgent escalation LA update carries alert dict
+    (title/body) for haptic pop but no sound key."""
+    from frigate_sidecar.push import ladder_policy, policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+    card_key = "doorbell:person:trk1"
+
+    # Custom table: person+doors=quiet so create doesn't spend sound budget.
+    settings = policy_settings.default_settings()
+    settings["mute_sounds"] = False
+    policy_settings.apply_settings(settings)
+    custom_table = {k: dict(v) for k, v in ladder_policy.TABLE.items()}
+    custom_table["person"]["doors"] = "quiet"
+    ladder_policy.set_table(custom_table)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
+
+    # Enable mute, then escalate to urgent.
+    settings["mute_sounds"] = True
+    policy_settings.apply_settings(settings)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+    update = [s for s in la_sends(transport) if s["event"] == "update"][-1]
+    alert = update["payload"]["aps"]["alert"]
+    assert alert is not None
+    assert alert["title"]
+    assert alert["body"]
+    assert "sound" not in alert
+
+
+@pytest.mark.asyncio
+async def test_muted_urgent_uncovered_card_keeps_time_sensitive_no_sound(sidecar_db_path: Path):
+    """Change 1: muted urgent card push (no LA) keeps interruption-level
+    time-sensitive but drops sound."""
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device(push_to_start="")
+    config = PushSection(delivery_enabled=True)
+
+    settings = policy_settings.default_settings()
+    settings["mute_sounds"] = True
+    policy_settings.apply_settings(settings)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    assert la_sends(transport) == []
+    cards = card_sends(transport)
+    assert len(cards) == 1
+    aps = cards[0]["payload"]["aps"]
+    assert aps["interruption-level"] == "time-sensitive"
+    assert "sound" not in aps
+
+
+@pytest.mark.asyncio
+async def test_muted_notify_stays_non_alerting(sidecar_db_path: Path):
+    """Muted notify: card pushes without sound, no escalation to alerting."""
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device(push_to_start="")
+    config = PushSection(delivery_enabled=True)
+
+    settings = policy_settings.default_settings()
+    settings["mute_sounds"] = True
+    policy_settings.apply_settings(settings)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    cards = card_sends(transport)
+    assert len(cards) == 1
+    aps = cards[0]["payload"]["aps"]
+    assert aps["interruption-level"] == "active"
+    assert "sound" not in aps

@@ -30,7 +30,7 @@ import time
 from typing import TYPE_CHECKING
 
 from frigate_sidecar.push import card_store, live_activities, policy_settings, store
-from frigate_sidecar.push.cards import CREATE, ENRICH, ESCALATE, RESOLVE, Card
+from frigate_sidecar.push.cards import CREATE, DEESCALATE, ENRICH, ESCALATE, RESOLVE, Card
 from frigate_sidecar.push.delivery import (
     _device_eligible,
     _is_snoozed,
@@ -74,10 +74,13 @@ logger = logging.getLogger(__name__)
 #: dangerous-animal labels `ladder.py` already reclassifies via `label`
 #: regardless of what subject is passed in.
 _ANIMAL_LABELS = frozenset({"dog", "cat", "bird", "deer", "squirrel", "raccoon", "bear", "skunk"})
+_VEHICLE_LABELS = frozenset({"car", "motorcycle", "bicycle"})
 
 _SUBJECT_GLYPH = {
     "stranger": "person.stranger",
     "known": "person.identified",
+    "person": "person.detected",
+    "vehicle": "vehicle.detected",
     "animal": "animal.seen",
     "thing": "thing.detected",
 }
@@ -85,19 +88,21 @@ _SUBJECT_GLYPH = {
 _SUBJECT_COPY = {
     "stranger": "Person",
     "known": "Person",
+    "person": "Person",
+    "vehicle": "Vehicle",
     "animal": "Animal",
 }
 
 
 def classify_subject(event: ReviewEvent) -> str:
-    """Best-effort subject classification off `frigate/reviews` alone.
-    `sub_labels` (Phase 5) is the only signal available yet for a resolved
-    identity; its presence is read as "known", its absence as "stranger" for
-    a person label -- never the reverse, so copy never claims an identity
-    that hasn't resolved (design doc §5)."""
+    """Observable-subject classification (routing v2): label, camera, zone
+    only. Identity (sub_label/plate) is never consulted at create time —
+    it arrives later via recognition and only relaxes a running story."""
     labels = set(event.labels)
     if "person" in labels:
-        return "known" if event.sub_labels else "stranger"
+        return "person"
+    if labels & _VEHICLE_LABELS:
+        return "vehicle"
     if labels & _ANIMAL_LABELS:
         return "animal"
     return "thing"
@@ -145,11 +150,16 @@ def snapshot_from_review(
 
 def _copy(
     subject_kind: str, label: str, camera: str, zone_name: str, elapsed_s: float,
+    identity: str = "",
 ) -> tuple[str, str]:
     subject_text = _SUBJECT_COPY.get(subject_kind) or pretty_label(label) or "Motion"
     place_text = zone_name or camera
-    primary = f"{subject_text} at {place_text.replace('_', ' ').title()}"
-    secondary = f"{place_text.replace('_', ' ').title()} · {int(elapsed_s)}s"
+    place_pretty = place_text.replace("_", " ").title()
+    if identity:
+        primary = f"{identity} · at {place_pretty}"
+    else:
+        primary = f"{subject_text} at {place_pretty}"
+    secondary = f"{place_pretty} · {int(elapsed_s)}s"
     return primary, secondary
 
 
@@ -569,7 +579,6 @@ async def handle_delivery_event(
     snapshot, subject_kind, place_class = snapshot_from_review(
         event, zone_classes=policy["zone_classes"],
         nobody_home=nobody_home, night=night, dwell_exceeded=dwell_exceeded,
-        muted=muted,
     )
     level = evaluate_ladder(snapshot)
 
@@ -594,8 +603,14 @@ async def handle_delivery_event(
         card, mutation, sound = _advance_card(existing, level, card_key=card_key, now=now)
 
         elapsed = max(0.0, now - card.state_since_at)
+        identity = event.sub_labels[0] if event.sub_labels else ""
+        if not identity and engine is not None:
+            identity = getattr(engine, "_sub_labels", {}).get(
+                (event.camera, track_id), ""
+            )
         primary, secondary = _copy(
             subject_kind, snapshot.label, owning_camera, zone_name, elapsed,
+            identity=identity,
         )
         if owning_camera != event.camera:
             # A second camera is now contributing to a card it didn't
@@ -799,3 +814,108 @@ async def handle_delivery_resolve(
         conn.commit()
         resolved += 1
     return resolved
+
+
+def _relaxed_level(current_level: str, mode: str) -> str | None:
+    """Compute the target level for a recognition relaxation. Returns the
+    new level, or ``None`` if no change."""
+    from frigate_sidecar.push import ladder_policy
+
+    levels = ladder_policy.LEVELS
+    idx = levels.index(current_level)
+    if mode == "relax_one":
+        target = max(0, idx - 1)
+    elif mode == "relax_to_quiet":
+        target = min(idx, levels.index("quiet"))
+    else:
+        return None
+    return levels[target] if target < idx else None
+
+
+async def handle_recognition_event(
+    camera: str,
+    track_id: str,
+    sub_label: str,
+    *,
+    conn: sqlite3.Connection,
+    devices: list[Device],
+    transport: PushTransport,
+    config: PushSection,
+    label: str = "person",
+    now: float | None = None,
+) -> int:
+    """A face sub_label or plate landed on a tracked object — check
+    recognition settings and emit a silent deescalate if applicable.
+
+    Identity-driven mutations are always silent: no sound, no LA alert,
+    regardless of mute settings (design brief: "watching the instrument
+    calm itself down is the feature")."""
+    if not config.delivery_enabled:
+        return 0
+    now = time.time() if now is None else now
+    policy = policy_settings.get_active()
+    recognition = policy.get("recognition", {})
+
+    if label == "person" or label in _ANIMAL_LABELS:
+        mode = recognition.get("known_person", "off")
+        subject_kind = "person"
+    elif label in _VEHICLE_LABELS:
+        mode = recognition.get("known_vehicle", "off")
+        subject_kind = "vehicle"
+    else:
+        return 0
+
+    if mode == "off" or not sub_label:
+        return 0
+
+    card_key = build_card_key(camera=camera, subject_kind=subject_kind, subject_id=track_id)
+    existing = card_store.get_card(conn, card_key)
+    if existing is None or existing.closed or existing.resolved:
+        return 0
+
+    target_level = _relaxed_level(existing.level, mode)
+    if target_level is None:
+        return 0
+
+    card, mutation, _sound = _advance_card(
+        existing, target_level, card_key=card_key, now=now,
+    )
+    if mutation != DEESCALATE:
+        return 0
+
+    context = card_store.get_card_context(conn, card_key) or {}
+    zone_name = context.get("zone_name", "")
+    place_class = context.get("place_class", "")
+    owning_camera = context.get("camera", camera)
+    elapsed = max(0.0, now - card.state_since_at)
+    primary, secondary = _copy(
+        subject_kind, label, owning_camera, zone_name, elapsed, identity=sub_label,
+    )
+
+    la_covered = await _deliver_live_activities(
+        conn, devices, transport, config=config, card=card, mutation=mutation,
+        family=None, camera=owning_camera, subject_kind=subject_kind, label=label,
+        primary=primary, secondary=secondary, elapsed_seconds=int(elapsed),
+        media_handle=None, now=now, sound_allowed=False,
+    )
+    payload = None
+    if should_push(card.level):
+        payload = build_card_payload(
+            card, mutation, sound=False, subject_kind=subject_kind,
+            place_class=place_class, label=label, camera=owning_camera,
+            zone_name=zone_name, glyph=_glyph_for(subject_kind, label),
+            primary=primary, secondary=secondary, event_ts=now,
+            la_active=True,
+        )
+    await send_card_mutation(
+        conn, transport, devices, card, mutation, payload,
+        subject_kind=subject_kind, place_class=place_class,
+        camera=owning_camera, zone_name=zone_name, now=now,
+        demote_tokens=la_covered,
+    )
+    conn.commit()
+    logger.info(
+        "recognition: %s on %s:%s -> deescalate %s->%s (mode=%s)",
+        sub_label, camera, track_id, existing.level, target_level, mode,
+    )
+    return 1

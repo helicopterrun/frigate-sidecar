@@ -43,6 +43,13 @@ from frigate_sidecar.push import ladder_policy as policy
 
 SUPPRESSED = "suppressed"
 
+#: Routing v2 subjects that don't exist in the v1 TABLE fall back to the
+#: most-cautious v1 equivalent so the evaluator works regardless of which
+#: table is loaded. The reverse mapping handles v1 subjects against a v2
+#: TABLE (e.g. tests that construct Snapshots with legacy subject names).
+_V2_TO_V1 = {"person": "stranger", "vehicle": "thing"}
+_V1_TO_V2 = {"stranger": "person", "known": "person"}
+
 
 @dataclass(frozen=True)
 class Snapshot:
@@ -83,14 +90,18 @@ def evaluate_ladder(snapshot: Snapshot) -> str:
 
     subject = snapshot.subject
     if snapshot.label in policy.DANGEROUS_ANIMAL_LABELS:
-        subject = "stranger"
+        subject = "person" if "person" in policy.TABLE else "stranger"
 
     override = policy.ZONE_OVERRIDES.get(snapshot.zone, {}).get(subject)
     if override is not None:
         return override
 
     levels = policy.LEVELS
-    idx = levels.index(policy.TABLE[subject][snapshot.place])
+    if subject in policy.TABLE:
+        table_subject = subject
+    else:
+        table_subject = _V2_TO_V1.get(subject) or _V1_TO_V2.get(subject) or subject
+    idx = levels.index(policy.TABLE[table_subject][snapshot.place])
 
     if subject != "animal":
         worry = sum(1 for r in policy.WORRY_REASONS if getattr(snapshot, r))
@@ -100,7 +111,7 @@ def evaluate_ladder(snapshot: Snapshot) -> str:
             step = 0
         idx = max(0, min(len(levels) - 1, idx + step))
 
-    if subject in ("stranger", "known") and snapshot.child_hazard_zone:
+    if subject in ("stranger", "known", "person") and snapshot.child_hazard_zone:
         idx = max(idx, levels.index("notify"))
 
     if snapshot.place == "street":

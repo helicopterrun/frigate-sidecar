@@ -151,7 +151,8 @@ def test_put_applies_immediately_to_the_routing_engine(client: TestClient):
     from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
 
     new_settings = policy_settings.default_settings()
-    new_settings["routing_table"]["thing"]["yard"] = "urgent"
+    table_key = "routing_table_v2" if "routing_table_v2" in new_settings else "routing_table"
+    new_settings[table_key]["thing"]["yard"] = "urgent"
     client.put("/v1/push/settings", json=new_settings)
 
     assert evaluate_ladder(Snapshot(subject="thing", place="yard")) == "urgent"

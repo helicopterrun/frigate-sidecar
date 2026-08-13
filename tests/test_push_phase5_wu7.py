@@ -152,6 +152,8 @@ async def test_silent_push_does_not_spend_rate_budget(sidecar_db_path: Path):
 @pytest.mark.asyncio
 async def test_rate_cap_window_slides(sidecar_db_path: Path):
     """Sends older than 1 hour don't count — the 11th push sounds if old ones aged out."""
+    policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
+
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = _device()
@@ -210,14 +212,14 @@ def test_urgent_resound_not_due_when_handled():
 def test_resound_payload_is_escalate_with_sound():
     """A re-sound on the wire looks like an escalate with aps.sound set."""
     card = Card(
-        card_key="doorbell:stranger:trk1", level="urgent",
+        card_key="doorbell:person:trk1", level="urgent",
         created_at=0, updated_at=0, state_since_at=0,
         last_sound_at=0, resound_count=1, peak_level="urgent",
     )
     card = apply_urgent_resound(card, now=500.0)
     payload = build_card_payload(
-        card, "escalate", sound=True, subject_kind="stranger", place_class="off_limits",
-        camera="doorbell", zone_name="pool", glyph="person.stranger",
+        card, "escalate", sound=True, subject_kind="person", place_class="off_limits",
+        camera="doorbell", zone_name="pool", glyph="person.detected",
         primary="Person at Pool", secondary="Pool · 500s", event_ts=500.0,
     )
     assert payload["mutation"] == "escalate"
@@ -241,9 +243,9 @@ async def test_resound_stops_on_resolve(sidecar_db_path: Path):
     # Resolve it
     await handle_delivery_resolve(
         "doorbell", "trk1", conn=conn, devices=[device], transport=transport,
-        config=config, subject_kind="stranger", now=500.0,
+        config=config, subject_kind="person", now=500.0,
     )
-    card = card_store.get_card(conn, "doorbell:stranger:trk1")
+    card = card_store.get_card(conn, "doorbell:person:trk1")
     assert card is not None
     assert card.resolved
     assert not urgent_resound_due(card, now=999, interval_s=120, enabled=True)
@@ -295,10 +297,9 @@ async def test_quiet_hours_cap_quiet_exempts_urgent(sidecar_db_path: Path):
 
 @pytest.mark.asyncio
 async def test_quiet_hours_cap_quiet_with_mute_sounds_does_not_crash(sidecar_db_path: Path):
-    """2026-08-11 production incident: mute_sounds=True makes evaluate_ladder
-    return SUPPRESSED, which isn't in ladder_policy.LEVELS -- the cap_quiet
-    block's unconditional `.index(level)` raised ValueError and took the
-    whole MQTT subscriber down for 41 hours. Must no-op, not raise."""
+    """mute_sounds + cap_quiet: mute is now a sound-only control (not
+    suppression), so the card evaluates normally, cap_quiet caps notify→quiet,
+    and mute strips sound. Must push at quiet level with no sound."""
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = _device()
@@ -313,8 +314,10 @@ async def test_quiet_hours_cap_quiet_with_mute_sounds_does_not_crash(sidecar_db_
         _event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=100.0,
     )
-    # No push -- SUPPRESSED never reaches a payload (should_push(SUPPRESSED) is False).
-    assert _sit_sends(transport) == []
+    sends = _sit_sends(transport)
+    assert len(sends) == 1
+    assert sends[0]["payload"]["level"] == "quiet"
+    assert "sound" not in sends[0]["payload"]["aps"]
 
 
 @pytest.mark.asyncio
@@ -347,6 +350,7 @@ async def test_quiet_hours_mute_sounds_exempts_urgent(sidecar_db_path: Path):
     config = PushSection(delivery_enabled=True)
 
     settings = policy_settings.default_settings()
+    settings["mute_sounds"] = False
     settings["quiet_hours"] = {"start": "00:00", "end": "23:59", "mode": "mute_sounds"}
     policy_settings.apply_settings(settings)
 
@@ -605,14 +609,14 @@ class TestSoundFilenames:
 
     def test_la_start_attributes_match_swift_contract(self):
         state = build_content_state(
-            level="notify", mutation="create", glyph="stranger.person",
+            level="notify", mutation="create", glyph="person.detected",
             primary="P", secondary="S", elapsed_seconds=0,
-            card_key="doorbell:stranger:t1",
+            card_key="doorbell:person:t1",
             thumbnail_handle="h_abc", thumbnail_revision=1,
         )
         payload = build_la_start_payload(
             content_state=state, family="person", camera="doorbell",
-            track_id="t1", card_key="doorbell:stranger:t1", now=1000.0,
+            track_id="t1", card_key="doorbell:person:t1", now=1000.0,
         )
         attrs = payload["aps"]["attributes"]
         assert set(attrs) == {"card_key", "family", "camera", "track_id"}
@@ -640,13 +644,13 @@ class TestSoundFilenames:
 
     def test_build_card_payload_sound_uses_label(self):
         card = Card(
-            card_key="doorbell:stranger:t1", level="notify", peak_level="notify",
+            card_key="doorbell:person:t1", level="notify", peak_level="notify",
             sound_count=0, state_since_at=1000.0, created_at=1000.0, updated_at=1000.0,
         )
         payload = build_card_payload(
-            card, "create", sound=True, subject_kind="stranger",
+            card, "create", sound=True, subject_kind="person",
             place_class="doors", label="person", camera="doorbell",
-            zone_name="front_door", glyph="stranger.person",
+            zone_name="front_door", glyph="person.detected",
             primary="Someone at Front Door", secondary="Front Door · 0s",
             event_ts=1000.0,
         )
@@ -699,12 +703,12 @@ async def test_la_push_to_start_persists_across_mutations(tmp_path):
     conn_attach = engine._conn()
     activity_row = store.find_activity(
         conn_attach, apns_token=dev.apns_token,
-        situation_id="doorbell:stranger:trk1", track_id="trk1",
+        situation_id="doorbell:person:trk1", track_id="trk1",
     )
     assert activity_row is not None, "activity row must survive conn1.close()"
     store.attach_activity_token(
         conn_attach, activity_id=activity_row["activity_id"],
-        apns_token=dev.apns_token, situation_id="doorbell:stranger:trk1",
+        apns_token=dev.apns_token, situation_id="doorbell:person:trk1",
         track_id="trk1", token="per-activity-tok",
     )
     conn_attach.commit()
@@ -724,3 +728,74 @@ async def test_la_push_to_start_persists_across_mutations(tmp_path):
     assert len(la_updates) >= 1, (
         "LA update should fire on enrich (activity row must survive conn.close)"
     )
+
+
+# ── 10. mute_sounds refinements ────────────────────────────────────────────
+
+
+def test_fresh_settings_default_muted():
+    """Change 2: fresh settings (no stored value) default mute_sounds=True."""
+    settings = policy_settings.default_settings()
+    assert settings["mute_sounds"] is True
+
+
+@pytest.mark.asyncio
+async def test_unmuted_story_sounded_at_start_silent_at_escalation(sidecar_db_path: Path):
+    """Change 3: one sound per story — a card that sounded at create doesn't
+    sound again at escalation."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = _device(push_to_start="")
+    config = PushSection(delivery_enabled=True)
+
+    settings = policy_settings.default_settings()
+    settings["mute_sounds"] = False
+    policy_settings.apply_settings(settings)
+
+    # Create at notify: sounds (budget spent).
+    await handle_delivery_event(
+        _event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    create_aps = _sit_sends(transport)[0]["payload"]["aps"]
+    assert create_aps.get("sound")
+
+    # Escalate to urgent: no sound (budget exhausted).
+    await handle_delivery_event(
+        _event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+    esc_aps = _sit_sends(transport)[-1]["payload"]["aps"]
+    assert esc_aps["interruption-level"] == "time-sensitive"
+    assert "sound" not in esc_aps
+
+
+@pytest.mark.asyncio
+async def test_unmuted_story_silent_at_start_sounds_at_urgent(sidecar_db_path: Path):
+    """Change 3: a story that was silent at create (quiet level) still sounds
+    when it escalates to urgent."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = _device(push_to_start="")
+    config = PushSection(delivery_enabled=True)
+
+    settings = policy_settings.default_settings()
+    settings["mute_sounds"] = False
+    policy_settings.apply_settings(settings)
+
+    # Create at quiet (person at yard): no sound.
+    await handle_delivery_event(
+        _event("doorbell", "trk1", "person", zones=("yard",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    create_aps = _sit_sends(transport)[0]["payload"]["aps"]
+    assert "sound" not in create_aps
+
+    # Escalate to urgent (pool): sounds (budget still available).
+    await handle_delivery_event(
+        _event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+    esc_aps = _sit_sends(transport)[-1]["payload"]["aps"]
+    assert esc_aps["interruption-level"] == "time-sensitive"
+    assert esc_aps.get("sound") == "urgent.caf"

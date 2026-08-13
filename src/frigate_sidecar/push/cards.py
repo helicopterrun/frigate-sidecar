@@ -31,11 +31,10 @@ DEESCALATE = "deescalate"  # "gets quieter": new level < old level
 RESOLVE = "resolve"
 SUPPRESSED = "suppressed"
 
-#: Sound is spent at most twice by ordinary policy: once at create (if the
-#: level warrants it), once at the first escalate. A third, urgent-only
-#: re-sound is accounted separately (`Card.resound_count`) -- see
-#: `urgent_resound_due`.
-SOUND_BUDGET = 2
+#: One sound per story: a card that sounded at create doesn't sound again
+#: at escalation. If create was silent (quiet level), escalation can still
+#: sound. The urgent re-sound cadence is separate (`Card.resound_count`).
+SOUND_BUDGET = 1
 
 #: Levels the level->APNs mapping (`delivery.py`) sends a push for at all.
 #: `log` and `suppressed` never reach a card as a *visible* mutation; `log`
@@ -139,15 +138,10 @@ def classify_mutation(existing: Card | None, new_level: str, *, resolved: bool =
 
 def should_sound(card: Card, mutation: str, new_level: str) -> bool:
     """Whether *this* mutation spends a sound, against the per-card budget
-    (`SOUND_BUDGET = 2`: create + first escalate). `quiet` never sounds even
-    when budget remains -- the level->APNs table says so regardless of
-    mutation kind. Deescalate/enrich/resolve never sound by definition (the
-    ladder table in the design doc).
-
-    Budget accounting is by *sounds emitted*, not by beats: a quiet create
-    emits no sound and does not spend budget, so a card's first-ever
-    escalation past `quiet` can still be sound #1, and a second escalation
-    (e.g. quiet -> notify -> urgent) can be sound #2.
+    (`SOUND_BUDGET = 1`: one sound per story). A card that sounded at create
+    doesn't sound again at escalation; if create was silent (quiet level),
+    escalation can still sound. `quiet` never sounds even when budget
+    remains. Deescalate/enrich/resolve never sound by definition.
     """
     if mutation not in (CREATE, ESCALATE):
         return False

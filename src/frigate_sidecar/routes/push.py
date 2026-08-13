@@ -625,6 +625,9 @@ async def get_push_settings(request: Request) -> dict[str, Any]:
         "available_openings": policy_settings.build_available_openings(
             settings.frigate.config_path
         ),
+        "recognition_available": policy_settings.probe_recognition_available(
+            settings.frigate.config_path
+        ),
     }
 
 

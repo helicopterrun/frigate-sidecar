@@ -78,7 +78,7 @@ def sound_name_for_card(level: str, subject_kind: str = "", label: str = "") -> 
     """Per-family/level sound name from the app's .caf catalog."""
     if level == "urgent":
         return "urgent.caf"
-    if subject_kind in ("stranger", "known") and label == "person":
+    if subject_kind in ("stranger", "known", "person") and label == "person":
         return "at-the-door.caf"
     if label == "package":
         return "package-delivery.caf"

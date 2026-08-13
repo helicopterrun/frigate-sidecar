@@ -88,6 +88,8 @@ _OPENING_GLYPH = {
 _CATCH_ALL_GLYPH = {
     "stranger": "figure.walk",
     "known": "figure.wave",
+    "person": "figure.walk",
+    "vehicle": "car.fill",
     "animal": "pawprint.fill",
     "thing": "cube.fill",
 }
@@ -108,7 +110,7 @@ def classify_family(*, subject_kind: str, label: str, place_class: str) -> str |
         return BINS
     if subject_kind == "thing" and label in _OPENING_LABELS:
         return OPENINGS
-    if subject_kind in ("stranger", "known") and place_class == "doors":
+    if subject_kind in ("stranger", "known", "person") and place_class == "doors":
         return PERSON
     return None
 

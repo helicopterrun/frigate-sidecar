@@ -168,6 +168,9 @@ async def test_dry_run_scenario_notify_resolve():
 
 @pytest.mark.asyncio
 async def test_dry_run_scenario_escalate_urgent():
+    from frigate_sidecar.push import policy_settings
+    policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
+
     path = replay_card.resolve_scenario_path("card-escalate-urgent")
     scenario = replay_card.load_scenario(path)
     messages = replay_card.build_messages(scenario, run_id="drytest")

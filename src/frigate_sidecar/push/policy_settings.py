@@ -40,8 +40,10 @@ from frigate_sidecar.push.live_activities import FAMILIES
 SETTINGS_VERSION = 1
 
 SUBJECTS = ("stranger", "known", "animal", "thing")
+SUBJECTS_V2 = ("person", "vehicle", "animal", "thing")
 PLACES = ("street", "yard", "doors", "private", "off_limits")
 LEVELS = ladder_policy.LEVELS
+RECOGNITION_MODES = ("off", "relax_one", "relax_to_quiet")
 
 #: The routing table a freshly onboarded settings file starts the user at
 #: (design doc §1, "match the v3 brief's §1.4 table exactly").
@@ -62,6 +64,30 @@ DEFAULT_ROUTING_TABLE: dict[str, dict[str, str]] = {
         "street": "log", "yard": "log", "doors": "log",
         "private": "log", "off_limits": "quiet",
     },
+}
+
+DEFAULT_ROUTING_TABLE_V2: dict[str, dict[str, str]] = {
+    "person": {
+        "street": "log", "yard": "quiet", "doors": "notify",
+        "private": "notify", "off_limits": "urgent",
+    },
+    "vehicle": {
+        "street": "log", "yard": "quiet", "doors": "quiet",
+        "private": "quiet", "off_limits": "notify",
+    },
+    "animal": {
+        "street": "log", "yard": "quiet", "doors": "quiet",
+        "private": "quiet", "off_limits": "quiet",
+    },
+    "thing": {
+        "street": "log", "yard": "log", "doors": "log",
+        "private": "log", "off_limits": "quiet",
+    },
+}
+
+DEFAULT_RECOGNITION: dict[str, str] = {
+    "known_person": "relax_one",
+    "known_vehicle": "relax_one",
 }
 
 #: Zone-name -> place-class guessing heuristic (design doc §5), checked in
@@ -146,20 +172,16 @@ def default_settings() -> dict[str, Any]:
     return {
         "v": SETTINGS_VERSION,
         "routing_table": {subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE.items()},
+        "routing_table_v2": {subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE_V2.items()},
+        "recognition": dict(DEFAULT_RECOGNITION),
         "zone_classes": {},
         "zone_overrides": {},
         "live_activities": {family: True for family in FAMILIES} | {
             "opening_picks": [],
-            # Quiet by default: only a real escalation (level rising to
-            # notify/urgent) banners over a running Live Activity.
             "alert_all_changes": False,
-            # la_only: Live Activities are the ONLY surface -- every
-            # pushable card gets an activity (catch-all family for events
-            # outside the curated four) and every card push and LA update
-            # is silent/passive. No banner ever.
             "la_only": False,
         },
-        "mute_sounds": False,
+        "mute_sounds": True,
         "quiet_hours": None,
     }
 
@@ -176,27 +198,66 @@ def validate_settings(data: Any) -> list[str]:
     errors: list[str] = []
 
     routing_table = data.get("routing_table")
-    if not isinstance(routing_table, dict):
-        errors.append("routing_table must be an object")
-    else:
-        unknown_subjects = set(routing_table) - set(SUBJECTS)
-        if unknown_subjects:
-            errors.append(f"routing_table has unknown subject(s): {sorted(unknown_subjects)}")
-        for subject in SUBJECTS:
-            row = routing_table.get(subject)
-            if not isinstance(row, dict):
-                errors.append(f"routing_table.{subject} must be an object")
-                continue
-            unknown_places = set(row) - set(PLACES)
-            if unknown_places:
-                errors.append(
-                    f"routing_table.{subject} has unknown place(s): {sorted(unknown_places)}"
-                )
-            for place in PLACES:
-                level = row.get(place)
-                if level not in LEVELS:
+    if routing_table is not None:
+        if not isinstance(routing_table, dict):
+            errors.append("routing_table must be an object")
+        else:
+            unknown_subjects = set(routing_table) - set(SUBJECTS)
+            if unknown_subjects:
+                errors.append(f"routing_table has unknown subject(s): {sorted(unknown_subjects)}")
+            for subject in SUBJECTS:
+                row = routing_table.get(subject)
+                if not isinstance(row, dict):
+                    errors.append(f"routing_table.{subject} must be an object")
+                    continue
+                unknown_places = set(row) - set(PLACES)
+                if unknown_places:
                     errors.append(
-                        f"routing_table.{subject}.{place} must be one of {LEVELS}, got {level!r}"
+                        f"routing_table.{subject} has unknown place(s): {sorted(unknown_places)}"
+                    )
+                for place in PLACES:
+                    level = row.get(place)
+                    if level not in LEVELS:
+                        errors.append(
+                            f"routing_table.{subject}.{place} must be one of {LEVELS}, got {level!r}"
+                        )
+
+    routing_table_v2 = data.get("routing_table_v2")
+    if routing_table_v2 is not None:
+        if not isinstance(routing_table_v2, dict):
+            errors.append("routing_table_v2 must be an object")
+        else:
+            unknown_subjects = set(routing_table_v2) - set(SUBJECTS_V2)
+            if unknown_subjects:
+                errors.append(f"routing_table_v2 has unknown subject(s): {sorted(unknown_subjects)}")
+            for subject in SUBJECTS_V2:
+                row = routing_table_v2.get(subject)
+                if not isinstance(row, dict):
+                    errors.append(f"routing_table_v2.{subject} must be an object")
+                    continue
+                unknown_places = set(row) - set(PLACES)
+                if unknown_places:
+                    errors.append(
+                        f"routing_table_v2.{subject} has unknown place(s): {sorted(unknown_places)}"
+                    )
+                for place in PLACES:
+                    level = row.get(place)
+                    if level not in LEVELS:
+                        errors.append(
+                            f"routing_table_v2.{subject}.{place} must be one of {LEVELS}, "
+                            f"got {level!r}"
+                        )
+
+    recognition = data.get("recognition")
+    if recognition is not None:
+        if not isinstance(recognition, dict):
+            errors.append("recognition must be an object")
+        else:
+            for key in ("known_person", "known_vehicle"):
+                val = recognition.get(key)
+                if val is not None and val not in RECOGNITION_MODES:
+                    errors.append(
+                        f"recognition.{key} must be one of {RECOGNITION_MODES}, got {val!r}"
                     )
 
     zone_classes = data.get("zone_classes")
@@ -216,15 +277,16 @@ def validate_settings(data: Any) -> list[str]:
             # Zone names themselves are unrestricted (design doc §4 -- the
             # user might configure a zone before it appears in Frigate);
             # only the inner subject/level vocabulary is closed.
+            valid_subjects = set(SUBJECTS) | set(SUBJECTS_V2)
             for zone, row in zone_overrides.items():
                 if not isinstance(row, dict):
                     errors.append(f"zone_overrides.{zone} must be an object")
                     continue
                 for subject, level in row.items():
-                    if subject not in SUBJECTS:
+                    if subject not in valid_subjects:
                         errors.append(
                             f"zone_overrides.{zone} has unknown subject {subject!r}, "
-                            f"must be one of {SUBJECTS}"
+                            f"must be one of {sorted(valid_subjects)}"
                         )
                         continue
                     if level not in LEVELS:
@@ -296,6 +358,22 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
                     if row.get(place) in LEVELS:
                         merged["routing_table"][subject][place] = row[place]
 
+    routing_table_v2 = data.get("routing_table_v2")
+    if isinstance(routing_table_v2, dict):
+        for subject in SUBJECTS_V2:
+            row = routing_table_v2.get(subject)
+            if isinstance(row, dict):
+                for place in PLACES:
+                    if row.get(place) in LEVELS:
+                        merged["routing_table_v2"][subject][place] = row[place]
+
+    recognition = data.get("recognition")
+    if isinstance(recognition, dict):
+        for key in ("known_person", "known_vehicle"):
+            val = recognition.get(key)
+            if val in RECOGNITION_MODES:
+                merged["recognition"][key] = val
+
     zone_classes = data.get("zone_classes")
     if isinstance(zone_classes, dict):
         merged["zone_classes"] = {
@@ -308,10 +386,11 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
         for zone, row in zone_overrides.items():
             if not isinstance(row, dict):
                 continue
+            valid_subjects = set(SUBJECTS) | set(SUBJECTS_V2)
             valid_row = {
                 subject: level
                 for subject, level in row.items()
-                if subject in SUBJECTS and level in LEVELS
+                if subject in valid_subjects and level in LEVELS
             }
             # An override that ends up empty after filtering (or was saved
             # empty to begin with) is removed, not kept as a no-op entry
@@ -390,9 +469,14 @@ def apply_settings(settings: dict[str, Any]) -> None:
     own dicts) so a later in-place edit on the caller's side can't silently
     mutate what the evaluator is using. Everything else
     (`zone_classes`/`live_activities`) is read through `get_active()` at
-    call time by `delivery_wire.py`, so there's nothing further to push."""
+    call time by `delivery_wire.py`, so there's nothing further to push.
+
+    When `routing_table_v2` is present, it is the routing authority — the
+    ladder TABLE gets v2 subjects (person/vehicle/animal/thing). Otherwise
+    the legacy `routing_table` (stranger/known/animal/thing) is used."""
     global _active
-    ladder_policy.set_table({s: dict(row) for s, row in settings["routing_table"].items()})
+    table = settings.get("routing_table_v2") or settings["routing_table"]
+    ladder_policy.set_table({s: dict(row) for s, row in table.items()})
     ladder_policy.set_zone_overrides(
         {zone: dict(row) for zone, row in settings.get("zone_overrides", {}).items()}
     )
@@ -424,8 +508,34 @@ def startup(path: str | Path) -> dict[str, Any]:
     """Load from disk (or defaults) and apply. Called once from the app's
     lifespan; `GET /v1/push/settings` calls it too if nothing has loaded a
     file yet, so the very first `GET` on a fresh install both answers the
-    request and creates the file (design doc §4)."""
-    settings = load_settings(path)
+    request and creates the file (design doc §4).
+
+    Triggers the v1→v2 routing table migration if ``routing_table_v2`` is
+    absent from the loaded settings (design brief: "derives it once from
+    the legacy table")."""
+    import logging
+
+    p = Path(path)
+    raw: dict[str, Any] = {}
+    if p.exists():
+        try:
+            with p.open() as f:
+                raw = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
+    if not isinstance(raw, dict):
+        raw = {}
+
+    needs_migration = "routing_table_v2" not in raw
+    settings = normalize_settings(raw) if raw else default_settings()
+
+    if needs_migration and raw.get("routing_table"):
+        v2_table, recognition, log_msg = migrate_v1_to_v2(raw["routing_table"])
+        settings["routing_table_v2"] = v2_table
+        settings["recognition"] = recognition
+        logging.getLogger(__name__).info(log_msg)
+        save_settings(path, settings)
+
     apply_settings(settings)
     return settings
 
@@ -438,6 +548,83 @@ def reset_for_tests() -> None:
     touches Phase 4 at all is the routing engine's own, unchanged."""
     global _active
     _active = None
+
+
+def migrate_v1_to_v2(
+    legacy: dict[str, dict[str, str]],
+) -> tuple[dict[str, dict[str, str]], dict[str, str], str]:
+    """Derive a v2 routing table and recognition settings from a legacy v1
+    table. Returns ``(routing_table_v2, recognition, log_message)``.
+
+    Migration rules (design brief):
+    - ``person`` := legacy ``stranger`` row
+    - ``vehicle`` := legacy ``thing`` row, bumped one tier at doors/off_limits
+    - ``animal`` := legacy ``animal`` row (copy)
+    - ``thing`` := legacy ``thing`` row (copy)
+    - ``recognition.known_person``: ``relax_one`` if the legacy ``known`` row
+      averaged one tier below ``stranger``, else ``off``
+    - ``recognition.known_vehicle``: ``relax_one`` (no legacy equivalent)
+    """
+    level_idx = {lvl: i for i, lvl in enumerate(LEVELS)}
+
+    stranger_row = legacy.get("stranger", DEFAULT_ROUTING_TABLE["stranger"])
+    known_row = legacy.get("known", DEFAULT_ROUTING_TABLE["known"])
+    animal_row = legacy.get("animal", DEFAULT_ROUTING_TABLE["animal"])
+    thing_row = legacy.get("thing", DEFAULT_ROUTING_TABLE["thing"])
+
+    person_row = dict(stranger_row)
+
+    vehicle_row = dict(thing_row)
+    for place in ("doors", "off_limits"):
+        idx = level_idx.get(vehicle_row.get(place, "log"), 0)
+        bumped = min(idx + 1, len(LEVELS) - 1)
+        vehicle_row[place] = LEVELS[bumped]
+
+    v2_table = {
+        "person": person_row,
+        "vehicle": vehicle_row,
+        "animal": dict(animal_row),
+        "thing": dict(thing_row),
+    }
+
+    stranger_avg = sum(level_idx.get(stranger_row.get(p, "log"), 0) for p in PLACES) / len(PLACES)
+    known_avg = sum(level_idx.get(known_row.get(p, "log"), 0) for p in PLACES) / len(PLACES)
+    gap = stranger_avg - known_avg
+    known_person_mode = "relax_one" if gap >= 0.8 else "off"
+
+    recognition = {"known_person": known_person_mode, "known_vehicle": "relax_one"}
+
+    log_msg = (
+        f"routing v2 migration: person := stranger row; "
+        f"vehicle := thing row bumped one tier at doors/off_limits; "
+        f"stranger_avg={stranger_avg:.2f} known_avg={known_avg:.2f} gap={gap:.2f} "
+        f"-> known_person={known_person_mode}"
+    )
+    return v2_table, recognition, log_msg
+
+
+def probe_recognition_available(config_path: str | Path) -> dict[str, bool]:
+    """Check Frigate's config for face recognition and LPR capability."""
+    import yaml
+
+    result = {"faces": False, "plates": False}
+    p = Path(config_path)
+    if not p.exists():
+        return result
+    try:
+        with p.open() as f:
+            cfg = yaml.safe_load(f)
+    except Exception:
+        return result
+    if not isinstance(cfg, dict):
+        return result
+    fr = cfg.get("face_recognition")
+    if isinstance(fr, dict) and fr.get("enabled"):
+        result["faces"] = True
+    lpr = cfg.get("lpr")
+    if isinstance(lpr, dict) and lpr.get("enabled"):
+        result["plates"] = True
+    return result
 
 
 def build_available_zones(config_path: str | Path) -> list[dict[str, Any]]:

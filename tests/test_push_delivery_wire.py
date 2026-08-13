@@ -56,12 +56,12 @@ async def test_zone_change_mutates_same_card_not_a_new_one(sidecar_db_path: Path
     )
     rows = conn.execute("SELECT card_key, level FROM push_cards").fetchall()
     assert len(rows) == 1
-    assert rows[0]["card_key"] == "alley-wide:thing:trk1"
+    assert rows[0]["card_key"] == "alley-wide:vehicle:trk1"
     assert rows[0]["level"] == "log"
     assert transport.sent == []  # log never pushes
 
-    # Second evaluation: same track id, now carries a zone -- thing/yard is
-    # also `log` (table fix WU6). This must be the SAME card (enrich), not a
+    # Second evaluation: same track id, now carries a zone -- vehicle/yard is
+    # also `quiet` under v2. This must be the SAME card (enrich), not a
     # second one.
     await handle_delivery_event(
         zoned_event, conn=conn, devices=[device], transport=transport,
@@ -69,7 +69,7 @@ async def test_zone_change_mutates_same_card_not_a_new_one(sidecar_db_path: Path
     )
     rows = conn.execute("SELECT card_key, level, zone_name FROM push_cards").fetchall()
     assert len(rows) == 1, "a zone change must mutate the existing card, not fork a new one"
-    assert rows[0]["card_key"] == "alley-wide:thing:trk1"
+    assert rows[0]["card_key"] == "alley-wide:vehicle:trk1"
     assert rows[0]["level"] == "log"
     assert rows[0]["zone_name"] == "parking_spot"
 
@@ -187,14 +187,14 @@ async def test_two_cameras_same_zone_within_window_merge_into_one_card(sidecar_d
 
     rows = conn.execute("SELECT card_key, camera FROM push_cards").fetchall()
     assert len(rows) == 1, "same subject_kind + zone within the window must merge onto one card"
-    assert rows[0]["card_key"] == "cam-a:stranger:trkA"
+    assert rows[0]["card_key"] == "cam-a:person:trkA"
     assert rows[0]["camera"] == "cam-a", "merged card keeps the originating camera"
 
     assert len(transport.sent) == 2
     assert transport.sent[0]["payload"]["mutation"] == "create"
     merged_payload = transport.sent[1]["payload"]
     assert merged_payload["mutation"] == "enrich"
-    assert merged_payload["card_key"] == "cam-a:stranger:trkA"
+    assert merged_payload["card_key"] == "cam-a:person:trkA"
     assert merged_payload["camera"] == "cam-a"
     assert "also on Cam-B" in merged_payload["secondary"]
 
@@ -202,7 +202,7 @@ async def test_two_cameras_same_zone_within_window_merge_into_one_card(sidecar_d
         "SELECT card_key FROM push_card_track_aliases WHERE camera = 'cam-b' AND track_id = 'trkB'"
     ).fetchone()
     assert alias is not None
-    assert alias["card_key"] == "cam-a:stranger:trkA"
+    assert alias["card_key"] == "cam-a:person:trkA"
 
 
 @pytest.mark.asyncio
@@ -222,7 +222,7 @@ async def test_different_zones_do_not_merge(sidecar_db_path: Path):
     )
 
     rows = conn.execute("SELECT card_key FROM push_cards").fetchall()
-    assert {r["card_key"] for r in rows} == {"cam-a:stranger:trkA", "cam-b:stranger:trkB"}
+    assert {r["card_key"] for r in rows} == {"cam-a:person:trkA", "cam-b:person:trkB"}
 
 
 @pytest.mark.asyncio
@@ -246,7 +246,7 @@ async def test_same_zone_different_subject_kind_does_not_merge(sidecar_db_path: 
     )
 
     rows = conn.execute("SELECT card_key FROM push_cards").fetchall()
-    assert {r["card_key"] for r in rows} == {"cam-a:stranger:trkA", "cam-b:thing:trkB"}
+    assert {r["card_key"] for r in rows} == {"cam-a:person:trkA", "cam-b:vehicle:trkB"}
 
 
 @pytest.mark.asyncio
@@ -266,7 +266,7 @@ async def test_no_zone_on_either_side_does_not_dedup(sidecar_db_path: Path):
     )
 
     rows = conn.execute("SELECT card_key FROM push_cards").fetchall()
-    assert {r["card_key"] for r in rows} == {"cam-a:stranger:trkA", "cam-b:stranger:trkB"}
+    assert {r["card_key"] for r in rows} == {"cam-a:person:trkA", "cam-b:person:trkB"}
 
 
 @pytest.mark.asyncio
@@ -286,7 +286,7 @@ async def test_dedup_window_expired_creates_separate_card(sidecar_db_path: Path)
     )
 
     rows = conn.execute("SELECT card_key FROM push_cards").fetchall()
-    assert {r["card_key"] for r in rows} == {"cam-a:stranger:trkA", "cam-b:stranger:trkB"}
+    assert {r["card_key"] for r in rows} == {"cam-a:person:trkA", "cam-b:person:trkB"}
 
 
 @pytest.mark.asyncio
@@ -310,7 +310,7 @@ async def test_three_cameras_sharing_a_zone_all_merge_onto_the_first(sidecar_db_
     )
 
     rows = conn.execute("SELECT card_key FROM push_cards").fetchall()
-    assert [r["card_key"] for r in rows] == ["cam-a:stranger:trkA"]
+    assert [r["card_key"] for r in rows] == ["cam-a:person:trkA"]
 
 
 @pytest.mark.asyncio
@@ -363,7 +363,7 @@ async def test_resolving_the_merged_secondary_track_leaves_the_primary_card_open
     assert resolved == 0, "a merged contributor resolving must not resolve the shared card"
 
     card = conn.execute(
-        "SELECT closed, resolved FROM push_cards WHERE card_key = 'cam-a:stranger:trkA'"
+        "SELECT closed, resolved FROM push_cards WHERE card_key = 'cam-a:person:trkA'"
     ).fetchone()
     assert card["closed"] == 0
     assert card["resolved"] == 0
@@ -396,7 +396,7 @@ async def test_resolving_the_primary_track_resolves_the_card_normally(sidecar_db
     assert resolved == 1
 
     card = conn.execute(
-        "SELECT closed, resolved FROM push_cards WHERE card_key = 'cam-a:stranger:trkA'"
+        "SELECT closed, resolved FROM push_cards WHERE card_key = 'cam-a:person:trkA'"
     ).fetchone()
     assert card["closed"] == 1
     assert card["resolved"] == 1
@@ -419,7 +419,8 @@ async def test_changing_the_routing_table_via_settings_changes_the_level_applied
     device = make_device()
 
     new_settings = policy_settings.default_settings()
-    new_settings["routing_table"]["thing"]["yard"] = "urgent"
+    table_key = "routing_table_v2" if "routing_table_v2" in new_settings else "routing_table"
+    new_settings[table_key]["thing"]["yard"] = "urgent"
     policy_settings.apply_settings(new_settings)
 
     await handle_delivery_event(
@@ -463,7 +464,7 @@ async def test_zone_classes_from_settings_take_priority_over_the_guess_heuristic
     )
     sent = transport.sent[0]["payload"]
     assert sent["place_class"] == "doors"
-    assert sent["level"] == "notify"  # stranger/doors per the default table
+    assert sent["level"] == "notify"  # person/doors per the default table
 
 
 @pytest.mark.asyncio
