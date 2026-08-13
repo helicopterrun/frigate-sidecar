@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% set active_page = 'replay' %}
+{% block title %}Push replay · frigate-sidecar{% endblock %}
+
+{% block body %}
+{% include "_header.html" %}
+<main>
+  <p class="help" style="margin:0 0 1em;color:var(--warn,#e8a735)">
+    This publishes real events to all registered devices (unless dry-run is on).
+  </p>
+
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="stat-label">Scenario</div>
+      <div class="stat-value">
+        <select id="scenario">
+          {% for s in scenarios %}
+          <option value="{{ s.name }}">{{ s.name }}{% if s.description %} — {{ s.description[:60] }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Speed</div>
+      <div class="stat-value">
+        <label><input type="radio" name="speed" value="1" checked> 1&times;</label>
+        <label><input type="radio" name="speed" value="5"> 5&times;</label>
+        <label><input type="radio" name="speed" value="10"> 10&times;</label>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Options</div>
+      <div class="stat-value">
+        <label><input type="checkbox" id="dry-run"> Dry run</label>
+      </div>
+    </div>
+  </div>
+
+  <details style="margin:0.5em 0 1em">
+    <summary>Stacked preset</summary>
+    <div style="padding:0.5em 0">
+      <label><input type="checkbox" id="stacked"> Enable stacked run</label><br>
+      <label>Second scenario:
+        <select id="scenario2">
+          {% for s in scenarios %}
+          <option value="{{ s.name }}">{{ s.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label style="margin-left:1em">Stagger:
+        <input type="number" id="stagger" value="8" min="0" max="120" style="width:4em"> s
+      </label>
+    </div>
+  </details>
+
+  <button id="run-btn" class="test-push">Run</button>
+  <span id="run-state" style="margin-left:1em"></span>
+
+  <h3 style="margin-top:1em">Output</h3>
+  <pre id="output" style="max-height:60vh;overflow:auto;font-size:0.85em;padding:0.5em;background:var(--bg-alt,#1a1a1a);border-radius:4px"></pre>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/replay.js"></script>
+{% endblock %}

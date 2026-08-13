@@ -22,7 +22,7 @@ from frigate_sidecar.frigate_api import FrigateClient
 from frigate_sidecar.push import delivery, delivery_wire
 from frigate_sidecar.push import store as push_store
 from frigate_sidecar.push.engine import PushEngine
-from frigate_sidecar.push.mqtt import MqttReviewSubscriber
+from frigate_sidecar.push.mqtt import MqttReviewSubscriber, compute_backoff
 from frigate_sidecar.push.transport import LogTransport, RelayTransport
 from frigate_sidecar.routes import analysis as analysis_routes
 from frigate_sidecar.routes import debug as debug_routes
@@ -34,6 +34,7 @@ from frigate_sidecar.routes import motion as motion_routes
 from frigate_sidecar.routes import placement as placement_routes
 from frigate_sidecar.routes import proxy as proxy_routes
 from frigate_sidecar.routes import push as push_routes
+from frigate_sidecar.routes import replay as replay_routes
 from frigate_sidecar.routes import score_histogram as score_histogram_routes
 from frigate_sidecar.routes import scrub as scrub_routes
 from frigate_sidecar.routes import scrub_ui as scrub_ui_routes
@@ -157,11 +158,27 @@ def _build_push_transport(settings: Settings):  # noqa: ANN201 - Protocol return
 
 
 async def _push_subscriber_loop(app: FastAPI) -> None:
+    """Keep the MQTT subscriber alive for the life of the process.
+
+    `run_forever` already retries broker-connect failures internally: this
+    outer retry exists for the class of bug it can't protect against -- an
+    unhandled exception escaping `run_forever` itself (2026-08-11: one such
+    bug took the whole subscriber down and it silently stayed down for 41
+    hours, since this task previously just logged and returned).
+    """
     subscriber: MqttReviewSubscriber = app.state.push_subscriber
-    try:
-        await subscriber.run_forever()
-    except Exception:
-        logger.exception("push: mqtt subscriber loop crashed")
+    attempt = 0
+    while True:
+        try:
+            await subscriber.run_forever()
+            return  # run_forever only returns after subscriber.stop()
+        except Exception:
+            delay = compute_backoff(attempt, base=5.0, cap=300.0)
+            attempt += 1
+            logger.exception(
+                "push: mqtt subscriber loop crashed, restarting in %.0fs", delay
+            )
+            await asyncio.sleep(delay)
 
 
 async def _activity_sweep_loop(app: FastAPI) -> None:
@@ -358,6 +375,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(toybox_routes.router)
     app.include_router(scrub_routes.router)
     app.include_router(push_routes.router)
+    app.include_router(replay_routes.router)
 
     # Everything registered so far is the sidecar's own surface and requires a
     # Frigate session; the proxy catch-all below must not (Frigate does its own
