@@ -432,8 +432,7 @@ class TestLaPayloadContract:
             alert=True, alert_title="P", alert_body="S",
             sound="urgent.caf", interruption_level="time-sensitive",
         )
-        assert payload["aps"]["alert"] == {"title": "P", "body": "S"}
-        assert payload["aps"]["sound"] == "urgent.caf"
+        assert payload["aps"]["alert"] == {"title": "P", "body": "S", "sound": "urgent.caf"}
         assert payload["aps"]["interruption-level"] == "time-sensitive"
 
     def test_la_update_no_alert_has_no_sound(self):

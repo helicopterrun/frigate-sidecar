@@ -402,7 +402,7 @@ async def test_la_start_sound_omitted_when_sounds_muted(sidecar_db_path: Path):
     start = la_sends(transport)[0]
     assert start["event"] == "start"
     assert start["payload"]["aps"].get("alert") is not None
-    assert "sound" not in start["payload"]["aps"]
+    assert "sound" not in start["payload"]["aps"].get("alert", {})
 
 
 @pytest.mark.asyncio
@@ -683,7 +683,7 @@ async def test_urgent_escalation_la_update_carries_sound(sidecar_db_path: Path):
     )
     update = [s for s in la_sends(transport) if s["event"] == "update"][-1]
     assert update["payload"]["aps"]["alert"] is not None
-    assert update["payload"]["aps"]["sound"] == "urgent.caf"
+    assert update["payload"]["aps"]["alert"]["sound"] == "urgent.caf"
     assert update["payload"]["aps"]["interruption-level"] == "time-sensitive"
     # Card push stays demoted — the LA carries the sound now.
     esc_card = card_sends(transport)[-1]["payload"]["aps"]
@@ -710,7 +710,7 @@ async def test_notify_escalation_la_update_alert_no_sound(sidecar_db_path: Path)
     )
     start = la_sends(transport)[0]
     assert start["event"] == "start"
-    assert start["payload"]["aps"].get("sound") == "at-the-door.caf"
+    assert start["payload"]["aps"]["alert"].get("sound") == "at-the-door.caf"
 
     attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
 
@@ -748,7 +748,7 @@ async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: P
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
     )
     esc1 = [s for s in la_sends(transport) if s["event"] == "update"][-1]
-    assert esc1["payload"]["aps"]["sound"] == "urgent.caf"
+    assert esc1["payload"]["aps"]["alert"]["sound"] == "urgent.caf"
 
     # Deescalate back to notify (no sound on deescalate).
     await handle_delivery_event(
@@ -763,7 +763,7 @@ async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: P
     )
     reesc = [s for s in la_sends(transport) if s["event"] == "update"][-1]
     assert reesc["payload"]["aps"].get("alert") is not None
-    assert "sound" not in reesc["payload"]["aps"]
+    assert "sound" not in reesc["payload"]["aps"].get("alert", {})
 
 
 @pytest.mark.asyncio

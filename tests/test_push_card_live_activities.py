@@ -187,8 +187,7 @@ def test_build_la_start_payload_shape():
     assert aps["event"] == "start"
     assert aps["content-state"] == state
     assert aps["attributes-type"] == "ElsinoreActivityAttributes"
-    assert aps["alert"] == {"title": "Person at front door", "body": "Just now"}
-    assert aps["sound"] == "at-the-door.caf"
+    assert aps["alert"] == {"title": "Person at front door", "body": "Just now", "sound": "at-the-door.caf"}
     assert aps["attributes"] == {
         "card_key": "doorbell:stranger:1786235300-aywxqj",
         "family": "person",

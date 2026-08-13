@@ -255,7 +255,7 @@ def build_la_start_payload(
         },
     }
     if sound:
-        aps["sound"] = sound
+        aps["alert"]["sound"] = sound
     payload = {"aps": aps}
     return _fit(payload)
 
@@ -284,9 +284,10 @@ def build_la_update_payload(
         "content-state": content_state,
     }
     if alert:
-        aps["alert"] = {"title": alert_title, "body": alert_body}
+        alert_dict: dict[str, Any] = {"title": alert_title, "body": alert_body}
         if sound:
-            aps["sound"] = sound
+            alert_dict["sound"] = sound
+        aps["alert"] = alert_dict
         if interruption_level:
             aps["interruption-level"] = interruption_level
     payload = {"aps": aps}
