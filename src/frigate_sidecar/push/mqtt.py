@@ -269,7 +269,16 @@ class MqttReviewSubscriber:
                 while not self._stopped and client.is_connected():
                     await asyncio.sleep(1.0)
                     if self.is_stale():
-                        await self.resume_with_backfill()
+                        # A bug in downstream event processing must not take
+                        # the whole subscriber down with it -- that's exactly
+                        # what happened 2026-08-11: an unhandled ValueError
+                        # from here escaped run_forever entirely and the
+                        # subscriber task died silently until the service was
+                        # restarted, 41 hours later.
+                        try:
+                            await self.resume_with_backfill()
+                        except Exception:
+                            logger.exception("push: backfill after stale window failed")
                         self.last_seen = time.time()
             except (OSError, ConnectionError) as exc:
                 logger.warning("push: mqtt connect to %s:%s failed: %s",

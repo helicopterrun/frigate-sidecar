@@ -94,6 +94,25 @@ _CATCH_ALL_GLYPH = {
 _CATCH_ALL_DEFAULT_GLYPH = "dot.radiowaves.left.and.right"
 
 
+def classify_family(*, subject_kind: str, label: str, place_class: str) -> str | None:
+    """The curated family this card's *content* matches, ignoring toggles,
+    opening picks, and `catch_all` entirely. Exists as its own function
+    (not just `should_start_activity`'s internals) so a caller can tell "no
+    curated family matched at all" apart from "a curated family matched but
+    wasn't eligible" -- both collapse to the same `None` result out of
+    `should_start_activity` itself, which the `la_only` fallback decision
+    log needs to tell apart (`delivery_wire.py`)."""
+    if subject_kind == "thing" and label == "package":
+        return PACKAGE
+    if subject_kind == "thing" and label in _BIN_LABELS:
+        return BINS
+    if subject_kind == "thing" and label in _OPENING_LABELS:
+        return OPENINGS
+    if subject_kind in ("stranger", "known") and place_class == "doors":
+        return PERSON
+    return None
+
+
 def should_start_activity(
     *,
     subject_kind: str,
@@ -108,9 +127,10 @@ def should_start_activity(
 
     Hard-coded MVP rules (design doc §1) -- a config-driven per-family
     override (Phase 4's `push/policy_settings.py`, `live_activities`
-    section of the settings object) is checked last so a disabled family
-    never starts an activity even when it would otherwise match, but the
-    detection itself doesn't depend on any settings existing.
+    section of the settings object) is checked after the curated match, so
+    a disabled family never starts an activity *under its own name* even
+    when it would otherwise match, but the detection itself doesn't depend
+    on any settings existing.
 
     `opening_picks`/`opening_ids` are the one family-specific refinement
     (Phase 4 §3): the `openings` family additionally requires this card's
@@ -119,28 +139,29 @@ def should_start_activity(
     read permissively (every opening qualifies) rather than as "nothing
     qualifies" -- the family toggle above is what fully turns `openings`
     off; an empty picks list is a not-yet-configured state, not a choice.
-    """
-    family: str | None = None
-    if subject_kind == "thing" and label == "package":
-        family = PACKAGE
-    elif subject_kind == "thing" and label in _BIN_LABELS:
-        family = BINS
-    elif subject_kind == "thing" and label in _OPENING_LABELS:
-        family = OPENINGS
-    elif subject_kind in ("stranger", "known") and place_class == "doors":
-        family = PERSON
-    elif catch_all:
-        # la_only mode: every card gets an activity; the curated families
-        # above still win when they match so their glyphs/copy stay.
-        family = CATCH_ALL
 
-    if family is None:
-        return None
-    if families_enabled is not None and families_enabled.get(family) is False:
-        return None
-    picks_active = family == OPENINGS and opening_picks
-    if picks_active and not any(oid in opening_picks for oid in opening_ids):
-        return None
+    `catch_all` (`la_only` mode): every pushable card gets *an* activity,
+    period. A curated family that doesn't clear the checks above (toggled
+    off, or `openings` with picks that don't match) falls back to
+    `CATCH_ALL` here rather than returning `None` -- `la_only`'s whole
+    contract is that a Live Activity is the only surface, so routing a card
+    to no activity at all would silently drop it (the card push is always
+    passive/silent in this mode, so nothing else would tell the user). A
+    card that matches no curated family at all falls back the same way, as
+    before.
+    """
+    family = classify_family(subject_kind=subject_kind, label=label, place_class=place_class)
+
+    if family is not None:
+        if families_enabled is not None and families_enabled.get(family) is False:
+            family = None
+        else:
+            picks_active = family == OPENINGS and opening_picks
+            if picks_active and not any(oid in opening_picks for oid in opening_ids):
+                family = None
+
+    if family is None and catch_all:
+        family = CATCH_ALL
     return family
 
 

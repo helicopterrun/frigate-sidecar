@@ -294,6 +294,30 @@ async def test_quiet_hours_cap_quiet_exempts_urgent(sidecar_db_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_quiet_hours_cap_quiet_with_mute_sounds_does_not_crash(sidecar_db_path: Path):
+    """2026-08-11 production incident: mute_sounds=True makes evaluate_ladder
+    return SUPPRESSED, which isn't in ladder_policy.LEVELS -- the cap_quiet
+    block's unconditional `.index(level)` raised ValueError and took the
+    whole MQTT subscriber down for 41 hours. Must no-op, not raise."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = _device()
+    config = PushSection(delivery_enabled=True)
+
+    settings = policy_settings.default_settings()
+    settings["mute_sounds"] = True
+    settings["quiet_hours"] = {"start": "00:00", "end": "23:59", "mode": "cap_quiet"}
+    policy_settings.apply_settings(settings)
+
+    await handle_delivery_event(
+        _event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=100.0,
+    )
+    # No push -- SUPPRESSED never reaches a payload (should_push(SUPPRESSED) is False).
+    assert _sit_sends(transport) == []
+
+
+@pytest.mark.asyncio
 async def test_quiet_hours_mute_sounds_strips_sound(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()

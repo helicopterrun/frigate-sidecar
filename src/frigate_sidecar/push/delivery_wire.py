@@ -41,7 +41,7 @@ from frigate_sidecar.push.delivery import (
     sound_name_for_card,
 )
 from frigate_sidecar.push.delivery import advance_card as _advance_card
-from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+from frigate_sidecar.push.ladder import SUPPRESSED, Snapshot, evaluate_ladder
 from frigate_sidecar.push.models import ReviewEvent
 from frigate_sidecar.push.payload import pretty_label
 
@@ -453,7 +453,7 @@ async def _deliver_live_activities(
             pass
         elif mutation == ESCALATE and card.level in ("notify", "urgent"):
             wants_alert = True
-            if sound_allowed:
+            if sound_allowed and card.level == "urgent":
                 la_sound = sound_name_for_card(card.level, subject_kind, label)
             la_interruption = "time-sensitive" if card.level == "urgent" else "active"
         elif alert_all and mutation == ESCALATE:
@@ -573,8 +573,10 @@ async def handle_delivery_event(
     )
     level = evaluate_ladder(snapshot)
 
-    # Quiet hours: cap_quiet caps level at quiet (urgent exempt).
-    if qh_active and qh_mode == "cap_quiet" and level != "urgent":
+    # Quiet hours: cap_quiet caps level at quiet (urgent exempt). SUPPRESSED
+    # is not in ladder_policy.LEVELS -- a muted/suppressed snapshot has
+    # nothing to cap, so it must skip this block rather than hit .index().
+    if qh_active and qh_mode == "cap_quiet" and level not in ("urgent", SUPPRESSED):
         from frigate_sidecar.push import ladder_policy
         quiet_idx = ladder_policy.LEVELS.index("quiet")
         level_idx = ladder_policy.LEVELS.index(level)
@@ -625,6 +627,7 @@ async def handle_delivery_event(
         # the card push demoted to a silent NC entry -- an LA that failed
         # anywhere along the way leaves the normal banner intact.
         la_only = bool(policy["live_activities"].get("la_only", False))
+        la_catch_all = la_only and should_push(card.level)
         family = live_activities.should_start_activity(
             subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
             families_enabled=policy["live_activities"],
@@ -632,8 +635,22 @@ async def handle_delivery_event(
             opening_ids=(zone_name, owning_camera) if zone_name else (owning_camera,),
             # Catch-all only for cards that would have pushed at all --
             # log-level noise shouldn't mint activities.
-            catch_all=la_only and should_push(card.level),
+            catch_all=la_catch_all,
         )
+        if family == live_activities.CATCH_ALL:
+            # Diagnose *why* the catch-all fired: distinguish "no curated
+            # family matches this card at all" (ordinary la_only behavior,
+            # nothing to log) from "a curated family matched but wasn't
+            # eligible" (family toggled off, or openings picks didn't
+            # match) -- the case this fallback exists for.
+            native_family = live_activities.classify_family(
+                subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
+            )
+            if native_family is not None:
+                logger.info(
+                    "la: family=%s not_eligible -> fallback family=%s (la_only)",
+                    native_family, live_activities.CATCH_ALL,
+                )
         la_covered = await _deliver_live_activities(
             conn, devices, transport, config=config, card=card, mutation=mutation,
             family=family, camera=owning_camera, subject_kind=subject_kind,

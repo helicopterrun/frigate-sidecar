@@ -92,6 +92,32 @@ def test_disabled_family_returns_none():
     ) == la.BINS
 
 
+def test_disabled_family_falls_back_to_catch_all_when_la_only():
+    # la_only: a curated family match that's toggled off still gets *an*
+    # activity -- the catch-all -- rather than none at all.
+    assert la.should_start_activity(
+        subject_kind="thing", label="package", place_class="yard",
+        families_enabled={"package": False}, catch_all=True,
+    ) == la.CATCH_ALL
+
+
+def test_opening_picks_mismatch_falls_back_to_catch_all_when_la_only():
+    assert la.should_start_activity(
+        subject_kind="thing", label="garage", place_class="street",
+        opening_picks=["front_gate"], opening_ids=("garage-cam", "garage"),
+        catch_all=True,
+    ) == la.CATCH_ALL
+
+
+def test_eligible_family_wins_over_catch_all():
+    # la_only on, but the family is eligible -- the native family is used,
+    # not the catch-all.
+    assert la.should_start_activity(
+        subject_kind="thing", label="package", place_class="yard",
+        catch_all=True,
+    ) == la.PACKAGE
+
+
 def test_glyph_for_resolve_wins_over_family():
     for family in la.FAMILIES:
         assert la.glyph_for(

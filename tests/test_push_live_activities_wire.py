@@ -516,6 +516,122 @@ async def test_la_only_mode_skips_log_level_cards(sidecar_db_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_la_only_ineligible_family_falls_back_to_catch_all(sidecar_db_path: Path):
+    """2026-08-12: with la_only on, a curated family that's toggled off must
+    not leave the device with neither surface -- the card push is always
+    passive/silent in la_only mode, so a skipped LA meant nothing alerted at
+    all. The card must ride the catch-all activity instead of nothing."""
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+    card_key = "doorbell:thing:trk1"
+
+    settings = policy_settings.default_settings()
+    settings["live_activities"]["la_only"] = True
+    settings["live_activities"]["package"] = False
+    policy_settings.apply_settings(settings)
+
+    # create: package at pool zone -> thing/off_limits = quiet (pushable),
+    # but the package family itself is disabled.
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "package", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    sends = la_sends(transport)
+    assert len(sends) == 1
+    assert sends[0]["event"] == "start"
+    assert sends[0]["payload"]["aps"]["attributes"]["family"] == "activity"
+    # Catch-all glyph is by subject kind ("thing"), not the package glyph.
+    assert sends[0]["payload"]["aps"]["content-state"]["glyph"] == "cube.fill"
+
+    attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perActivity1")
+
+    # enrich: no_row skip must not recur -- the same activity updates.
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "package", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+    sends = la_sends(transport)
+    assert len(sends) == 2
+    assert sends[1]["event"] == "update"
+    assert sends[1]["token"] == "perActivity1"
+
+    # resolve: the same (only) activity row ends.
+    resolved = await handle_delivery_resolve(
+        "doorbell", "trk1", conn=conn, devices=[device], transport=transport,
+        config=config, subject_kind="thing", now=30.0,
+    )
+    assert resolved == 1
+    sends = la_sends(transport)
+    assert len(sends) == 3
+    assert sends[2]["event"] == "end"
+
+    row = find_activity_row(conn, apns_token=device.apns_token, card_key=card_key, track_id="trk1")
+    assert row is not None
+    assert row["ended_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_la_only_off_disabled_family_skips_without_fallback(sidecar_db_path: Path):
+    """The catch-all fallback is an `la_only`-only behavior. With `la_only`
+    off, a disabled family must still just skip the LA -- and, since no LA
+    covers it, the ordinary card push must alert normally, not be demoted.
+    Uses person/doors (notify) rather than package/off_limits (quiet) so a
+    demoted payload (passive, no sound) is visibly different from a normal
+    one (active, sound present)."""
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    settings = policy_settings.default_settings()
+    settings["live_activities"]["person"] = False
+    policy_settings.apply_settings(settings)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    assert la_sends(transport) == []
+    cards = [r for r in transport.sent if "payload" in r and not r.get("live_activity")]
+    assert len(cards) == 1
+    # Not demoted: full alerting card (active + sound), since no LA covers
+    # this device -- family-disabled must not silently downgrade the push.
+    assert cards[0]["payload"]["aps"]["interruption-level"] == "active"
+    assert cards[0]["payload"]["aps"].get("sound")
+
+
+@pytest.mark.asyncio
+async def test_la_only_eligible_family_uses_native_family_not_catch_all(sidecar_db_path: Path):
+    """Regression guard: la_only must not blanket every card onto the
+    catch-all -- an eligible curated family (person/doors) still gets its
+    own family, keeping its glyph/copy."""
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    settings = policy_settings.default_settings()
+    settings["live_activities"]["la_only"] = True
+    policy_settings.apply_settings(settings)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    sends = la_sends(transport)
+    assert len(sends) == 1
+    assert sends[0]["payload"]["aps"]["attributes"]["family"] == "person"
+
+
+@pytest.mark.asyncio
 async def test_multi_device_demotion_is_per_device(sidecar_db_path: Path):
     """Coverage is per-device: device A's confirmed LA demotes only A's card
     push; device B (no push-to-start token, so no LA) keeps the full
@@ -542,3 +658,165 @@ async def test_multi_device_demotion_is_per_device(sidecar_db_path: Path):
     # B: full alerting card — no LA covers it.
     assert cards["d_tokB"]["payload"]["aps"]["interruption-level"] == "active"
     assert cards["d_tokB"]["payload"]["aps"].get("sound")
+
+
+@pytest.mark.asyncio
+async def test_urgent_escalation_la_update_carries_sound(sidecar_db_path: Path):
+    """When a card escalates to urgent and an LA covers the device, the LA
+    update alert must carry sound: urgent.caf — the card push is demoted to
+    silent, so the LA is the only surface that can sound."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+    card_key = "doorbell:stranger:trk1"
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+    update = [s for s in la_sends(transport) if s["event"] == "update"][-1]
+    assert update["payload"]["aps"]["alert"] is not None
+    assert update["payload"]["aps"]["sound"] == "urgent.caf"
+    assert update["payload"]["aps"]["interruption-level"] == "time-sensitive"
+    # Card push stays demoted — the LA carries the sound now.
+    esc_card = card_sends(transport)[-1]["payload"]["aps"]
+    assert esc_card["interruption-level"] == "passive"
+    assert "sound" not in esc_card
+
+
+@pytest.mark.asyncio
+async def test_notify_escalation_la_update_alert_no_sound(sidecar_db_path: Path):
+    """Notify-level alerting updates (haptic pop) must NOT carry a sound —
+    only urgent escalation gets sound on the LA update. Verified via the
+    person-at-doors create: the LA start (required by iOS) has the start
+    sound, but any subsequent update at notify level carries no sound."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+    card_key = "doorbell:stranger:trk1"
+
+    # Create at notify: LA start carries a sound (at-the-door.caf).
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    start = la_sends(transport)[0]
+    assert start["event"] == "start"
+    assert start["payload"]["aps"].get("sound") == "at-the-door.caf"
+
+    attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
+
+    # Enrich at notify: LA update has no alert (enrich never alerts) and no sound.
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=5.0,
+    )
+    enrich_update = [s for s in la_sends(transport) if s["event"] == "update"][0]
+    assert "alert" not in enrich_update["payload"]["aps"]
+    assert "sound" not in enrich_update["payload"]["aps"]
+
+
+@pytest.mark.asyncio
+async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: Path):
+    """The per-card sound budget (2) caps the LA update sound the same way it
+    capped the card-push sound: after create (sound #1) + first escalation
+    (sound #2), a re-escalation gets an alert but no sound."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+    card_key = "doorbell:stranger:trk1"
+
+    # Sound #1: create at notify.
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
+
+    # Sound #2: escalate to urgent.
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+    esc1 = [s for s in la_sends(transport) if s["event"] == "update"][-1]
+    assert esc1["payload"]["aps"]["sound"] == "urgent.caf"
+
+    # Deescalate back to notify (no sound on deescalate).
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=20.0,
+    )
+
+    # Re-escalate to urgent: budget exhausted (sound_count=2), no sound.
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=30.0,
+    )
+    reesc = [s for s in la_sends(transport) if s["event"] == "update"][-1]
+    assert reesc["payload"]["aps"].get("alert") is not None
+    assert "sound" not in reesc["payload"]["aps"]
+
+
+@pytest.mark.asyncio
+async def test_mute_sounds_strips_la_update_sound(sidecar_db_path: Path):
+    """Global mute_sounds prevents the LA from alerting or sounding —
+    the ladder returns SUPPRESSED, so the update carries no alert dict
+    and no sound key."""
+    from frigate_sidecar.push import policy_settings
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+    card_key = "doorbell:stranger:trk1"
+
+    # Create at notify without mute — LA starts.
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
+
+    # Enable mute_sounds, then send the escalation event.
+    muted = policy_settings.default_settings()
+    muted["mute_sounds"] = True
+    policy_settings.apply_settings(muted)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+    updates = [s for s in la_sends(transport) if s["event"] == "update"]
+    assert len(updates) >= 1
+    last = updates[-1]
+    assert "alert" not in last["payload"]["aps"]
+    assert "sound" not in last["payload"]["aps"]
+
+
+@pytest.mark.asyncio
+async def test_uncovered_urgent_card_keeps_card_push_sound(sidecar_db_path: Path):
+    """When no LA covers the device (no push-to-start token), the card push
+    retains its sound — the demotion only fires for LA-covered devices."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device(push_to_start="")
+    config = PushSection(delivery_enabled=True)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    assert la_sends(transport) == []
+    cards = card_sends(transport)
+    assert len(cards) == 1
+    assert cards[0]["payload"]["aps"]["sound"] == "urgent.caf"
+    assert cards[0]["payload"]["aps"]["interruption-level"] == "time-sensitive"
