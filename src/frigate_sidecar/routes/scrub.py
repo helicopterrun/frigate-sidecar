@@ -161,6 +161,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
         },
         "proxy": {"enabled": settings.proxy.enabled},
         "push": {"enabled": settings.push.enabled, "transport": settings.push.transport},
+        "decisions": {"enabled": True},
     }
 
 

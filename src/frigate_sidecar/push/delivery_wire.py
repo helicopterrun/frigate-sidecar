@@ -29,7 +29,7 @@ import secrets
 import time
 from typing import TYPE_CHECKING
 
-from frigate_sidecar.push import card_store, live_activities, policy_settings, store
+from frigate_sidecar.push import card_store, decision_trace, live_activities, policy_settings, store
 from frigate_sidecar.push.cards import CREATE, DEESCALATE, ENRICH, ESCALATE, RESOLVE, Card
 from frigate_sidecar.push.delivery import (
     _device_eligible,
@@ -585,14 +585,29 @@ async def handle_delivery_event(
     # Quiet hours: cap_quiet caps level at quiet (urgent exempt). SUPPRESSED
     # is not in ladder_policy.LEVELS -- a muted/suppressed snapshot has
     # nothing to cap, so it must skip this block rather than hit .index().
+    qh_capped = False
     if qh_active and qh_mode == "cap_quiet" and level not in ("urgent", SUPPRESSED):
         from frigate_sidecar.push import ladder_policy
         quiet_idx = ladder_policy.LEVELS.index("quiet")
         level_idx = ladder_policy.LEVELS.index(level)
         if level_idx > quiet_idx:
             level = "quiet"
+            qh_capped = True
     zone_name = event.zones[0] if event.zones else ""
     track_ids = event.track_ids or (event.event_id,)
+
+    # Build reasons for decision trace.
+    from frigate_sidecar.push import ladder_policy as _lp
+    _zone_override_hit = bool(
+        _lp.ZONE_OVERRIDES.get(snapshot.zone, {}).get(snapshot.subject)
+    )
+    trace_reasons: list[str] = []
+    if _zone_override_hit:
+        trace_reasons.append("zone_override")
+    else:
+        trace_reasons.append("routing_table")
+    if qh_capped:
+        trace_reasons.append("quiet_hours_cap")
 
     mutated = 0
     for track_id in track_ids:
@@ -601,6 +616,18 @@ async def handle_delivery_event(
             zone_name=zone_name, now=now,
         )
         card, mutation, sound = _advance_card(existing, level, card_key=card_key, now=now)
+
+        if mutation in (CREATE, ESCALATE, DEESCALATE):
+            decision_trace.append(
+                camera=event.camera,
+                label=snapshot.label,
+                subject=subject_kind,
+                zones=list(event.zones) if event.zones else [],
+                place=place_class,
+                level=card.level,
+                reasons=list(trace_reasons),
+                event_id=event.event_id,
+            )
 
         elapsed = max(0.0, now - card.state_since_at)
         identity = event.sub_labels[0] if event.sub_labels else ""
@@ -884,6 +911,17 @@ async def handle_recognition_event(
         return 0
 
     context = card_store.get_card_context(conn, card_key) or {}
+
+    decision_trace.append(
+        camera=camera,
+        label=label,
+        subject=subject_kind,
+        zones=[],
+        place=context.get("place_class", ""),
+        level=card.level,
+        reasons=["recognition_relax"],
+        event_id=f"{camera}:{track_id}",
+    )
     zone_name = context.get("zone_name", "")
     place_class = context.get("place_class", "")
     owning_camera = context.get("camera", camera)

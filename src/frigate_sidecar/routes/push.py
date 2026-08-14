@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from frigate_sidecar import db
-from frigate_sidecar.push import library, policy_settings, store
+from frigate_sidecar.push import decision_trace, library, policy_settings, store
 from frigate_sidecar.push.situations import Situation
 
 logger = logging.getLogger(__name__)
@@ -593,6 +593,12 @@ async def redeem_handle(handle: str, request: Request) -> dict[str, Any]:
         "event_id": data["event_id"],
         "snapshot_url": f"/api/events/{data['event_id']}/snapshot.jpg",
     }
+
+
+@router.get("/decisions")
+async def get_decisions(limit: int = Query(default=50, ge=1)) -> dict[str, Any]:
+    """Recent routing decisions, newest first (spec §7)."""
+    return {"decisions": decision_trace.recent(limit)}
 
 
 _ERR_INVALID_SETTINGS = "invalid_settings"
