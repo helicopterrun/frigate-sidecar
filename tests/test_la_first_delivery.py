@@ -185,3 +185,53 @@ def test_card_push_category_matches_level():
         event_ts=1000.0,
     )
     assert payload["aps"]["category"] == "card.urgent"
+
+
+# -- Escalation sound -------------------------------------------------------
+
+def test_escalation_sound_default_urgent():
+    from frigate_sidecar.push.delivery import sound_name_for_card
+    assert sound_name_for_card("urgent", "stranger", "person") == "urgent.caf"
+
+
+def test_escalation_sound_custom():
+    from frigate_sidecar.push.delivery import sound_name_for_card
+    assert sound_name_for_card("urgent", "stranger", "person",
+                               escalation_sound="at-the-door") == "at-the-door.caf"
+
+
+def test_escalation_sound_non_urgent_unaffected():
+    from frigate_sidecar.push.delivery import sound_name_for_card
+    assert sound_name_for_card("notify", "stranger", "person",
+                               escalation_sound="siren") == "at-the-door.caf"
+    assert sound_name_for_card("notify", "thing", "package",
+                               escalation_sound="siren") == "package-delivery.caf"
+
+
+def test_escalation_sound_in_card_payload():
+    from frigate_sidecar.push.cards import Card, ESCALATE
+    from frigate_sidecar.push.delivery import build_card_payload
+
+    card = Card(card_key="test:stranger:t1", level="urgent", created_at=1000.0, updated_at=1000.0)
+    payload = build_card_payload(
+        card, ESCALATE, sound=True, subject_kind="stranger", place_class="doors",
+        label="person", camera="doorbell", zone_name="front_door",
+        glyph="figure.walk", primary="Person", secondary="Front Door",
+        event_ts=1000.0, escalation_sound="siren",
+    )
+    assert payload["aps"]["sound"] == "siren.caf"
+
+
+def test_escalation_sound_settings_default():
+    defaults = policy_settings.default_settings()
+    assert defaults["escalation_sound"] == "urgent"
+
+
+def test_escalation_sound_settings_normalize():
+    result = policy_settings.normalize_settings({"escalation_sound": "at-the-door"})
+    assert result["escalation_sound"] == "at-the-door"
+
+
+def test_escalation_sound_settings_absent_keeps_default():
+    result = policy_settings.normalize_settings({})
+    assert result["escalation_sound"] == "urgent"

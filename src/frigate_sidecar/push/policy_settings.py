@@ -182,6 +182,7 @@ def default_settings() -> dict[str, Any]:
             "alert_all_changes": False,
             "la_only": False,
         },
+        "escalation_sound": "urgent",
         "mute_sounds": True,
         "quiet_hours": None,
     }
@@ -415,6 +416,10 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
         delivery = live_activities.get("delivery")
         if delivery in ("la_first", "notifications"):
             merged["live_activities"]["delivery"] = delivery
+
+    escalation_sound = data.get("escalation_sound")
+    if isinstance(escalation_sound, str) and escalation_sound:
+        merged["escalation_sound"] = escalation_sound
 
     if isinstance(data.get("mute_sounds"), bool):
         merged["mute_sounds"] = data["mute_sounds"]

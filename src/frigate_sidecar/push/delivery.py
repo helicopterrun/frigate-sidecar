@@ -74,10 +74,13 @@ def should_push(level: str) -> bool:
     return LEVEL_APNS.get(level, {}).get("push", False)
 
 
-def sound_name_for_card(level: str, subject_kind: str = "", label: str = "") -> str:
+def sound_name_for_card(
+    level: str, subject_kind: str = "", label: str = "",
+    escalation_sound: str = "urgent",
+) -> str:
     """Per-family/level sound name from the app's .caf catalog."""
     if level == "urgent":
-        return "urgent.caf"
+        return f"{escalation_sound}.caf"
     if subject_kind in ("stranger", "known", "person") and label == "person":
         return "at-the-door.caf"
     if label == "package":
@@ -199,6 +202,7 @@ def build_card_payload(
     media: str | None = None,
     deep_link: str | None = None,
     la_active: bool = False,
+    escalation_sound: str = "urgent",
 ) -> dict[str, Any]:
     """The full APNs body for one card mutation (`docs/apns-payload-spec.md`).
 
@@ -227,7 +231,8 @@ def build_card_payload(
     if interruption_level is not None:
         aps["interruption-level"] = interruption_level
     if sound:
-        aps["sound"] = sound_name_for_card(card.level, subject_kind, label)
+        aps["sound"] = sound_name_for_card(card.level, subject_kind, label,
+                                          escalation_sound=escalation_sound)
     aps["thread-id"] = camera
     aps["category"] = f"card.{card.level}"
 

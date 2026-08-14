@@ -461,6 +461,7 @@ async def _deliver_live_activities(
     la_settings = policy.get("live_activities", {})
     alert_all = la_settings.get("alert_all_changes", False)
     la_only = la_settings.get("la_only", False)
+    escalation_sound = policy.get("escalation_sound", "urgent")
     stale_s = config.delivery_la_stale_s
 
     for device in devices:
@@ -534,7 +535,8 @@ async def _deliver_live_activities(
             # but sound is only attached when a card push would have
             # sounded too.
             la_start_sound = (
-                sound_name_for_card(card.level, subject_kind, label)
+                sound_name_for_card(card.level, subject_kind, label,
+                                    escalation_sound=escalation_sound)
                 if sound_allowed and not la_only else None
             )
             payload = live_activities.build_la_start_payload(
@@ -626,7 +628,8 @@ async def _deliver_live_activities(
         elif mutation == ESCALATE and card.level in ("notify", "urgent"):
             wants_alert = True
             if sound_allowed and card.level == "urgent":
-                la_sound = sound_name_for_card(card.level, subject_kind, label)
+                la_sound = sound_name_for_card(card.level, subject_kind, label,
+                                              escalation_sound=escalation_sound)
             la_interruption = "time-sensitive" if card.level == "urgent" else "active"
         elif alert_all and mutation == ESCALATE:
             wants_alert = True
@@ -738,6 +741,7 @@ async def handle_delivery_event(
         return 0
     now = time.time() if now is None else now
     policy = policy_settings.get_active()
+    escalation_sound = policy.get("escalation_sound", "urgent")
 
     # Quiet hours (§4): check before ladder evaluation.
     import datetime
@@ -928,7 +932,7 @@ async def handle_delivery_event(
                 label=snapshot.label, camera=owning_camera, zone_name=zone_name,
                 glyph=_glyph_for(subject_kind, snapshot.label),
                 primary=primary, secondary=secondary, event_ts=now, media=media,
-                la_active=la_only,
+                la_active=la_only, escalation_sound=escalation_sound,
             )
 
         await send_card_mutation(
@@ -962,15 +966,15 @@ def resound_payload_for(card, context: dict[str, str]) -> dict:
     primary, secondary = _copy(
         subject_kind, "", context.get("camera", ""), context.get("zone_name", ""), elapsed,
     )
-    la_only = bool(
-        policy_settings.get_active().get("live_activities", {}).get("la_only", False)
-    )
+    active = policy_settings.get_active()
+    la_only = bool(active.get("live_activities", {}).get("la_only", False))
     return build_card_payload(
         card, "escalate", sound=not la_only, la_active=la_only,
         subject_kind=subject_kind, place_class=context.get("place_class", ""),
         label=context.get("label", ""), camera=context.get("camera", ""),
         zone_name=context.get("zone_name", ""),
         glyph=_glyph_for(subject_kind, ""), primary=primary, secondary=secondary, event_ts=now,
+        escalation_sound=active.get("escalation_sound", "urgent"),
     )
 
 
@@ -1057,6 +1061,7 @@ async def handle_delivery_resolve(
                 glyph=_glyph_for(kind, ""),
                 primary=primary, secondary=secondary, event_ts=now,
                 la_active=la_only,
+                escalation_sound=policy.get("escalation_sound", "urgent"),
             )
         await send_card_mutation(
             conn, transport, devices, card, mutation, payload,
@@ -1185,6 +1190,7 @@ async def handle_recognition_event(
             zone_name=zone_name, glyph=_glyph_for(subject_kind, label),
             primary=primary, secondary=secondary, event_ts=now,
             la_active=True,
+            escalation_sound=recog_policy.get("escalation_sound", "urgent"),
         )
     await send_card_mutation(
         conn, transport, devices, card, mutation, payload,
