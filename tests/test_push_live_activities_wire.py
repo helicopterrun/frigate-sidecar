@@ -19,6 +19,17 @@ from frigate_sidecar.push.models import Device, ReviewEvent
 from frigate_sidecar.push.transport import LogTransport
 
 
+@pytest.fixture(autouse=True)
+def _reset_ladder_table():
+    """Several tests below install a custom routing table via
+    `ladder_policy.set_table` — restore the default afterwards so table
+    state never leaks into later tests (it did: the routing-gated family
+    change surfaced a create-at-quiet leak that failed an unrelated test)."""
+    from frigate_sidecar.push import ladder_policy
+    yield
+    ladder_policy.set_table({k: dict(v) for k, v in ladder_policy.TABLE.items()})
+
+
 def make_device(token: str = "tok1", *, push_to_start: str = "pts1") -> Device:
     return Device(
         apns_token=token, device_id=f"d_{token}", bundle_id="com.pondhouse.Elsinore",
@@ -667,12 +678,11 @@ async def test_multi_device_demotion_is_per_device(sidecar_db_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_urgent_escalation_la_update_carries_sound(sidecar_db_path: Path):
-    """When a card escalates to urgent and an LA covers the device, the LA
-    update alert must carry sound: urgent.caf — the card push is demoted to
-    silent, so the LA is the only surface that can sound. Uses a custom
-    routing table where person+doors=quiet so the create doesn't spend
-    the one-sound budget while still qualifying for the person LA family."""
+async def test_urgent_escalation_late_starts_la_with_sound(sidecar_db_path: Path):
+    """A person routed quiet at create qualifies for no LA (routing-gated
+    families). When the story escalates to urgent, the LA *late-starts* —
+    and its mandatory start alert carries the sound, doubling as the
+    escalation alert. The card push is demoted; the LA is the surface."""
     from frigate_sidecar.push import ladder_policy, policy_settings
 
     settings = policy_settings.default_settings()
@@ -686,24 +696,22 @@ async def test_urgent_escalation_la_update_carries_sound(sidecar_db_path: Path):
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:person:trk1"
 
-    # Create at quiet (person at front_door, custom table): LA starts, no sound.
+    # Create at quiet (person at front_door, custom table): no LA — quiet
+    # people don't mint activities.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
-    attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
+    assert la_sends(transport) == []
 
-    # Escalate to urgent (pool = off_limits): first sound.
+    # Escalate to urgent (pool = off_limits): late start with the sound.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
     )
-    update = [s for s in la_sends(transport) if s["event"] == "update"][-1]
-    assert update["payload"]["aps"]["alert"] is not None
-    assert update["payload"]["aps"]["alert"]["sound"] == "urgent.caf"
-    assert update["payload"]["aps"]["interruption-level"] == "time-sensitive"
+    start = [s for s in la_sends(transport) if s["event"] == "start"][-1]
+    assert start["payload"]["aps"]["alert"]["sound"] == "urgent.caf"
     # Card push stays demoted — the LA carries the sound now.
     esc_card = card_sends(transport)[-1]["payload"]["aps"]
     assert esc_card["interruption-level"] == "passive"
@@ -772,15 +780,16 @@ async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: P
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
-    attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
 
-    # Sound #1: escalate to urgent.
+    # Sound #1: escalate to urgent — the LA late-starts and its start alert
+    # carries the sound (routing-gated families: quiet create minted no LA).
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
     )
-    esc1 = [s for s in la_sends(transport) if s["event"] == "update"][-1]
+    esc1 = [s for s in la_sends(transport) if s["event"] == "start"][-1]
     assert esc1["payload"]["aps"]["alert"]["sound"] == "urgent.caf"
+    attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
 
     # Deescalate back to notify (no sound on deescalate).
     await handle_delivery_event(
@@ -823,9 +832,10 @@ async def test_mute_sounds_strips_la_update_sound(sidecar_db_path: Path):
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
-    attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
+    assert la_sends(transport) == []  # quiet create mints no LA
 
-    # Enable mute_sounds, then send the escalation event.
+    # Enable mute_sounds, then send the escalation event — the LA
+    # late-starts; its mandatory start alert pops but carries no sound.
     muted = policy_settings.default_settings()
     muted["mute_sounds"] = True
     policy_settings.apply_settings(muted)
@@ -834,9 +844,9 @@ async def test_mute_sounds_strips_la_update_sound(sidecar_db_path: Path):
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
     )
-    updates = [s for s in la_sends(transport) if s["event"] == "update"]
-    assert len(updates) >= 1
-    last = updates[-1]
+    starts = [s for s in la_sends(transport) if s["event"] == "start"]
+    assert len(starts) >= 1
+    last = starts[-1]
     alert = last["payload"]["aps"].get("alert")
     assert alert is not None
     assert alert["title"]
@@ -891,9 +901,9 @@ async def test_muted_urgent_escalation_la_carries_alert_without_sound(sidecar_db
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
-    attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
+    assert la_sends(transport) == []  # quiet create mints no LA
 
-    # Enable mute, then escalate to urgent.
+    # Enable mute, then escalate to urgent — LA late-starts, alert muted.
     settings["mute_sounds"] = True
     policy_settings.apply_settings(settings)
 
@@ -901,8 +911,8 @@ async def test_muted_urgent_escalation_la_carries_alert_without_sound(sidecar_db
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
     )
-    update = [s for s in la_sends(transport) if s["event"] == "update"][-1]
-    alert = update["payload"]["aps"]["alert"]
+    start = [s for s in la_sends(transport) if s["event"] == "start"][-1]
+    alert = start["payload"]["aps"]["alert"]
     assert alert is not None
     assert alert["title"]
     assert alert["body"]

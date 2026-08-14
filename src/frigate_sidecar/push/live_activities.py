@@ -97,14 +97,26 @@ _CATCH_ALL_GLYPH = {
 _CATCH_ALL_DEFAULT_GLYPH = "dot.radiowaves.left.and.right"
 
 
-def classify_family(*, subject_kind: str, label: str, place_class: str) -> str | None:
+def classify_family(
+    *, subject_kind: str, label: str, place_class: str, level: str = "log",
+) -> str | None:
     """The curated family this card's *content* matches, ignoring toggles,
     opening picks, and `catch_all` entirely. Exists as its own function
     (not just `should_start_activity`'s internals) so a caller can tell "no
     curated family matched at all" apart from "a curated family matched but
     wasn't eligible" -- both collapse to the same `None` result out of
     `should_start_activity` itself, which the `la_only` fallback decision
-    log needs to tell apart (`delivery_wire.py`)."""
+    log needs to tell apart (`delivery_wire.py`).
+
+    The person family is gated on the card's *routed level*, not a place
+    class: the routing table is the single authority on what matters, and
+    LA families follow it rather than second-guessing geography. The old
+    `place_class == "doors"` gate meant a user whose entry zones were
+    classified Private (a perfectly sensible classification) could never
+    get a person LA at all — observed live 2026-08-14. `person_restricted`
+    keeps its place-class identity because Restricted *is* the user's own
+    routing vocabulary, and a person there is a categorically different
+    situation regardless of level."""
     if subject_kind == "thing" and label == "package":
         return PACKAGE
     if subject_kind == "thing" and label in _BIN_LABELS:
@@ -113,7 +125,7 @@ def classify_family(*, subject_kind: str, label: str, place_class: str) -> str |
         return OPENINGS
     if subject_kind in ("stranger", "known", "person") and place_class == "off_limits":
         return PERSON_RESTRICTED
-    if subject_kind in ("stranger", "known", "person") and place_class == "doors":
+    if subject_kind in ("stranger", "known", "person") and level in ("notify", "urgent"):
         return PERSON
     return None
 
@@ -123,6 +135,7 @@ def should_start_activity(
     subject_kind: str,
     label: str,
     place_class: str,
+    level: str = "log",
     families_enabled: dict[str, bool] | None = None,
     opening_picks: list[str] | None = None,
     opening_ids: tuple[str, ...] = (),
@@ -155,7 +168,9 @@ def should_start_activity(
     card that matches no curated family at all falls back the same way, as
     before.
     """
-    family = classify_family(subject_kind=subject_kind, label=label, place_class=place_class)
+    family = classify_family(
+        subject_kind=subject_kind, label=label, place_class=place_class, level=level,
+    )
 
     if family is not None:
         if families_enabled is not None and families_enabled.get(family) is False:

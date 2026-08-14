@@ -60,6 +60,14 @@ async def replay_run(body: RunRequest, request: Request) -> JSONResponse:
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the UI needs JSON, not an HTML 500
+        # A live run touches MQTT; a broker connect failure (refused, timeout,
+        # bad credentials) used to escape as an unhandled 500 whose HTML error
+        # page broke the replay page's JSON parse ("Unexpected token '<'",
+        # observed 2026-08-14). Surface the real cause as JSON instead.
+        raise HTTPException(status_code=502, detail=f"replay failed: {exc}")
 
     return JSONResponse(run.to_dict())
 

@@ -295,6 +295,13 @@ async def dry_run_scenario(
             if la_sends:
                 la_send = la_sends[0]
                 step_decision["la_action"] = la_send["event"]
+                # Where did the sound go? Under la_first the card is often
+                # demoted and the LA start/escalation alert carries it — the
+                # decision log must show that, or a silent card reads as a
+                # dropped sound.
+                la_alert = la_send.get("payload", {}).get("aps", {}).get("alert") or {}
+                if la_alert.get("sound"):
+                    step_decision["la_sound_name"] = la_alert["sound"]
                 tok = la_send.get("token", "")
                 step_decision["la_token_type"] = (
                     "push-to-start" if tok.startswith("pts") else "per-activity"

@@ -107,11 +107,23 @@ def test_60s_visit_produces_at_most_6_pushes():
 # -- Copy text ----------------------------------------------------------------
 
 def test_create_secondary_omits_elapsed_zero():
-    _, secondary = _copy("stranger", "person", "doorbell", "front_garden", 0.0)
-    assert secondary == "Front Garden"
+    # Secondary carries what the title doesn't: the camera, never a repeat
+    # of the place ("Person at Front Garden / Front Garden", 2026-08-14).
+    primary, secondary = _copy("stranger", "person", "doorbell", "front_garden", 0.0)
+    assert primary == "Person at Front Garden"
+    assert secondary == "Doorbell"
     assert "0s" not in secondary
 
 
 def test_enrich_secondary_includes_elapsed():
     _, secondary = _copy("stranger", "person", "doorbell", "front_garden", 45.0)
-    assert secondary == "Front Garden · 45s"
+    assert secondary == "Doorbell · 45s"
+
+
+def test_secondary_empty_when_title_already_used_camera():
+    # No zone: the title falls back to the camera, so a camera-only
+    # secondary would echo it — stay empty on create, elapsed-only later.
+    _, secondary = _copy("stranger", "person", "doorbell", "", 0.0)
+    assert secondary == ""
+    _, secondary = _copy("stranger", "person", "doorbell", "", 30.0)
+    assert secondary == "30s"

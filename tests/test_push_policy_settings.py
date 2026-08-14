@@ -38,7 +38,8 @@ def test_default_settings_shape():
     assert settings["zone_overrides"] == {}
     assert settings["live_activities"] == {
         "package": True, "bins": True, "openings": True, "person": True,
-        "opening_picks": [], "alert_all_changes": False, "la_only": False,
+        "person_restricted": True, "opening_picks": [],
+        "delivery": "la_first", "alert_all_changes": False, "la_only": False,
     }
     assert settings["mute_sounds"] is True
     assert settings["quiet_hours"] is None
@@ -104,11 +105,14 @@ def test_zone_overrides_allow_unknown_zone_names():
     assert policy_settings.validate_settings(data) == []
 
 
-def test_rejects_unknown_live_activity_family():
+def test_tolerates_unknown_live_activity_family():
+    # Spec §9 / dual-read rule: unknown keys in live_activities are ignored,
+    # never rejected — a newer app must be able to PUT against an older
+    # sidecar without the whole settings save failing.
     data = _valid()
     data["live_activities"]["robots"] = True
     errors = policy_settings.validate_settings(data)
-    assert any("unknown key" in e for e in errors)
+    assert not errors
 
 
 def test_rejects_non_bool_family_toggle():

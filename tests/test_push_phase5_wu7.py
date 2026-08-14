@@ -156,7 +156,8 @@ async def test_rate_cap_window_slides(sidecar_db_path: Path):
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
-    device = _device()
+    # Card-path semantics only: an LA-capable device would get demoted cards.
+    device = _device(push_to_start="")
     config = PushSection(delivery_enabled=True)
 
     for i in range(10):
@@ -346,7 +347,8 @@ async def test_quiet_hours_mute_sounds_strips_sound(sidecar_db_path: Path):
 async def test_quiet_hours_mute_sounds_exempts_urgent(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
-    device = _device()
+    # Card-path semantics only: an LA-capable device would get demoted cards.
+    device = _device(push_to_start="")
     config = PushSection(delivery_enabled=True)
 
     settings = policy_settings.default_settings()

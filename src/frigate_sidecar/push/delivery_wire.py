@@ -172,10 +172,18 @@ def _copy(
         primary = f"{identity} · at {place_pretty}"
     else:
         primary = f"{subject_text} at {place_pretty}"
-    if elapsed_s > 0:
-        secondary = f"{place_pretty} · {int(elapsed_s)}s"
+    # The secondary line carries what the title doesn't: the camera (when
+    # the title used a zone) and the elapsed time. Repeating the place made
+    # a lock-screen row read "Person at Front Entry Person / Front Entry
+    # Person" (observed 2026-08-14); a line with nothing new stays empty
+    # rather than echoing.
+    detail = camera.replace("_", " ").title() if zone_name else ""
+    if elapsed_s > 0 and detail:
+        secondary = f"{detail} · {int(elapsed_s)}s"
+    elif elapsed_s > 0:
+        secondary = f"{int(elapsed_s)}s"
     else:
-        secondary = place_pretty
+        secondary = detail
     return primary, secondary
 
 
@@ -508,7 +516,13 @@ async def _deliver_live_activities(
             continue
 
         if row is None:
-            if mutation != CREATE or family is None or not device.can_live_activity:
+            # CREATE is the normal birth; ESCALATE is the late start — a
+            # story that routed quiet at create didn't qualify for a person
+            # LA (routing-gated families), but the moment it escalates into
+            # notify/urgent it deserves its instrument. The start push's
+            # mandatory alert (with sound, budget permitting) doubles as
+            # the escalation alert itself.
+            if mutation not in (CREATE, ESCALATE) or family is None or not device.can_live_activity:
                 logger.info(
                     "push: LA skip device=%s reason=no_row mutation=%s family=%s la_capable=%s pts=%s",
                     device.device_id, mutation, family, device.la_capable, bool(device.push_to_start_token),
@@ -847,6 +861,7 @@ async def handle_delivery_event(
         la_catch_all = la_only and should_push(card.level)
         family = live_activities.should_start_activity(
             subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
+            level=card.level,
             families_enabled=policy["live_activities"],
             opening_picks=policy["live_activities"].get("opening_picks"),
             opening_ids=(zone_name, owning_camera) if zone_name else (owning_camera,),
@@ -862,6 +877,7 @@ async def handle_delivery_event(
             # match) -- the case this fallback exists for.
             native_family = live_activities.classify_family(
                 subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
+                level=card.level,
             )
             if native_family is not None:
                 logger.info(

@@ -177,7 +177,9 @@ async def test_rate_cap_plus_n_more_on_next_sounding(sidecar_db_path: Path):
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
-    device = make_device()
+    # No push-to-start token: this test pins pure card-path semantics, and a
+    # device with an LA would (correctly) get its card demoted (la_first).
+    device = make_device(push_to_start="")
     config = PushSection(delivery_enabled=True)
 
     # Seed 10 sounding sends, then bump suppressed count by 3.
@@ -274,7 +276,8 @@ async def test_mute_sounds_strips_sound_not_suppresses(sidecar_db_path: Path):
     Snapshot.muted → SUPPRESSED; now it just drops the sound key."""
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
-    device = make_device()
+    # Card-path semantics only — see rate-cap test above for why no LA.
+    device = make_device(push_to_start="")
     config = PushSection(delivery_enabled=True)
 
     settings = policy_settings.default_settings()

@@ -182,9 +182,13 @@ async def test_dry_run_scenario_escalate_urgent():
 
     escalate = next(d for d in decisions if d["mutation"] == "escalate")
     assert escalate["level"] == "urgent"
-    assert escalate["sounded"] is True
-    assert escalate["sound_name"] == "urgent.caf"
-    assert escalate["interruption_level"] == "time-sensitive"
+    # Routing-gated families: the dry-run device is LA-capable, so the
+    # escalation late-starts a person LA whose start alert carries the
+    # sound, and the card is demoted to the silent history row.
+    assert escalate["sounded"] is False
+    assert escalate["interruption_level"] == "passive"
+    assert escalate["la_action"] == "start"
+    assert escalate["la_sound_name"] == "urgent.caf"
 
 
 @pytest.mark.asyncio

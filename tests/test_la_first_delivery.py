@@ -142,10 +142,16 @@ def test_classify_family_off_limits_is_person_restricted():
     ) == la.PERSON_RESTRICTED
 
 
-def test_classify_family_doors_is_person():
+def test_classify_family_routed_person_is_person():
     assert la.classify_family(
-        subject_kind="stranger", label="person", place_class="doors",
+        subject_kind="stranger", label="person", place_class="doors", level="notify",
     ) == la.PERSON
+    assert la.classify_family(
+        subject_kind="stranger", label="person", place_class="private", level="urgent",
+    ) == la.PERSON
+    assert la.classify_family(
+        subject_kind="stranger", label="person", place_class="doors", level="quiet",
+    ) is None
 
 
 def test_person_restricted_glyph():

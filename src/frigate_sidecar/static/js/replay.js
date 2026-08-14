@@ -35,7 +35,19 @@
         }),
       });
 
-      var run = await resp.json();
+      // Parse text first: a non-JSON body (proxy error page, HTML 500 from
+      // an older sidecar) must surface as a readable error, not a
+      // SyntaxError swallowing the real cause.
+      var raw = await resp.text();
+      var run;
+      try {
+        run = JSON.parse(raw);
+      } catch (parseErr) {
+        stateEl.textContent =
+          "error: HTTP " + resp.status + " — " + raw.slice(0, 200);
+        btn.disabled = false;
+        return;
+      }
 
       if (!resp.ok) {
         stateEl.textContent = "error: " + (run.detail || resp.status);

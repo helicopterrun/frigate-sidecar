@@ -30,19 +30,29 @@ def test_openings_family_matches_door_gate_garage():
         ) == la.OPENINGS
 
 
-def test_person_family_requires_doors():
+def test_person_family_follows_routing_not_place_class():
+    # The routing table is the authority: a person whose card routes
+    # notify/urgent gets an LA wherever they are — the old doors gate meant
+    # entry zones classified Private could never start one (2026-08-14).
+    for place in ("doors", "yard", "private", "street"):
+        assert la.should_start_activity(
+            subject_kind="stranger", label="person", place_class=place, level="notify",
+        ) == la.PERSON
     assert la.should_start_activity(
-        subject_kind="stranger", label="person", place_class="doors",
+        subject_kind="known", label="person", place_class="private", level="urgent",
     ) == la.PERSON
+    # Logged/quiet people don't mint activities.
     assert la.should_start_activity(
-        subject_kind="known", label="person", place_class="doors",
-    ) == la.PERSON
+        subject_kind="stranger", label="person", place_class="doors", level="quiet",
+    ) is None
     assert la.should_start_activity(
-        subject_kind="stranger", label="person", place_class="yard",
+        subject_kind="stranger", label="person", place_class="yard", level="log",
     ) is None
 
 
 def test_person_restricted_family_off_limits():
+    # Restricted is place-gated regardless of level — the user classified
+    # that ground as off-limits, which is itself routing vocabulary.
     assert la.should_start_activity(
         subject_kind="stranger", label="person", place_class="off_limits",
     ) == la.PERSON_RESTRICTED
