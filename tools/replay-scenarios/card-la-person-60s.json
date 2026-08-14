@@ -1,0 +1,29 @@
+{
+  "id": "card-la-person-60s",
+  "camera": "doorbell",
+  "label": "person",
+  "description": "60-second person visit for LA cadence testing: arrive, dwell in zone, zone transition, dwell, enrichment (sub_label), resolve. Should produce <=6 LA pushes with delta-only cadence.",
+  "steps": [
+    {"type": "new",    "severity": "alert", "delay_s": 0,  "topic": "frigate/reviews", "zones": ["front_door"]},
+    {"type": "update", "severity": "alert", "delay_s": 3,  "topic": "frigate/events",  "zones": ["front_door"]},
+    {"type": "update", "severity": "alert", "delay_s": 6,  "topic": "frigate/events",  "zones": ["front_door"]},
+    {"type": "update", "severity": "alert", "delay_s": 9,  "topic": "frigate/events",  "zones": ["front_door"]},
+    {"type": "update", "severity": "alert", "delay_s": 12, "topic": "frigate/events",  "zones": ["front_door"]},
+    {"type": "update", "severity": "alert", "delay_s": 15, "topic": "frigate/reviews", "zones": ["front_door"]},
+    {"type": "update", "severity": "alert", "delay_s": 18, "topic": "frigate/events",  "zones": ["front_door"]},
+    {"type": "update", "severity": "alert", "delay_s": 21, "topic": "frigate/events",  "zones": ["front_door"]},
+    {"type": "update", "severity": "alert", "delay_s": 24, "topic": "frigate/events",  "zones": ["front_door", "porch"]},
+    {"type": "update", "severity": "alert", "delay_s": 27, "topic": "frigate/reviews", "zones": ["front_door", "porch"]},
+    {"type": "update", "severity": "alert", "delay_s": 30, "topic": "frigate/events",  "zones": ["porch"]},
+    {"type": "update", "severity": "alert", "delay_s": 33, "topic": "frigate/events",  "zones": ["porch"]},
+    {"type": "update", "severity": "alert", "delay_s": 36, "topic": "frigate/events",  "zones": ["porch"]},
+    {"type": "update", "severity": "alert", "delay_s": 39, "topic": "frigate/reviews", "zones": ["porch"]},
+    {"type": "update", "severity": "alert", "delay_s": 42, "topic": "frigate/events",  "zones": ["porch"]},
+    {"type": "update", "severity": "alert", "delay_s": 45, "topic": "frigate/events",  "zones": ["porch"]},
+    {"type": "update", "severity": "alert", "delay_s": 48, "topic": "frigate/events",  "zones": ["porch"]},
+    {"type": "update", "severity": "alert", "delay_s": 51, "topic": "frigate/reviews", "zones": ["porch"], "sub_labels": ["Alex"]},
+    {"type": "update", "severity": "alert", "delay_s": 54, "topic": "frigate/events",  "zones": ["porch"]},
+    {"type": "update", "severity": "alert", "delay_s": 57, "topic": "frigate/events",  "zones": ["porch"]},
+    {"type": "end",    "severity": "alert", "delay_s": 60, "topic": "frigate/events",  "zones": []}
+  ]
+}

@@ -227,7 +227,12 @@ class PushEngine:
             return 0
 
         now = time.time()
-        self.tracks.observe_object(obj.camera, obj.track_id, obj.current_zones, now=now)
+        self.tracks.observe_object(
+            obj.camera, obj.track_id, obj.current_zones, now=now,
+            path_data=obj.path_data, velocity_angle=obj.velocity_angle,
+            average_estimated_speed=obj.average_estimated_speed,
+            stationary=obj.stationary,
+        )
         if obj.sub_label:
             old_sub = self._sub_labels.get(key)
             self._sub_labels[key] = obj.sub_label

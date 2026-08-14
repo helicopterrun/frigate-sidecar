@@ -68,7 +68,20 @@ _MEDIA_MUTATIONS = frozenset({CREATE, ENRICH})
 #: a constant like every other MVP threshold in this module.
 _DEDUP_WINDOW_S = 15.0
 
+#: §8 LA cadence: minimum seconds between content-state pushes per activity.
+_LA_UPDATE_MIN_INTERVAL_S = 3.0
+#: §8 path growth threshold: push only when this many new points have arrived.
+_LA_PATH_GROWTH_THRESHOLD = 3
+
+#: Place-class ordering outermost→innermost, for the zones.ladder.
+_PLACE_ORDER = ("street", "yard", "doors", "private", "off_limits")
+
 logger = logging.getLogger(__name__)
+
+#: Per-(card_key, apns_token) snapshot of the last LA push, for delta
+#: detection. In-memory only — a sidecar restart flushes it, which just
+#: means the first post-restart push always goes out (safe).
+_la_prev_state: dict[tuple[str, str], dict[str, Any]] = {}
 
 #: Frigate labels this MVP treats as an animal subject, beyond the
 #: dangerous-animal labels `ladder.py` already reclassifies via `label`
@@ -167,6 +180,112 @@ def _glyph_for(subject_kind: str, label: str) -> str:
     if label:
         return f"{subject_kind}.{label}"
     return _SUBJECT_GLYPH.get(subject_kind, "motion.detected")
+
+
+def _heading_label(velocity_angle: float | None, stationary: bool) -> str | None:
+    """Derive heading from velocity_angle. Returns one of the §8 vocabulary
+    words or None when unknown."""
+    if stationary:
+        return "stationary"
+    if velocity_angle is None:
+        return None
+    # velocity_angle is degrees from camera's perspective: 0=away, 180=toward.
+    # Simplification: <60 = leaving, >120 = approaching, else passing.
+    angle = velocity_angle % 360
+    if angle > 120 and angle < 240:
+        return "approaching"
+    if angle < 60 or angle > 300:
+        return "leaving"
+    return "passing"
+
+
+def _build_motion(
+    velocity_angle: float | None, stationary: bool,
+    average_estimated_speed: float | None, has_zone_distances: bool,
+) -> dict[str, str] | None:
+    heading = _heading_label(velocity_angle, stationary)
+    if heading is None:
+        return None
+    motion: dict[str, str] = {"heading": heading}
+    if has_zone_distances and average_estimated_speed is not None and heading != "stationary":
+        mph = average_estimated_speed
+        if mph < 3:
+            motion["speed_label"] = "walking"
+        elif mph < 8:
+            motion["speed_label"] = "jogging"
+        else:
+            motion["speed_label"] = f"{int(mph)} mph"
+    return motion
+
+
+def _build_zones_ladder(
+    event_zones: tuple[str, ...],
+    current_zones: tuple[str, ...],
+    zone_classes: dict[str, str],
+) -> dict[str, Any] | None:
+    """Build zones.ladder (display names outermost→innermost) and current_index."""
+    if not event_zones:
+        return None
+    ordered: list[tuple[int, str]] = []
+    for z in event_zones:
+        pc = zone_classes.get(z) or policy_settings.guess_zone_class(z)
+        idx = _PLACE_ORDER.index(pc) if pc in _PLACE_ORDER else 1
+        ordered.append((idx, z))
+    ordered.sort(key=lambda t: t[0])
+    ladder = [z.replace("_", " ").title() for _, z in ordered[:5]]
+    zone_names = [z for _, z in ordered[:5]]
+    current_index = -1
+    for i, name in enumerate(zone_names):
+        if name in current_zones:
+            current_index = i
+    return {"ladder": ladder, "current_index": current_index}
+
+
+def _build_la_path(path_data: list[tuple[float, float]]) -> dict[str, Any] | None:
+    if not path_data:
+        return None
+    points = live_activities.downsample_path(
+        [list(pt) for pt in path_data],
+    )
+    if not points:
+        return None
+    return {"points": points}
+
+
+def _la_has_visible_delta(
+    *,
+    mutation: str,
+    prev_mutation: str | None,
+    prev_level: str | None,
+    level: str,
+    primary: str,
+    prev_primary: str | None,
+    glyph: str,
+    prev_glyph: str | None,
+    current_zones: tuple[str, ...],
+    prev_zones: tuple[str, ...] | None,
+    path_len: int,
+    prev_path_len: int,
+    heading: str | None,
+    prev_heading: str | None,
+) -> str | None:
+    """Return the delta reason if there's a visible change worth pushing,
+    or None to suppress the push."""
+    if mutation in (CREATE, ESCALATE, DEESCALATE, RESOLVE):
+        return mutation
+    if level != prev_level:
+        return "level_change"
+    if primary != prev_primary:
+        return "text_change"
+    if glyph != prev_glyph:
+        return "glyph_change"
+    if current_zones != prev_zones:
+        return "zone_transition"
+    if heading is not None and heading != prev_heading:
+        return "heading_change"
+    if path_len - prev_path_len >= _LA_PATH_GROWTH_THRESHOLD:
+        return "path_growth"
+    return None
 
 
 def _media_for(
@@ -289,6 +408,10 @@ async def _deliver_live_activities(
     media_handle: str | None,
     now: float,
     sound_allowed: bool = True,
+    state_since_ts: float | None = None,
+    motion: dict[str, str] | None = None,
+    zones: dict[str, Any] | None = None,
+    path: dict[str, Any] | None = None,
 ) -> set[str]:
     """The Live Activity side of one card mutation, one iteration per
     registered device (Elsinore Phase 3, `docs/push-notifications.md` "Live
@@ -353,6 +476,8 @@ async def _deliver_live_activities(
                 primary=primary, secondary=secondary, elapsed_seconds=elapsed_seconds,
                 card_key=card_key, thumbnail_handle=None,
                 thumbnail_revision=int(row["thumbnail_revision"] or 1),
+                state_since_ts=state_since_ts,
+                motion=motion, zones=zones, path=path,
             )
             payload = live_activities.build_la_end_payload(
                 content_state=content_state, now=now, dismissal_offset=30.0,
@@ -366,6 +491,7 @@ async def _deliver_live_activities(
                 if result.ok:
                     covered.add(device.apns_token)
                 store.close_activity(conn, row["activity_id"], now=now)
+                _la_prev_state.pop((card_key, device.apns_token), None)
             else:
                 # Fast create→resolve: the app hasn't uploaded the
                 # per-activity token yet, and iOS only accepts `start` on
@@ -397,6 +523,8 @@ async def _deliver_live_activities(
                 ),
                 primary=primary, secondary=secondary, elapsed_seconds=elapsed_seconds,
                 card_key=card_key, thumbnail_handle=media_handle, thumbnail_revision=1,
+                state_since_ts=state_since_ts,
+                motion=motion, zones=zones, path=path,
             )
             # Honor the card path's sound accounting (mute, quiet hours,
             # per-card budget): the start's required `alert` dict stays,
@@ -443,13 +571,44 @@ async def _deliver_live_activities(
         revision = int(row["thumbnail_revision"] or 1)
         if media_handle:
             revision += 1
+        # §8 delta detection: suppress LA pushes that carry no visible change.
+        glyph_val = live_activities.glyph_for(
+            family or "", subject_kind=subject_kind, label=label, mutation=mutation,
+        )
+        heading_val = motion.get("heading") if motion else None
+        current_zones_tuple = tuple(zones["ladder"]) if zones else ()
+        path_len = len(path["points"]) if path else 0
+        prev_key = (card_key, device.apns_token)
+        prev = _la_prev_state.get(prev_key, {})
+        delta_reason = _la_has_visible_delta(
+            mutation=mutation,
+            prev_mutation=prev.get("mutation"),
+            prev_level=prev.get("level"),
+            level=card.level,
+            primary=primary,
+            prev_primary=prev.get("primary"),
+            glyph=glyph_val,
+            prev_glyph=prev.get("glyph"),
+            current_zones=current_zones_tuple,
+            prev_zones=prev.get("zones"),
+            path_len=path_len,
+            prev_path_len=prev.get("path_len", 0),
+            heading=heading_val,
+            prev_heading=prev.get("heading"),
+        )
+        last_la_push = float(row["last_push_at"] or 0)
+        if delta_reason is None:
+            continue
+        if now - last_la_push < _LA_UPDATE_MIN_INTERVAL_S:
+            continue
+        logger.info("la-push reason=%s card_key=%s", delta_reason, card_key)
+
         content_state = live_activities.build_content_state(
-            level=card.level, mutation=mutation,
-            glyph=live_activities.glyph_for(
-                family or "", subject_kind=subject_kind, label=label, mutation=mutation,
-            ),
+            level=card.level, mutation=mutation, glyph=glyph_val,
             primary=primary, secondary=secondary, elapsed_seconds=elapsed_seconds,
             card_key=card_key, thumbnail_handle=media_handle, thumbnail_revision=revision,
+            state_since_ts=state_since_ts,
+            motion=motion, zones=zones, path=path,
         )
 
         # Escalation alert: when level rises to notify/urgent, the LA update
@@ -485,6 +644,11 @@ async def _deliver_live_activities(
             conn, row["activity_id"], thumbnail_revision=revision, pushed=True, now=now,
         )
         store.record_activity_send(conn, activity_id=row["activity_id"], now=now)
+        _la_prev_state[(card_key, device.apns_token)] = {
+            "mutation": mutation, "level": card.level, "primary": primary,
+            "glyph": glyph_val, "zones": current_zones_tuple,
+            "path_len": path_len, "heading": heading_val,
+        }
 
     return covered
 
@@ -520,6 +684,7 @@ async def end_activity_if_card_closed(
         glyph=live_activities.glyph_for("", subject_kind=kind, label="", mutation=RESOLVE),
         primary=primary, secondary=secondary, elapsed_seconds=int(elapsed),
         card_key=card_key, thumbnail_handle=None, thumbnail_revision=1,
+        state_since_ts=round(card.state_since_at, 1) if card.state_since_at else None,
     )
     payload = live_activities.build_la_end_payload(
         content_state=content_state, now=now, dismissal_offset=30.0,
@@ -693,12 +858,35 @@ async def handle_delivery_event(
                     "la: family=%s not_eligible -> fallback family=%s (la_only)",
                     native_family, live_activities.CATCH_ALL,
                 )
+        # §8 instrument fields — derived from the engine's track store.
+        la_state_since_ts = round(card.state_since_at, 1) if card.state_since_at else None
+        la_motion = None
+        la_zones = None
+        la_path = None
+        if engine is not None:
+            track_state = engine.tracks.get(event.camera, track_id)
+            if track_state is not None:
+                la_motion = _build_motion(
+                    track_state.velocity_angle, track_state.stationary,
+                    track_state.average_estimated_speed,
+                    has_zone_distances=False,
+                )
+                live_zones = tuple(
+                    z for z in track_state.first_seen_in_zone if z
+                )
+                la_zones = _build_zones_ladder(
+                    event.zones, live_zones, policy["zone_classes"],
+                )
+                la_path = _build_la_path(track_state.path_data)
+
         la_covered = await _deliver_live_activities(
             conn, devices, transport, config=config, card=card, mutation=mutation,
             family=family, camera=owning_camera, subject_kind=subject_kind,
             label=snapshot.label, primary=primary, secondary=secondary,
             elapsed_seconds=int(elapsed), media_handle=media_handle, now=now,
             sound_allowed=sound,
+            state_since_ts=la_state_since_ts, motion=la_motion,
+            zones=la_zones, path=la_path,
         )
         if la_covered:
             logger.info(
@@ -820,6 +1008,7 @@ async def handle_delivery_resolve(
             family=None, camera=camera, subject_kind=kind, label="",
             primary=primary, secondary=secondary, elapsed_seconds=int(elapsed),
             media_handle=None, now=now, sound_allowed=sound,
+            state_since_ts=round(card.state_since_at, 1) if card.state_since_at else None,
         )
         la_only = bool(
             policy_settings.get_active().get("live_activities", {}).get("la_only", False)
@@ -935,6 +1124,7 @@ async def handle_recognition_event(
         family=None, camera=owning_camera, subject_kind=subject_kind, label=label,
         primary=primary, secondary=secondary, elapsed_seconds=int(elapsed),
         media_handle=None, now=now, sound_allowed=False,
+        state_since_ts=round(card.state_since_at, 1) if card.state_since_at else None,
     )
     payload = None
     if should_push(card.level):

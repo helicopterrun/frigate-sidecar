@@ -171,6 +171,26 @@ def run_scenario(
         publish(msg["topic"], json.dumps(msg["payload"]))
 
 
+def _inject_activity_token(db_path: str | Path, la_send: dict[str, Any]) -> None:
+    """After a dry-run LA start, inject a per-activity token so subsequent
+    update/end pushes have somewhere to go."""
+    from frigate_sidecar import db as _db
+    conn = _db.open_sidecar(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT activity_id FROM push_activities WHERE ended_at IS NULL "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE push_activities SET token = ? WHERE activity_id = ?",
+                (f"fake-activity-token-{row['activity_id']}", row["activity_id"]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def print_decisions(decisions: list[dict[str, Any]]) -> None:
     for d in decisions:
         parts = [f"step {d['step']}: {d['topic'].split('/')[-1]}/{d['type']}"]
@@ -273,12 +293,17 @@ async def dry_run_scenario(
                 step_decision["mutation"] = "(no push)"
 
             if la_sends:
-                la = la_sends[0]
-                step_decision["la_action"] = la["event"]
-                tok = la.get("token", "")
+                la_send = la_sends[0]
+                step_decision["la_action"] = la_send["event"]
+                tok = la_send.get("token", "")
                 step_decision["la_token_type"] = (
                     "push-to-start" if tok.startswith("pts") else "per-activity"
                 )
+                # Simulate the app uploading the per-activity token after
+                # a successful start — without this, update/end pushes can
+                # never be sent in dry-run mode.
+                if la_send["event"] == "start":
+                    _inject_activity_token(db_path, la_send)
             elif topic == "frigate/reviews":
                 step_decision["la_action"] = "(none)"
 

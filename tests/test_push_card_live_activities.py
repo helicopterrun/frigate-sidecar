@@ -238,3 +238,95 @@ def test_build_la_end_payload_dismissal_is_timestamp_plus_thirty():
     assert aps["dismissal-date"] == 1786235359
     assert aps["relevance-score"] == 0.75  # default level is "notify"
     assert "thumbnail_handle" not in aps["content-state"]
+
+
+# -- §8 instrument fields ---------------------------------------------------
+
+def test_content_state_with_all_s8_fields():
+    """Target payload 1: silent update with all §8 fields."""
+    state = _content_state(
+        level="notify", mutation="enrich",
+        state_since_ts=1786337290.0,
+        motion={"heading": "approaching", "speed_label": "walking"},
+        zones={"ladder": ["Street", "Path", "Porch"], "current_index": 1},
+        path={"points": [[0.05, 0.90], [0.15, 0.84], [0.24, 0.78],
+                          [0.36, 0.68], [0.47, 0.56], [0.56, 0.44]]},
+    )
+    assert state["state_since_ts"] == 1786337290.0
+    assert state["motion"] == {"heading": "approaching", "speed_label": "walking"}
+    assert state["zones"]["ladder"] == ["Street", "Path", "Porch"]
+    assert state["zones"]["current_index"] == 1
+    assert len(state["path"]["points"]) == 6
+    assert state["elapsed_seconds"] == 0  # still present
+
+
+def test_content_state_s8_fields_omitted_when_none():
+    """Legacy shape: no §8 fields when not provided."""
+    state = _content_state()
+    for key in ("state_since_ts", "motion", "zones", "path"):
+        assert key not in state
+
+
+def test_content_state_motion_without_speed():
+    """Target payload 2: stationary, no speed_label."""
+    state = _content_state(
+        motion={"heading": "stationary"},
+        state_since_ts=1786337290.0,
+    )
+    assert state["motion"] == {"heading": "stationary"}
+    assert "speed_label" not in state["motion"]
+
+
+def test_content_state_size_under_budget():
+    state = _content_state(
+        level="urgent", mutation="escalate", glyph="figure.stand",
+        primary="Still at Front Door", secondary="Front Door · 2m",
+        elapsed_seconds=126,
+        state_since_ts=1786337290.0,
+        motion={"heading": "stationary"},
+        zones={"ladder": ["Street", "Path", "Porch", "Yard", "Private"], "current_index": 2},
+        path={"points": [[round(i * 0.03, 2), round(0.9 - i * 0.02, 2)] for i in range(30)]},
+    )
+    import json
+    size = len(json.dumps(state, separators=(",", ":")).encode())
+    assert size < 4096
+
+
+# -- Path downsampling -------------------------------------------------------
+
+def test_downsample_path_preserves_first_and_last():
+    raw = [[i * 0.01, i * 0.02] for i in range(50)]
+    result = la.downsample_path(raw, max_points=10)
+    assert len(result) == 10
+    assert result[0] == [0.0, 0.0]
+    assert result[-1] == [round(49 * 0.01, 2), round(49 * 0.02, 2)]
+
+
+def test_downsample_path_max_30_points():
+    raw = [[i * 0.005, i * 0.005] for i in range(100)]
+    result = la.downsample_path(raw)
+    assert len(result) <= 30
+
+
+def test_downsample_path_coordinates_in_range():
+    raw = [[-0.1, 1.5], [0.5, 0.5], [2.0, -0.3]]
+    result = la.downsample_path(raw)
+    for x, y in result:
+        assert 0.0 <= x <= 1.0
+        assert 0.0 <= y <= 1.0
+
+
+def test_downsample_path_two_decimal_precision():
+    raw = [[0.12345, 0.67891]]
+    result = la.downsample_path(raw)
+    assert result == [[0.12, 0.68]]
+
+
+def test_downsample_path_passthrough_when_under_limit():
+    raw = [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+    result = la.downsample_path(raw)
+    assert len(result) == 3
+
+
+def test_downsample_path_empty():
+    assert la.downsample_path([]) == []

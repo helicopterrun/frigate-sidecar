@@ -305,6 +305,11 @@ class TrackState:
     #: a Live Activity in flight. Per device as well as per situation because
     #: each device runs its own activity for the same real-world moment.
     stages: dict[tuple[str, str], str] = field(default_factory=dict)
+    #: §8 instrument fields, updated from frigate/events.
+    path_data: list[tuple[float, float]] = field(default_factory=list)
+    velocity_angle: float | None = None
+    average_estimated_speed: float | None = None
+    stationary: bool = False
 
 
 class TrackStore:
@@ -369,6 +374,10 @@ class TrackStore:
         current_zones: tuple[str, ...],
         *,
         now: float,
+        path_data: tuple[tuple[float, float], ...] = (),
+        velocity_angle: float | None = None,
+        average_estimated_speed: float | None = None,
+        stationary: bool = False,
     ) -> None:
         """Record live occupancy from a `frigate/events` message.
 
@@ -392,6 +401,11 @@ class TrackStore:
         # camera, and a zoneless situation is asking about exactly that.
         state.first_seen_in_zone.setdefault("", now)
         state.last_update_at = now
+        if path_data:
+            state.path_data = list(path_data)
+        state.velocity_angle = velocity_angle
+        state.average_estimated_speed = average_estimated_speed
+        state.stationary = stationary
 
     def forget(self, camera: str, track_id: str) -> None:
         """Drop a track outright -- Frigate says the object is gone."""

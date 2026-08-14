@@ -105,7 +105,41 @@ def parse_object_message(payload: dict[str, Any]) -> TrackedObject | None:
         msg_type=str(msg_type),
         stationary=bool(after.get("stationary")),
         sub_label=str(sub_label or ""),
+        path_data=_parse_path_xy(after.get("path_data")),
+        velocity_angle=_opt_float(after.get("velocity_angle")),
+        average_estimated_speed=_opt_float(after.get("average_estimated_speed")),
     )
+
+
+def _opt_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_path_xy(raw: Any) -> tuple[tuple[float, float], ...]:
+    """Extract (x, y) pairs from Frigate's path_data.
+    Frigate sends [[x, y, t], ...] or [[[x, y], t], ...]."""
+    if not isinstance(raw, (list, tuple)) or not raw:
+        return ()
+    result: list[tuple[float, float]] = []
+    for entry in raw:
+        if not entry:
+            continue
+        if len(entry) == 2 and isinstance(entry[0], (list, tuple)) and len(entry[0]) == 2:
+            (x, y), _t = entry
+        elif len(entry) >= 2:
+            x, y = entry[0], entry[1]
+        else:
+            continue
+        try:
+            result.append((float(x), float(y)))
+        except (TypeError, ValueError):
+            continue
+    return tuple(result)
 
 
 def _strings(value: Any) -> tuple[str, ...]:

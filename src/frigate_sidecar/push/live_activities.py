@@ -189,6 +189,32 @@ def glyph_for(family: str, *, subject_kind: str, label: str, mutation: str) -> s
     return _RESOLVED_GLYPH
 
 
+_MAX_PATH_POINTS = 30
+_CONTENT_STATE_BUDGET = 4096
+
+
+def downsample_path(
+    raw: list[list[float] | tuple[float, ...]], *, max_points: int = _MAX_PATH_POINTS,
+) -> list[list[float]]:
+    """Evenly downsample a path to at most `max_points`, preserving first
+    and last. Coordinates rounded to 2 decimals, clamped to [0, 1]."""
+    if not raw:
+        return []
+    cleaned: list[list[float]] = []
+    for pt in raw:
+        if len(pt) < 2:
+            continue
+        x = round(max(0.0, min(1.0, float(pt[0]))), 2)
+        y = round(max(0.0, min(1.0, float(pt[1]))), 2)
+        cleaned.append([x, y])
+    if len(cleaned) <= max_points:
+        return cleaned
+    step = (len(cleaned) - 1) / (max_points - 1)
+    result = [cleaned[round(i * step)] for i in range(max_points - 1)]
+    result.append(cleaned[-1])
+    return result
+
+
 def build_content_state(
     *,
     level: str,
@@ -200,6 +226,10 @@ def build_content_state(
     card_key: str,
     thumbnail_handle: str | None,
     thumbnail_revision: int,
+    state_since_ts: float | None = None,
+    motion: dict[str, str] | None = None,
+    zones: dict[str, Any] | None = None,
+    path: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The dynamic half of the activity, snake_case to match the Swift
     type's `CodingKeys` exactly -- these field names are load-bearing wire
@@ -216,6 +246,18 @@ def build_content_state(
     }
     if thumbnail_handle is not None:
         state["thumbnail_handle"] = thumbnail_handle
+    if state_since_ts is not None:
+        state["state_since_ts"] = state_since_ts
+    if motion is not None:
+        state["motion"] = motion
+    if zones is not None:
+        state["zones"] = zones
+    if path is not None:
+        state["path"] = path
+    encoded_size = len(json.dumps(state, separators=(",", ":")).encode())
+    assert encoded_size <= _CONTENT_STATE_BUDGET, (
+        f"content-state {encoded_size} bytes exceeds {_CONTENT_STATE_BUDGET} byte budget"
+    )
     return state
 
 
