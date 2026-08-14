@@ -172,7 +172,10 @@ def _copy(
         primary = f"{identity} · at {place_pretty}"
     else:
         primary = f"{subject_text} at {place_pretty}"
-    secondary = f"{place_pretty} · {int(elapsed_s)}s"
+    if elapsed_s > 0:
+        secondary = f"{place_pretty} · {int(elapsed_s)}s"
+    else:
+        secondary = place_pretty
     return primary, secondary
 
 

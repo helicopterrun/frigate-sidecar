@@ -30,7 +30,7 @@ def test_openings_family_matches_door_gate_garage():
         ) == la.OPENINGS
 
 
-def test_person_family_requires_doors_place_class():
+def test_person_family_requires_doors_or_off_limits():
     assert la.should_start_activity(
         subject_kind="stranger", label="person", place_class="doors",
     ) == la.PERSON
@@ -40,6 +40,18 @@ def test_person_family_requires_doors_place_class():
     assert la.should_start_activity(
         subject_kind="stranger", label="person", place_class="yard",
     ) is None
+
+
+def test_person_family_off_limits_starts_la():
+    assert la.should_start_activity(
+        subject_kind="stranger", label="person", place_class="off_limits",
+    ) == la.PERSON
+    assert la.should_start_activity(
+        subject_kind="known", label="person", place_class="off_limits",
+    ) == la.PERSON
+    assert la.should_start_activity(
+        subject_kind="person", label="person", place_class="off_limits",
+    ) == la.PERSON
 
 
 def test_non_qualifying_cards_return_none():

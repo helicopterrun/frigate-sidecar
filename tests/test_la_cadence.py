@@ -5,7 +5,7 @@ Tests the delta detection function directly — no real-time waits needed.
 
 from __future__ import annotations
 
-from frigate_sidecar.push.delivery_wire import _la_has_visible_delta
+from frigate_sidecar.push.delivery_wire import _copy, _la_has_visible_delta
 
 
 def _delta(**kw):
@@ -102,3 +102,16 @@ def test_60s_visit_produces_at_most_6_pushes():
     ), **s}) is not None)
     assert pushes <= 6, f"expected ≤6 LA pushes, got {pushes}"
     assert pushes >= 4  # create + zone_transition + text_change + deescalate + resolve = 5
+
+
+# -- Copy text ----------------------------------------------------------------
+
+def test_create_secondary_omits_elapsed_zero():
+    _, secondary = _copy("stranger", "person", "doorbell", "front_garden", 0.0)
+    assert secondary == "Front Garden"
+    assert "0s" not in secondary
+
+
+def test_enrich_secondary_includes_elapsed():
+    _, secondary = _copy("stranger", "person", "doorbell", "front_garden", 45.0)
+    assert secondary == "Front Garden · 45s"

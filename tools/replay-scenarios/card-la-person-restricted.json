@@ -1,0 +1,16 @@
+{
+  "id": "card-la-person-restricted",
+  "camera": "stairway-tight",
+  "label": "person",
+  "description": "Person in a Restricted zone (off_limits place class) — should start an LA, delta updates, then resolve.",
+  "steps": [
+    {"type": "new",    "severity": "alert", "delay_s": 0,  "topic": "frigate/reviews", "zones": ["restricted_area"]},
+    {"type": "update", "severity": "alert", "delay_s": 3,  "topic": "frigate/events",  "zones": ["restricted_area"]},
+    {"type": "update", "severity": "alert", "delay_s": 6,  "topic": "frigate/events",  "zones": ["restricted_area"]},
+    {"type": "update", "severity": "alert", "delay_s": 9,  "topic": "frigate/reviews", "zones": ["restricted_area"]},
+    {"type": "update", "severity": "alert", "delay_s": 12, "topic": "frigate/events",  "zones": ["restricted_area", "driveway"]},
+    {"type": "update", "severity": "alert", "delay_s": 15, "topic": "frigate/reviews", "zones": ["restricted_area", "driveway"]},
+    {"type": "update", "severity": "alert", "delay_s": 18, "topic": "frigate/events",  "zones": ["driveway"]},
+    {"type": "end",    "severity": "alert", "delay_s": 21, "topic": "frigate/events",  "zones": []}
+  ]
+}

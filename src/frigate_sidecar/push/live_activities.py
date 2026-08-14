@@ -110,7 +110,7 @@ def classify_family(*, subject_kind: str, label: str, place_class: str) -> str |
         return BINS
     if subject_kind == "thing" and label in _OPENING_LABELS:
         return OPENINGS
-    if subject_kind in ("stranger", "known", "person") and place_class == "doors":
+    if subject_kind in ("stranger", "known", "person") and place_class in ("doors", "off_limits"):
         return PERSON
     return None
 
