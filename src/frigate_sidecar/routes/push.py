@@ -84,6 +84,7 @@ class DeviceRegistration(BaseModel):
     push_to_start_token: str = ""
 
     # Accepted, persisted, and deliberately unread (Phase 4's digest and LLM).
+    la_capable: bool = True
     live_activity_token: str = ""
     morning_digest: dict[str, Any] | None = None
     llm: dict[str, Any] | None = None
@@ -188,6 +189,7 @@ async def register_device(
             morning_digest=body.morning_digest,
             llm=body.llm,
             push_to_start_token=body.push_to_start_token,
+            la_capable=body.la_capable,
         )
         if body.snoozes is not None:
             store.replace_snoozes(conn, apns_token=apns_token, snoozes=body.snoozes)
@@ -228,6 +230,7 @@ async def register_device(
         "device_id": device_id,
         "schema_version": schema_version,
         "situations_accepted": len(parsed),
+        "la_capable": bool(stored.la_capable) if stored else True,
         "live_activities": bool(stored and stored.can_live_activity),
     }
 
@@ -662,10 +665,25 @@ async def put_push_settings(request: Request) -> dict[str, Any]:
     # keys it doesn't know — so a client that omits la_only must not silently
     # reset it. Only an explicit boolean in the body changes it.
     la_body = body.get("live_activities") if isinstance(body, dict) else None
+    active_la = policy_settings.get_active().get("live_activities", {})
     if not (isinstance(la_body, dict) and isinstance(la_body.get("la_only"), bool)):
-        merged["live_activities"]["la_only"] = bool(
-            policy_settings.get_active().get("live_activities", {}).get("la_only", False)
-        )
+        merged["live_activities"]["la_only"] = bool(active_la.get("la_only", False))
+    if not (isinstance(la_body, dict) and la_body.get("delivery") in ("la_first", "notifications")):
+        merged["live_activities"]["delivery"] = active_la.get("delivery", "la_first")
     policy_settings.save_settings(settings.push.push_settings_path, merged)
     policy_settings.apply_settings(merged)
+    return {"ok": True}
+
+
+@router.post("/feedback")
+async def post_feedback(request: Request) -> dict[str, Any]:
+    """Log user feedback on a push notification (tuning trace, no routing
+    changes this phase). Accepts any verdict string for forward compat."""
+    body = await request.json()
+    if not isinstance(body, dict) or "card_key" not in body or "verdict" not in body:
+        raise HTTPException(status_code=400, detail="card_key and verdict required")
+    logger.info(
+        "push-feedback: card_key=%s event_id=%s verdict=%s",
+        body["card_key"], body.get("event_id", ""), body["verdict"],
+    )
     return {"ok": True}

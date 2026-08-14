@@ -108,11 +108,12 @@ class Device:
     #: device can't run them, and its Present-tier situations fall back to
     #: alert pushes ("the app works without Phase 2").
     push_to_start_token: str = ""
+    la_capable: bool = True
 
     @property
     def can_live_activity(self) -> bool:
         """Whether Phase 2's Live Activity path is available to this device."""
-        return bool(self.push_to_start_token)
+        return bool(self.push_to_start_token) and self.la_capable
 
     @property
     def uses_situations(self) -> bool:

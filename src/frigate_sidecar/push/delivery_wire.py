@@ -507,10 +507,10 @@ async def _deliver_live_activities(
             continue
 
         if row is None:
-            if mutation != CREATE or family is None or not device.push_to_start_token:
+            if mutation != CREATE or family is None or not device.can_live_activity:
                 logger.info(
-                    "push: LA skip device=%s reason=no_row mutation=%s family=%s pts=%s",
-                    device.device_id, mutation, family, bool(device.push_to_start_token),
+                    "push: LA skip device=%s reason=no_row mutation=%s family=%s la_capable=%s pts=%s",
+                    device.device_id, mutation, family, device.la_capable, bool(device.push_to_start_token),
                 )
                 continue
             if not _device_eligible(device, camera=camera, labels=(label,), card_level=card.level):
@@ -630,6 +630,9 @@ async def _deliver_live_activities(
             la_interruption = "time-sensitive" if card.level == "urgent" else "active"
         elif alert_all and mutation == ESCALATE:
             wants_alert = True
+        elif family == live_activities.PERSON_RESTRICTED and mutation != RESOLVE:
+            wants_alert = True
+            la_interruption = "time-sensitive"
 
         priority = 10 if wants_alert else 5
         payload = live_activities.build_la_update_payload(
@@ -891,10 +894,31 @@ async def handle_delivery_event(
             state_since_ts=la_state_since_ts, motion=la_motion,
             zones=la_zones, path=la_path,
         )
-        if la_covered:
+        # la_first demotion: if the delivery mode is la_first and this is
+        # NOT an escalation, broaden demotion to all la_capable devices that
+        # have an open activity for this card — even if the LA update was
+        # delta-suppressed this tick.
+        delivery_mode = policy["live_activities"].get("delivery", "la_first")
+        is_escalation = mutation == ESCALATE and card.level in ("notify", "urgent")
+        demote_tokens: set[str] = set(la_covered)
+        if delivery_mode == "la_first" and not la_only and not is_escalation:
+            la_track_id = card_key.split(":", 2)[-1]
+            for device in devices:
+                if device.apns_token in demote_tokens:
+                    continue
+                if not device.la_capable:
+                    continue
+                row = store.find_activity(
+                    conn, apns_token=device.apns_token,
+                    situation_id=card_key, track_id=la_track_id,
+                )
+                if row is not None and not row["ended_at"]:
+                    demote_tokens.add(device.apns_token)
+
+        if demote_tokens:
             logger.info(
                 "push: card push demoted to silent for %d device(s) — LA covers %s mutation=%s",
-                len(la_covered), card_key, mutation,
+                len(demote_tokens), card_key, mutation,
             )
 
         if should_push(card.level):
@@ -904,9 +928,6 @@ async def handle_delivery_event(
                 label=snapshot.label, camera=owning_camera, zone_name=zone_name,
                 glyph=_glyph_for(subject_kind, snapshot.label),
                 primary=primary, secondary=secondary, event_ts=now, media=media,
-                # la_only: never banner, even when the LA is unconfirmed --
-                # the user has chosen activities as the sole surface.
-                # Confirmed-LA demotion is per-device via demote_tokens below.
                 la_active=la_only,
             )
 
@@ -914,7 +935,7 @@ async def handle_delivery_event(
             conn, transport, devices, card, mutation, payload,
             subject_kind=subject_kind, place_class=place_class,
             camera=owning_camera, zone_name=zone_name,
-            labels=event.labels, now=now, demote_tokens=la_covered,
+            labels=event.labels, now=now, demote_tokens=demote_tokens,
         )
         if warm_task is not None:
             # Runs concurrently with the sends above, not in series (plan §4
@@ -1013,9 +1034,21 @@ async def handle_delivery_resolve(
             media_handle=None, now=now, sound_allowed=sound,
             state_since_ts=round(card.state_since_at, 1) if card.state_since_at else None,
         )
-        la_only = bool(
-            policy_settings.get_active().get("live_activities", {}).get("la_only", False)
-        )
+        policy = policy_settings.get_active()
+        la_only = bool(policy.get("live_activities", {}).get("la_only", False))
+        demote_resolve: set[str] = set(la_covered)
+        delivery_mode = policy.get("live_activities", {}).get("delivery", "la_first")
+        if delivery_mode == "la_first" and not la_only:
+            la_tid = card_key.split(":", 2)[-1]
+            for device in devices:
+                if device.apns_token in demote_resolve or not device.la_capable:
+                    continue
+                row = store.find_activity(
+                    conn, apns_token=device.apns_token,
+                    situation_id=card_key, track_id=la_tid,
+                )
+                if row is not None and not row["ended_at"]:
+                    demote_resolve.add(device.apns_token)
         payload = None
         if should_push(card.level):
             payload = build_card_payload(
@@ -1028,7 +1061,7 @@ async def handle_delivery_resolve(
         await send_card_mutation(
             conn, transport, devices, card, mutation, payload,
             subject_kind=kind, camera=camera, zone_name=zone_name,
-            now=now, demote_tokens=la_covered,
+            now=now, demote_tokens=demote_resolve,
         )
         conn.commit()
         resolved += 1
@@ -1129,6 +1162,21 @@ async def handle_recognition_event(
         media_handle=None, now=now, sound_allowed=False,
         state_since_ts=round(card.state_since_at, 1) if card.state_since_at else None,
     )
+    demote_recog: set[str] = set(la_covered)
+    recog_policy = policy_settings.get_active()
+    recog_la_only = bool(recog_policy.get("live_activities", {}).get("la_only", False))
+    recog_delivery = recog_policy.get("live_activities", {}).get("delivery", "la_first")
+    if recog_delivery == "la_first" and not recog_la_only:
+        la_tid = card_key.split(":", 2)[-1]
+        for device in devices:
+            if device.apns_token in demote_recog or not device.la_capable:
+                continue
+            row = store.find_activity(
+                conn, apns_token=device.apns_token,
+                situation_id=card_key, track_id=la_tid,
+            )
+            if row is not None and not row["ended_at"]:
+                demote_recog.add(device.apns_token)
     payload = None
     if should_push(card.level):
         payload = build_card_payload(
@@ -1142,7 +1190,7 @@ async def handle_recognition_event(
         conn, transport, devices, card, mutation, payload,
         subject_kind=subject_kind, place_class=place_class,
         camera=owning_camera, zone_name=zone_name, now=now,
-        demote_tokens=la_covered,
+        demote_tokens=demote_recog,
     )
     conn.commit()
     logger.info(

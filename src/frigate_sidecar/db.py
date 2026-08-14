@@ -132,7 +132,8 @@ CREATE TABLE IF NOT EXISTS push_devices (
     -- Phase 2: one per app install, rotates on reinstall. Creates Live
     -- Activities. Absent means "this device isn't ready for Live Activities"
     -- and its Present-tier situations fall back to alert pushes.
-    push_to_start_token TEXT NOT NULL DEFAULT ''
+    push_to_start_token TEXT NOT NULL DEFAULT '',
+    la_capable INTEGER NOT NULL DEFAULT 1
 );
 
 -- Opaque, sidecar-minted, short-lived handles standing in for
@@ -318,6 +319,7 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("morning_digest", "TEXT"),  # JSON; Phase 4
         ("llm", "TEXT"),  # JSON; Phase 4
         ("push_to_start_token", "TEXT NOT NULL DEFAULT ''"),  # Phase 2
+        ("la_capable", "INTEGER NOT NULL DEFAULT 1"),
     ],
     "push_handles": [
         ("situation_id", "TEXT NOT NULL DEFAULT ''"),

@@ -79,6 +79,7 @@ def _row_to_device(row: sqlite3.Row) -> Device:
         situations=situations,
         live_activity_token=str(_col(row, "live_activity_token", "") or ""),
         push_to_start_token=str(_col(row, "push_to_start_token", "") or ""),
+        la_capable=bool(int(_col(row, "la_capable", 1) if _col(row, "la_capable", 1) is not None else 1)),
     )
 
 
@@ -105,6 +106,7 @@ def upsert_device(
     morning_digest: dict[str, Any] | None = None,
     llm: dict[str, Any] | None = None,
     push_to_start_token: str = "",
+    la_capable: bool = True,
 ) -> str:
     """Idempotent PUT on the token (spec §1) -- overwrites filter state in
     place rather than accumulating duplicate rows that would double-fire
@@ -120,8 +122,9 @@ def upsert_device(
         "INSERT INTO push_devices "
         "(apns_token, device_id, bundle_id, environment, app_version, cameras, labels, "
         " min_severity, registered_at, updated_at, schema_version, timezone, location, "
-        " situations, live_activity_token, morning_digest, llm, push_to_start_token) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " situations, live_activity_token, morning_digest, llm, push_to_start_token, "
+        " la_capable) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(apns_token) DO UPDATE SET "
         "bundle_id=excluded.bundle_id, environment=excluded.environment, "
         "app_version=excluded.app_version, cameras=excluded.cameras, labels=excluded.labels, "
@@ -130,6 +133,7 @@ def upsert_device(
         "location=excluded.location, situations=excluded.situations, "
         "live_activity_token=excluded.live_activity_token, "
         "morning_digest=excluded.morning_digest, llm=excluded.llm, "
+        "la_capable=excluded.la_capable, "
         # A re-registration that omits the token must not blank a working one:
         # the app uploads it from an async token stream, so the first PUT after
         # launch can legitimately race ahead of the token arriving.
@@ -143,7 +147,7 @@ def upsert_device(
             json.dumps(situations or []), live_activity_token,
             json.dumps(morning_digest) if morning_digest is not None else None,
             json.dumps(llm) if llm is not None else None,
-            push_to_start_token,
+            push_to_start_token, int(la_capable),
         ),
     )
     return device_id

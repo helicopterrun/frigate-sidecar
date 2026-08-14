@@ -54,7 +54,8 @@ PACKAGE = "package"
 BINS = "bins"
 OPENINGS = "openings"
 PERSON = "person"
-FAMILIES = (PACKAGE, BINS, OPENINGS, PERSON)
+PERSON_RESTRICTED = "person_restricted"
+FAMILIES = (PACKAGE, BINS, OPENINGS, PERSON, PERSON_RESTRICTED)
 #: Catch-all family for `la_only` mode: any pushable card that matches no
 #: curated family still gets an activity. The app treats `family` as an
 #: opaque string by design ("lets a new family ship server-side without an
@@ -110,7 +111,9 @@ def classify_family(*, subject_kind: str, label: str, place_class: str) -> str |
         return BINS
     if subject_kind == "thing" and label in _OPENING_LABELS:
         return OPENINGS
-    if subject_kind in ("stranger", "known", "person") and place_class in ("doors", "off_limits"):
+    if subject_kind in ("stranger", "known", "person") and place_class == "off_limits":
+        return PERSON_RESTRICTED
+    if subject_kind in ("stranger", "known", "person") and place_class == "doors":
         return PERSON
     return None
 
@@ -176,7 +179,7 @@ def glyph_for(family: str, *, subject_kind: str, label: str, mutation: str) -> s
     """
     if mutation == RESOLVE:
         return _RESOLVED_GLYPH
-    if family == PERSON:
+    if family in (PERSON, PERSON_RESTRICTED):
         return _PERSON_KNOWN_GLYPH if subject_kind == "known" else _PERSON_STRANGER_GLYPH
     if family == PACKAGE:
         return _PACKAGE_GLYPH

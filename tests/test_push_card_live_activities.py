@@ -30,7 +30,7 @@ def test_openings_family_matches_door_gate_garage():
         ) == la.OPENINGS
 
 
-def test_person_family_requires_doors_or_off_limits():
+def test_person_family_requires_doors():
     assert la.should_start_activity(
         subject_kind="stranger", label="person", place_class="doors",
     ) == la.PERSON
@@ -42,16 +42,30 @@ def test_person_family_requires_doors_or_off_limits():
     ) is None
 
 
-def test_person_family_off_limits_starts_la():
+def test_person_restricted_family_off_limits():
     assert la.should_start_activity(
         subject_kind="stranger", label="person", place_class="off_limits",
-    ) == la.PERSON
+    ) == la.PERSON_RESTRICTED
     assert la.should_start_activity(
         subject_kind="known", label="person", place_class="off_limits",
-    ) == la.PERSON
+    ) == la.PERSON_RESTRICTED
     assert la.should_start_activity(
         subject_kind="person", label="person", place_class="off_limits",
-    ) == la.PERSON
+    ) == la.PERSON_RESTRICTED
+
+
+def test_person_restricted_disabled_returns_none():
+    assert la.should_start_activity(
+        subject_kind="stranger", label="person", place_class="off_limits",
+        families_enabled={"person_restricted": False},
+    ) is None
+
+
+def test_person_restricted_disabled_falls_back_to_catch_all():
+    assert la.should_start_activity(
+        subject_kind="stranger", label="person", place_class="off_limits",
+        families_enabled={"person_restricted": False}, catch_all=True,
+    ) == la.CATCH_ALL
 
 
 def test_non_qualifying_cards_return_none():

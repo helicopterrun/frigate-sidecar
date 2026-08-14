@@ -178,6 +178,7 @@ def default_settings() -> dict[str, Any]:
         "zone_overrides": {},
         "live_activities": {family: True for family in FAMILIES} | {
             "opening_picks": [],
+            "delivery": "la_first",
             "alert_all_changes": False,
             "la_only": False,
         },
@@ -300,11 +301,6 @@ def validate_settings(data: Any) -> list[str]:
         if not isinstance(live_activities, dict):
             errors.append("live_activities must be an object")
         else:
-            unknown_keys = set(live_activities) - set(FAMILIES) - {
-                "opening_picks", "alert_all_changes", "la_only",
-            }
-            if unknown_keys:
-                errors.append(f"live_activities has unknown key(s): {sorted(unknown_keys)}")
             for family in FAMILIES:
                 if family in live_activities and not isinstance(live_activities[family], bool):
                     errors.append(f"live_activities.{family} must be a boolean")
@@ -319,6 +315,11 @@ def validate_settings(data: Any) -> list[str]:
             lao = live_activities.get("la_only")
             if lao is not None and not isinstance(lao, bool):
                 errors.append("live_activities.la_only must be a boolean")
+            delivery = live_activities.get("delivery")
+            if delivery is not None and delivery not in ("la_first", "notifications"):
+                errors.append(
+                    "live_activities.delivery must be 'la_first' or 'notifications'"
+                )
 
     mute_sounds = data.get("mute_sounds")
     if mute_sounds is not None and not isinstance(mute_sounds, bool):
@@ -411,6 +412,9 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
             merged["live_activities"]["alert_all_changes"] = live_activities["alert_all_changes"]
         if isinstance(live_activities.get("la_only"), bool):
             merged["live_activities"]["la_only"] = live_activities["la_only"]
+        delivery = live_activities.get("delivery")
+        if delivery in ("la_first", "notifications"):
+            merged["live_activities"]["delivery"] = delivery
 
     if isinstance(data.get("mute_sounds"), bool):
         merged["mute_sounds"] = data["mute_sounds"]
