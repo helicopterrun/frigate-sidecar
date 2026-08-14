@@ -235,3 +235,33 @@ def test_escalation_sound_settings_normalize():
 def test_escalation_sound_settings_absent_keeps_default():
     result = policy_settings.normalize_settings({})
     assert result["escalation_sound"] == "urgent"
+
+
+# -- Interruption-level mapping (pin all four) --------------------------------
+
+def _payload_for_level(level):
+    from frigate_sidecar.push.cards import Card, CREATE
+    from frigate_sidecar.push.delivery import build_card_payload
+    card = Card(card_key="test:stranger:t1", level=level, created_at=1000.0, updated_at=1000.0)
+    return build_card_payload(
+        card, CREATE, sound=True, subject_kind="stranger", place_class="doors",
+        label="person", camera="doorbell", zone_name="front_door",
+        glyph="figure.walk", primary="P", secondary="S", event_ts=1000.0,
+    )
+
+
+def test_interruption_level_urgent_is_time_sensitive():
+    assert _payload_for_level("urgent")["aps"]["interruption-level"] == "time-sensitive"
+
+
+def test_interruption_level_notify_is_active():
+    assert _payload_for_level("notify")["aps"]["interruption-level"] == "active"
+
+
+def test_interruption_level_quiet_is_passive():
+    assert _payload_for_level("quiet")["aps"]["interruption-level"] == "passive"
+
+
+def test_interruption_level_log_does_not_push():
+    from frigate_sidecar.push.delivery import should_push
+    assert should_push("log") is False
