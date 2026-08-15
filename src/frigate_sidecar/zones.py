@@ -132,6 +132,9 @@ def load_camera_zones(config_path: str | Path) -> dict[str, list[dict[str, Any]]
                     "objects": objs or [],
                     "inertia": zd.get("inertia"),
                     "loitering_time": zd.get("loitering_time"),
+                    # Frigate's optional display name — push copy prefers it
+                    # over humanizing the rule-shaped zone key.
+                    "friendly_name": zd.get("friendly_name"),
                 }
             )
         if cam_zones:

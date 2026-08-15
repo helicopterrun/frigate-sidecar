@@ -120,6 +120,18 @@ def test_enrich_secondary_includes_elapsed():
     assert secondary == "Doorbell · 45s"
 
 
+def test_copy_prefers_frigate_friendly_name():
+    # "front_entry_person" is a rule name, not a place — Frigate's
+    # friendly_name wins when configured (loaded at startup from config.yml).
+    from frigate_sidecar.push import policy_settings
+    policy_settings._zone_display_names = {"front_entry_person": "Front Walk"}
+    try:
+        primary, _ = _copy("stranger", "person", "garden", "front_entry_person", 0.0)
+        assert primary == "Person at Front Walk"
+    finally:
+        policy_settings._zone_display_names = {}
+
+
 def test_secondary_empty_when_title_already_used_camera():
     # No zone: the title falls back to the camera, so a camera-only
     # secondary would echo it — stay empty on create, elapsed-only later.

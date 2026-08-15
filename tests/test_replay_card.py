@@ -152,15 +152,13 @@ async def test_dry_run_scenario_notify_resolve():
     assert len(decisions) == 3
     assert decisions[0]["mutation"] == "create"
     assert decisions[0]["level"] == "notify"
-    # LA start accepted → card push demoted to silent (LA is the alerting
-    # surface); the notification still lands in NC for history.
-    assert decisions[0]["sounded"] is False
-    assert decisions[0]["interruption_level"] == "passive"
+    # LA start accepted → the card push is suppressed entirely (la_first);
+    # the LA is the only surface until resolve writes the history row.
+    assert decisions[0]["card"] == "suppressed (LA covers)"
     assert decisions[0]["la_action"] == "start"
 
     assert decisions[1]["mutation"] == "enrich"
-    assert decisions[1]["sounded"] is False
-    assert decisions[1]["interruption_level"] == "passive"
+    assert decisions[1]["card"] == "suppressed (LA covers)"
 
     assert decisions[2]["mutation"] == "resolve"
     assert decisions[2]["level"] == "notify"
@@ -184,9 +182,8 @@ async def test_dry_run_scenario_escalate_urgent():
     assert escalate["level"] == "urgent"
     # Routing-gated families: the dry-run device is LA-capable, so the
     # escalation late-starts a person LA whose start alert carries the
-    # sound, and the card is demoted to the silent history row.
-    assert escalate["sounded"] is False
-    assert escalate["interruption_level"] == "passive"
+    # sound, and the card push is suppressed entirely (la_first).
+    assert escalate["card"] == "suppressed (LA covers)"
     assert escalate["la_action"] == "start"
     assert escalate["la_sound_name"] == "urgent.caf"
 

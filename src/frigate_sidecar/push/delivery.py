@@ -317,6 +317,7 @@ async def send_card_mutation(
     labels: tuple[str, ...] = (),
     now: float | None = None,
     demote_tokens: frozenset[str] | set[str] = frozenset(),
+    suppress_demoted: bool = False,
 ) -> int:
     """Persist `card` and send to eligible devices, honoring per-device
     filtering, snooze, quiet resolves, and the global sounding rate cap.
@@ -361,6 +362,16 @@ async def send_card_mutation(
 
         dev_payload = payload
         demoted = device.apns_token in demote_tokens
+        if demoted and suppress_demoted and mutation != RESOLVE:
+            # LA-first only (`suppress_demoted`): while a Live Activity
+            # demonstrably covers this device, the story sends NO card
+            # pushes at all — a passive row updating alongside the LA read
+            # as duplicate noise (user feedback 2026-08-14). The RESOLVE
+            # push is the one durable Notification Center record, written
+            # when the story ends; escalations reach the user through the
+            # LA's own alert. `la_only` keeps its passive rows — its
+            # contract is "silently to Notification Center", not silence.
+            continue
         if demoted:
             dev_payload = dict(payload)
             dev_payload["aps"] = dict(dev_payload["aps"])

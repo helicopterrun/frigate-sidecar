@@ -115,8 +115,8 @@ class TestDeviceEligibleExtended:
 async def test_two_devices_only_eligible_one_receives(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
-    dev_match = _device("tok_match", cameras=("doorbell",))
-    dev_miss = _device("tok_miss", cameras=("patio",))
+    dev_match = _device("tok_match", cameras=("doorbell",), push_to_start="")
+    dev_miss = _device("tok_miss", cameras=("patio",), push_to_start="")
     config = PushSection(delivery_enabled=True)
 
     await handle_delivery_event(
@@ -279,7 +279,7 @@ async def test_quiet_hours_cap_quiet_caps_notify_to_quiet(sidecar_db_path: Path)
 async def test_quiet_hours_cap_quiet_exempts_urgent(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
-    device = _device()
+    device = _device(push_to_start="")
     config = PushSection(delivery_enabled=True)
 
     settings = policy_settings.default_settings()
@@ -325,7 +325,7 @@ async def test_quiet_hours_cap_quiet_with_mute_sounds_does_not_crash(sidecar_db_
 async def test_quiet_hours_mute_sounds_strips_sound(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
-    device = _device()
+    device = _device(push_to_start="")
     config = PushSection(delivery_enabled=True)
 
     settings = policy_settings.default_settings()

@@ -308,10 +308,11 @@ def card_sends(transport: LogTransport) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_card_push_demoted_to_silent_while_la_confirmed(sidecar_db_path: Path):
-    """§2: the LA is the alerting surface once it demonstrably exists — the
-    card push still goes out (NC history) but passive and soundless, so there
-    is exactly one banner per mutation."""
+async def test_card_push_suppressed_while_la_confirmed(sidecar_db_path: Path):
+    """la_first: once the LA demonstrably exists, the story sends NO card
+    pushes to that device at all — a passive row updating alongside the LA
+    was duplicate noise (2026-08-14). The resolve push (elsewhere) is the
+    one durable Notification Center record."""
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device()
@@ -319,23 +320,18 @@ async def test_card_push_demoted_to_silent_while_la_confirmed(sidecar_db_path: P
     card_key = "doorbell:person:trk1"
 
     # create: person at front_door -> notify; LA start accepted by the mock
-    # transport, so the create card push is demoted.
+    # transport, so the create card push is suppressed entirely.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     assert la_sends(transport)[0]["event"] == "start"
-    create_cards = card_sends(transport)
-    assert len(create_cards) == 1
-    aps = create_cards[0]["payload"]["aps"]
-    assert aps["interruption-level"] == "passive"
-    assert "sound" not in aps
+    assert card_sends(transport) == []
 
     attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perActivity1")
 
     # escalate: person moves to pool (off_limits -> urgent). LA update lands
-    # on the confirmed token and carries the escalation alert; the card push
-    # stays silent.
+    # on the confirmed token and carries the escalation alert; still no card.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
@@ -343,9 +339,7 @@ async def test_card_push_demoted_to_silent_while_la_confirmed(sidecar_db_path: P
     last_la = la_sends(transport)[-1]
     assert last_la["event"] == "update"
     assert last_la["payload"]["aps"].get("alert") is not None
-    esc_aps = card_sends(transport)[-1]["payload"]["aps"]
-    assert esc_aps["interruption-level"] == "passive"
-    assert "sound" not in esc_aps
+    assert card_sends(transport) == []
 
 
 @pytest.mark.asyncio
@@ -668,11 +662,9 @@ async def test_multi_device_demotion_is_per_device(sidecar_db_path: Path):
     assert [r["device_id"] for r in starts] == ["d_tokA"]
 
     cards = {r["device_id"]: r for r in card_sends(transport)}
-    assert set(cards) == {"d_tokA", "d_tokB"}
-    # A: demoted — its LA start was APNs-accepted.
-    assert cards["d_tokA"]["payload"]["aps"]["interruption-level"] == "passive"
-    assert "sound" not in cards["d_tokA"]["payload"]["aps"]
+    # A: suppressed entirely — its LA start was APNs-accepted (la_first).
     # B: full alerting card — no LA covers it.
+    assert set(cards) == {"d_tokB"}
     assert cards["d_tokB"]["payload"]["aps"]["interruption-level"] == "active"
     assert cards["d_tokB"]["payload"]["aps"].get("sound")
 
@@ -713,9 +705,10 @@ async def test_urgent_escalation_late_starts_la_with_sound(sidecar_db_path: Path
     start = [s for s in la_sends(transport) if s["event"] == "start"][-1]
     assert start["payload"]["aps"]["alert"]["sound"] == "urgent.caf"
     # Card push stays demoted — the LA carries the sound now.
-    esc_card = card_sends(transport)[-1]["payload"]["aps"]
-    assert esc_card["interruption-level"] == "passive"
-    assert "sound" not in esc_card
+    # The card push is suppressed entirely — the LA is the only surface;
+    # only the pre-LA quiet create ever produced a card send.
+    esc_cards = [c for c in card_sends(transport) if c["payload"]["mutation"] == "escalate"]
+    assert esc_cards == []
 
 
 @pytest.mark.asyncio

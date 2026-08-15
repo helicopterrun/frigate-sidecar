@@ -152,7 +152,8 @@ async def test_rate_cap_silences_11th_sounding_push(sidecar_db_path: Path):
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
-    device = make_device()
+    # Card-path semantics only — an LA-capable device's cards are suppressed.
+    device = make_device(push_to_start="")
     config = PushSection(delivery_enabled=True)
 
     # Seed 10 sounding sends in the last hour.

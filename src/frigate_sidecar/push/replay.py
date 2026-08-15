@@ -289,6 +289,15 @@ async def dry_run_scenario(
                 step_decision["category"] = p.get("aps", {}).get("category", "")
                 if p.get("aps", {}).get("sound"):
                     step_decision["sound_name"] = p["aps"]["sound"]
+            elif la_sends:
+                # la_first suppresses card pushes while an LA covers the
+                # device — the routing decision still happened, so read
+                # mutation/level from the LA's content-state instead of
+                # reporting a misleading "(no push)".
+                state = la_sends[0].get("payload", {}).get("aps", {}).get("content-state", {})
+                step_decision["mutation"] = state.get("mutation", "")
+                step_decision["level"] = state.get("level", "")
+                step_decision["card"] = "suppressed (LA covers)"
             else:
                 step_decision["mutation"] = "(no push)"
 

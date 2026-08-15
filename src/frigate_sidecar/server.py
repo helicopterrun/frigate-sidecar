@@ -290,6 +290,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # `ladder_policy.TABLE` must never be read in its own unmodified
         # default state on a deployment that has a settings file.
         policy_settings.startup(settings.push.push_settings_path)
+        policy_settings.load_zone_display_names(settings.frigate.config_path)
 
         server_id = settings.push.server_id or f"s_{id(app):x}"
         transport = _build_push_transport(settings)

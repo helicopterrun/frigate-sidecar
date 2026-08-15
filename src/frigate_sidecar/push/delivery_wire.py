@@ -167,7 +167,10 @@ def _copy(
 ) -> tuple[str, str]:
     subject_text = _SUBJECT_COPY.get(subject_kind) or pretty_label(label) or "Motion"
     place_text = zone_name or camera
-    place_pretty = place_text.replace("_", " ").title()
+    # Frigate `friendly_name` wins over humanizing the rule-shaped key
+    # ("front_entry_person" is a rule, not a place).
+    friendly = policy_settings.zone_display_name(zone_name) if zone_name else None
+    place_pretty = friendly or place_text.replace("_", " ").title()
     if identity:
         primary = f"{identity} · at {place_pretty}"
     else:
@@ -956,6 +959,7 @@ async def handle_delivery_event(
             subject_kind=subject_kind, place_class=place_class,
             camera=owning_camera, zone_name=zone_name,
             labels=event.labels, now=now, demote_tokens=demote_tokens,
+            suppress_demoted=delivery_mode == "la_first" and not la_only,
         )
         if warm_task is not None:
             # Runs concurrently with the sends above, not in series (plan §4
@@ -1300,11 +1304,14 @@ async def handle_recognition_event(
             la_active=True,
             escalation_sound=recog_policy.get("escalation_sound", "urgent"),
         )
+    _recog_la = recog_policy.get("live_activities", {})
     await send_card_mutation(
         conn, transport, devices, card, mutation, payload,
         subject_kind=subject_kind, place_class=place_class,
         camera=owning_camera, zone_name=zone_name, now=now,
         demote_tokens=demote_recog,
+        suppress_demoted=_recog_la.get("delivery", "la_first") == "la_first"
+        and not _recog_la.get("la_only", False),
     )
     conn.commit()
     logger.info(

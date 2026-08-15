@@ -636,6 +636,34 @@ def probe_recognition_available(config_path: str | Path) -> dict[str, bool]:
     return result
 
 
+#: Zone key -> Frigate `friendly_name`, loaded at startup from config.yml.
+#: Module-level like the routing table: the copy builder has no path to the
+#: Frigate section of settings, and display names change only with Frigate's
+#: own config (a sidecar restart follows those anyway).
+_zone_display_names: dict[str, str] = {}
+
+
+def load_zone_display_names(config_path: str | Path) -> None:
+    """Read Frigate zone `friendly_name`s for push copy. Missing file or
+    names → empty map; the copy builder falls back to humanizing the key.
+    Zone names like `front_entry_person` are *rule* names — 'Person at Front
+    Entry Person' read like a stutter on a real lock screen (2026-08-14)."""
+    from frigate_sidecar.zones import load_camera_zones
+
+    names: dict[str, str] = {}
+    for _camera, zone_list in load_camera_zones(config_path).items():
+        for zone in zone_list:
+            friendly = zone.get("friendly_name")
+            if friendly:
+                names[zone["name"]] = str(friendly)
+    global _zone_display_names
+    _zone_display_names = names
+
+
+def zone_display_name(zone: str) -> str | None:
+    return _zone_display_names.get(zone)
+
+
 def build_available_zones(config_path: str | Path) -> list[dict[str, Any]]:
     """`available_zones` for the `GET` response: every zone across every
     camera in Frigate's config, with the cameras that see it and a guessed

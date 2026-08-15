@@ -78,9 +78,10 @@ async def test_zone_transition_escalates_and_late_starts_la(sidecar_db_path: Pat
     start = [s for s in la_sends(transport) if s["event"] == "start"][-1]
     assert start["payload"]["aps"]["attributes"]["family"] == "person_restricted"
     assert start["payload"]["aps"]["alert"]["sound"] == "urgent.caf"
-    esc_card = card_sends(transport)[-1]["payload"]
-    assert esc_card["mutation"] == "escalate"
-    assert esc_card["level"] == "urgent"
+    # la_first suppresses card pushes while the LA covers — the escalation's
+    # only surface is the LA start alert above.
+    esc_cards = [c for c in card_sends(transport) if c["payload"]["mutation"] == "escalate"]
+    assert esc_cards == []
 
 
 @pytest.mark.asyncio
@@ -148,8 +149,7 @@ async def test_captured_charger_loiter_escalates(tmp_path, sidecar_db_path: Path
         if s["payload"]["aps"]["attributes"]["family"] == "person_restricted"
     ]
     assert restricted, f"no person_restricted LA start; starts={[s['payload']['aps']['attributes'] for s in starts]}"
-    urgent_cards = [
-        c for c in card_sends(transport)
-        if c["payload"].get("level") == "urgent"
-    ]
-    assert urgent_cards, "no urgent card mutation from the captured loiter"
+    # The urgent escalation's surface is the LA start alert with sound —
+    # card pushes are suppressed while the LA covers (la_first).
+    assert restricted[-1]["payload"]["aps"]["alert"]["sound"] == "urgent.caf"
+    assert restricted[-1]["payload"]["aps"]["content-state"]["level"] == "urgent"
