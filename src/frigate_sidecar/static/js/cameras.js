@@ -40,9 +40,36 @@
   // ---- Heading cards -------------------------------------------------
 
   var SVG_NS = "http://www.w3.org/2000/svg";
+  var cardRefs = {}; // camera -> {svg, status}
 
-  function drawArrow(svg, vec) {
-    // vec: {dx, dy} unit vector; draw centered, length 0.3 in unit space.
+  // Mirror of the sidecar's derived_camera_heading: world direction
+  // camera -> secure-area center, decomposed into the camera's view axis
+  // (ahead => up in frame) and right axis.
+  function derivedHeading(camera) {
+    var entry = (doc.camera_layout || {})[camera];
+    var area = doc.secure_area;
+    if (!entry || entry.azimuth === undefined || !area) return null;
+    var cx = (area.x0 + area.x1) / 2, cy = (area.y0 + area.y1) / 2;
+    var wx = cx - entry.x, wy = cy - entry.y;
+    if (Math.hypot(wx, wy) < 1e-6) return null;
+    var rad = (entry.azimuth * Math.PI) / 180;
+    var along = wx * Math.sin(rad) + wy * -Math.cos(rad);
+    var rightC = wx * Math.cos(rad) + wy * Math.sin(rad);
+    var n = Math.hypot(along, rightC);
+    if (n < 1e-6) return null;
+    return { dx: rightC / n, dy: -along / n };
+  }
+
+  function effectiveHeading(camera) {
+    var manual = (doc.camera_headings || {})[camera];
+    if (manual) return { vec: manual, auto: false };
+    var derived = derivedHeading(camera);
+    if (derived) return { vec: derived, auto: true };
+    return { vec: null, auto: false };
+  }
+
+  function drawArrow(svg, vec, isAuto) {
+    // vec: {dx, dy} unit vector; draw centered, length 0.18 in unit space.
     while (svg.lastChild && svg.lastChild.tagName !== "defs") {
       svg.removeChild(svg.lastChild);
     }
@@ -54,6 +81,10 @@
     line.setAttribute("x2", x2); line.setAttribute("y2", y2);
     line.setAttribute("stroke", "var(--accent, #ffb454)");
     line.setAttribute("stroke-width", "0.012");
+    if (isAuto) {
+      line.setAttribute("stroke-dasharray", "0.03 0.018");
+      line.setAttribute("stroke-opacity", "0.8");
+    }
     line.setAttribute("marker-end", "url(#arrowhead)");
     svg.appendChild(line);
     var dot = document.createElementNS(SVG_NS, "circle");
@@ -61,6 +92,20 @@
     dot.setAttribute("r", "0.015");
     dot.setAttribute("fill", "var(--accent, #ffb454)");
     svg.appendChild(dot);
+  }
+
+  function refreshCard(camera) {
+    var refs = cardRefs[camera];
+    if (!refs) return;
+    var eff = effectiveHeading(camera);
+    drawArrow(refs.svg, eff.vec, eff.auto);
+    refs.status.textContent = eff.vec
+      ? (eff.auto ? "auto — derived from map pie + secure area" : "manual arrow")
+      : "no direction — draw here, or aim its pie with a secure area drawn";
+  }
+
+  function refreshAllCards() {
+    Object.keys(cardRefs).forEach(refreshCard);
   }
 
   function renderCard(camera) {
@@ -101,7 +146,12 @@
     wrap.appendChild(svg);
     card.appendChild(wrap);
 
-    drawArrow(svg, (doc.camera_headings || {})[camera] || null);
+    var status = document.createElement("div");
+    status.className = "help";
+    status.style.margin = "0.3em 0 0";
+    card.appendChild(status);
+    cardRefs[camera] = { svg: svg, status: status };
+    refreshCard(camera);
 
     var dragStart = null;
     function toUnit(ev) {
@@ -133,17 +183,18 @@
       doc.camera_headings[camera] = {
         dx: +(dx / len).toFixed(4), dy: +(dy / len).toFixed(4),
       };
-      drawArrow(svg, doc.camera_headings[camera]);
+      refreshCard(camera);
       markDirty();
     });
 
     var clear = document.createElement("button");
     clear.textContent = "Clear";
+    clear.title = "Remove the manual arrow (falls back to the map-derived one if available)";
     clear.className = "test-push";
     clear.style.marginTop = "0.4em";
     clear.addEventListener("click", function () {
       if (doc.camera_headings) delete doc.camera_headings[camera];
-      drawArrow(svg, null);
+      refreshCard(camera);
       markDirty();
     });
     card.appendChild(clear);
@@ -359,6 +410,7 @@
       }
     });
     mapEl.appendChild(svg);
+    refreshAllCards(); // pie/secure edits change the derived arrows live
 
     // Secure area rectangle (drawn by dragging empty map space).
     if (doc.secure_area) {

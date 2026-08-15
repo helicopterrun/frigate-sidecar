@@ -597,6 +597,44 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def derived_camera_heading(
+    camera: str, settings: dict[str, Any] | None = None,
+) -> dict[str, float] | None:
+    """The "toward home" image-space unit vector derived from world
+    geometry: camera position + pie azimuth (camera_layout) and the
+    secure_area rectangle's center, both drawn on /cameras.
+
+    Ground-plane projection: decompose the world direction camera->secure
+    center into the camera's view axis (ahead) and right axis. Ahead maps
+    to UP in the frame (smaller y), right maps to right — a first-order
+    perspective model, plenty for the 60-degree classification bands.
+    An explicit camera_headings entry always wins over this."""
+    s = settings if settings is not None else get_active()
+    layout = s.get("camera_layout", {})
+    entry = layout.get(camera) if isinstance(layout, dict) else None
+    area = s.get("secure_area")
+    if not isinstance(entry, dict) or not isinstance(area, dict):
+        return None
+    azimuth = entry.get("azimuth")
+    if not isinstance(azimuth, (int, float)):
+        return None
+    cx = (area.get("x0", 0.0) + area.get("x1", 0.0)) / 2.0
+    cy = (area.get("y0", 0.0) + area.get("y1", 0.0)) / 2.0
+    wx, wy = cx - entry.get("x", 0.0), cy - entry.get("y", 0.0)
+    if math.hypot(wx, wy) < 1e-6:
+        return None  # camera sits exactly on the secure center
+    rad = math.radians(azimuth)
+    # Map coords are y-down; compass 0 = north = -y, clockwise.
+    view = (math.sin(rad), -math.cos(rad))
+    right = (math.cos(rad), math.sin(rad))
+    d_along = wx * view[0] + wy * view[1]
+    d_right = wx * right[0] + wy * right[1]
+    norm = math.hypot(d_along, d_right)
+    if norm < 1e-6:
+        return None
+    return {"dx": round(d_right / norm, 4), "dy": round(-d_along / norm, 4)}
+
+
 def camera_neighbor_set(camera: str, settings: dict[str, Any] | None = None) -> frozenset[str]:
     """Cameras declared adjacent to `camera`, symmetric closure -- declaring
     `a: [b]` makes `b` a neighbor of `a` AND `a` a neighbor of `b`."""

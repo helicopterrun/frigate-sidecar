@@ -634,9 +634,16 @@ async def get_push_settings(request: Request) -> dict[str, Any]:
 
     from frigate_sidecar.zones import load_camera_zones
 
+    available_cameras = sorted(load_camera_zones(settings.frigate.config_path).keys())
+    derived_headings = {
+        cam: vec for cam in available_cameras
+        if (vec := policy_settings.derived_camera_heading(cam, active)) is not None
+    }
+
     return {
         "settings": active,
-        "available_cameras": sorted(load_camera_zones(settings.frigate.config_path).keys()),
+        "available_cameras": available_cameras,
+        "derived_headings": derived_headings,
         "available_zones": policy_settings.build_available_zones(settings.frigate.config_path),
         "available_openings": policy_settings.build_available_openings(
             settings.frigate.config_path

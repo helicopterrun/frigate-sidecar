@@ -240,6 +240,10 @@ def _heading_label(
         return None
     calib = policy_settings.get_active().get("camera_headings", {}).get(camera)
     if not isinstance(calib, dict):
+        # No hand-drawn vector: fall back to the one derived from world
+        # geometry (pie azimuth + secure area on the /cameras map).
+        calib = policy_settings.derived_camera_heading(camera)
+    if not isinstance(calib, dict):
         return None
     dot = movement[0] * calib.get("dx", 0.0) + movement[1] * calib.get("dy", 0.0)
     # cos 60° = 0.5: within 60° of the drawn vector = approaching; within
