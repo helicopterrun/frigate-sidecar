@@ -197,8 +197,10 @@ def default_settings() -> dict[str, Any]:
         # /cameras page. Movement dotted against it yields the LA heading
         # chip. Config/page-side only, sticky across app PUTs.
         "camera_headings": {},
-        # camera -> {"x","y"} in 0..1: position on the /cameras layout map.
-        # Purely visual + neighbor suggestions; never affects routing.
+        # camera -> {"x","y"} in 0..1 (+ optional "azimuth" degrees, 0 =
+        # north/up clockwise, and "fov" degrees): position and view pie on
+        # the /cameras layout map, up = north by convention. Feeds neighbor
+        # suggestions (wedge overlap); never affects routing.
         "camera_layout": {},
     }
 
@@ -399,9 +401,20 @@ def validate_settings(data: Any) -> list[str]:
                     and isinstance(pos.get("y"), (int, float))
                     and 0.0 <= pos["x"] <= 1.0 and 0.0 <= pos["y"] <= 1.0
                 )
+                if ok and "azimuth" in pos:
+                    ok = (
+                        isinstance(pos["azimuth"], (int, float))
+                        and math.isfinite(pos["azimuth"])
+                    )
+                if ok and "fov" in pos:
+                    ok = (
+                        isinstance(pos["fov"], (int, float))
+                        and 10.0 <= pos["fov"] <= 360.0
+                    )
                 if not ok:
                     errors.append(
-                        f"camera_layout[{cam!r}] must be {{x, y}} within 0..1"
+                        f"camera_layout[{cam!r}] must be {{x, y}} within 0..1 "
+                        "(optional azimuth degrees, fov 10..360)"
                     )
 
     return errors
@@ -540,7 +553,14 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
                 and 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0
             ):
                 continue
-            cleaned_layout[str(cam)] = {"x": round(float(x), 4), "y": round(float(y), 4)}
+            entry: dict[str, float] = {"x": round(float(x), 4), "y": round(float(y), 4)}
+            azimuth = pos.get("azimuth")
+            if isinstance(azimuth, (int, float)) and math.isfinite(azimuth):
+                entry["azimuth"] = round(float(azimuth) % 360.0, 1)
+            fov = pos.get("fov")
+            if isinstance(fov, (int, float)) and 10.0 <= fov <= 360.0:
+                entry["fov"] = round(float(fov), 1)
+            cleaned_layout[str(cam)] = entry
         merged["camera_layout"] = cleaned_layout
 
     return merged

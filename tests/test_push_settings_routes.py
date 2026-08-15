@@ -275,3 +275,18 @@ def test_cameras_page_renders(client: TestClient):
     resp = client.get("/cameras")
     assert resp.status_code == 200
     assert "/static/js/cameras.js" in resp.text
+
+
+def test_camera_layout_accepts_azimuth_and_fov(client: TestClient):
+    doc = client.get("/v1/push/settings").json()["settings"]
+    doc["camera_layout"] = {
+        "doorbell": {"x": 0.2, "y": 0.3, "azimuth": 365.0, "fov": 90},
+        "street": {"x": 0.5, "y": 0.5},  # position-only stays valid
+    }
+    assert client.put("/v1/push/settings", json=doc).status_code == 200
+    saved = client.get("/v1/push/settings").json()["settings"]["camera_layout"]
+    assert saved["doorbell"] == {"x": 0.2, "y": 0.3, "azimuth": 5.0, "fov": 90.0}
+    assert saved["street"] == {"x": 0.5, "y": 0.5}
+
+    doc["camera_layout"] = {"doorbell": {"x": 0.2, "y": 0.3, "fov": 5}}  # fov too narrow
+    assert client.put("/v1/push/settings", json=doc).status_code == 400
