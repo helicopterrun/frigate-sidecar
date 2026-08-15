@@ -1,3 +1,0 @@
-{"ts":1786756921.935093,"topic":"frigate/reviews","payload":{"type":"new","after":{"id":"r1","camera":"doorbell","severity":"alert","data":{"objects":["person"],"detections":[]}}}}
-{"ts":1786756921.989789,"topic":"frigate/reviews","payload":{"type":"new","after":{"id":"r1","camera":"doorbell","severity":"alert","data":{"objects":["person"],"detections":[]}}}}
-{"ts":1786756922.044359,"topic":"frigate/events","payload":{"after":{"camera":"doorbell","id":"t1"},"type":"new"}}
