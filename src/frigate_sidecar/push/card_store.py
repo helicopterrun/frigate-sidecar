@@ -278,6 +278,28 @@ def find_dedup_candidate(
     return None
 
 
+def find_open_card_for_track(
+    conn: sqlite3.Connection, *, camera: str, track_id: str, exclude_key: str,
+) -> str | None:
+    """An open card for this exact (camera, track_id) under any OTHER
+    subject kind -- the label-flip case: Frigate re-labels a track mid-story
+    (animal -> person), and since subject_kind is baked into the card key the
+    new label would otherwise mint a sibling card for the same physical
+    story. Kind lives in the middle of `{camera}:{kind}:{track_id}`, so
+    match on the outer parts and verify by splitting."""
+    rows = conn.execute(
+        "SELECT card_key FROM push_cards "
+        "WHERE closed = 0 AND resolved = 0 AND card_key != ? AND card_key LIKE ? "
+        "ORDER BY created_at ASC",
+        (exclude_key, f"{camera}:%:{track_id}"),
+    ).fetchall()
+    for row in rows:
+        parts = row["card_key"].split(":", 2)
+        if len(parts) == 3 and parts[0] == camera and parts[2] == track_id:
+            return row["card_key"]
+    return None
+
+
 def get_track_alias(conn: sqlite3.Connection, camera: str, track_id: str) -> str | None:
     row = conn.execute(
         "SELECT card_key FROM push_card_track_aliases WHERE camera = ? AND track_id = ?",

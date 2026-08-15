@@ -390,6 +390,23 @@ def _resolve_card_for_track(
 
     natural_key = build_card_key(camera=camera, subject_kind=subject_kind, subject_id=track_id)
     existing = card_store.get_card(conn, natural_key)
+    if existing is None:
+        # Label flip (animal -> person on the same track): keep the story on
+        # its original card instead of minting a sibling. The card keeps its
+        # birth key (collapse-id stability); subject_kind context updates on
+        # the next upsert, so copy/routing follow the new label.
+        flipped_key = card_store.find_open_card_for_track(
+            conn, camera=camera, track_id=track_id, exclude_key=natural_key,
+        )
+        if flipped_key is not None:
+            flipped = card_store.get_card(conn, flipped_key)
+            if flipped is not None and not flipped.closed:
+                logger.info(
+                    "push: label flip keeps card=%s (was routing as %s)",
+                    flipped_key, natural_key,
+                )
+                ctx = card_store.get_card_context(conn, flipped_key)
+                return flipped_key, flipped, (ctx or {}).get("camera") or camera
     neighbor_cameras = policy_settings.camera_neighbor_set(camera)
     if existing is None and (zone_name or neighbor_cameras):
         candidate_key = card_store.find_dedup_candidate(

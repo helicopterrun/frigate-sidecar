@@ -608,3 +608,75 @@ async def test_non_neighbor_cameras_with_disjoint_zones_still_split(sidecar_db_p
     assert {r["card_key"] for r in rows} == {
         "stairway-tight:person:trkA", "garden:person:trkB",
     }
+
+
+@pytest.mark.asyncio
+async def test_label_flip_keeps_one_card(sidecar_db_path: Path):
+    """Frigate re-labels a track mid-story (animal -> person): the story must
+    stay on its original card, not mint a sibling keyed under the new kind."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    animal_event = ReviewEvent(
+        review_id="r1", camera="garden", severity="alert", labels=("cat",),
+        track_ids=("trk1",), zones=("front_garden",),
+    )
+    person_event = ReviewEvent(
+        review_id="r1", camera="garden", severity="alert", labels=("person",),
+        track_ids=("trk1",), zones=("front_garden",),
+    )
+
+    await handle_delivery_event(
+        animal_event, conn=conn, devices=[device], transport=transport,
+        config=config, now=0.0,
+    )
+    await handle_delivery_event(
+        person_event, conn=conn, devices=[device], transport=transport,
+        config=config, now=5.0,
+    )
+
+    rows = conn.execute(
+        "SELECT card_key, subject_kind FROM push_cards"
+    ).fetchall()
+    assert len(rows) == 1, "label flip must not mint a second card"
+    assert rows[0]["card_key"] == "garden:animal:trk1"
+    # Context follows the new label so copy/routing use "person".
+    assert rows[0]["subject_kind"] == "person"
+
+
+@pytest.mark.asyncio
+async def test_label_flip_escalation_routes_at_new_kind(sidecar_db_path: Path):
+    """animal/doors is quiet but person/doors is notify: the flip re-routes
+    the SAME card upward (escalate), pushing for the first time."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    animal_event = ReviewEvent(
+        review_id="r1", camera="doorbell", severity="alert", labels=("cat",),
+        track_ids=("trk1",), zones=("front_door",),
+    )
+    person_event = ReviewEvent(
+        review_id="r1", camera="doorbell", severity="alert", labels=("person",),
+        track_ids=("trk1",), zones=("front_door",),
+    )
+
+    await handle_delivery_event(
+        animal_event, conn=conn, devices=[device], transport=transport,
+        config=config, now=0.0,
+    )
+    assert transport.sent == []  # animal/doors = quiet, quiet never pushes
+
+    await handle_delivery_event(
+        person_event, conn=conn, devices=[device], transport=transport,
+        config=config, now=5.0,
+    )
+    sends = [r for r in transport.sent if "payload" in r and not r.get("live_activity")]
+    assert sends, "person at doors must push"
+    payload = sends[-1]["payload"]
+    assert payload["card_key"] == "doorbell:animal:trk1"  # birth key kept
+    assert payload["mutation"] == "escalate"
+    assert payload["level"] == "notify"
