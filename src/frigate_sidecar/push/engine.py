@@ -142,6 +142,9 @@ class PushEngine:
     #: Feeds the `sub_label_unknown` escalation trigger; Phase 5 owns the
     #: allow/deny lists that will use the same input.
     _sub_labels: dict[tuple[str, str], str] = field(default_factory=dict)
+    # Last-seen current_zones per track — the zone-transition hook's change
+    # detector (see handle_object_payload).
+    _last_zones: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
 
     def _conn(self) -> sqlite3.Connection:
         from frigate_sidecar import db
@@ -224,6 +227,7 @@ class PushEngine:
             self._pending.pop(key, None)
             self._pending_since.pop(key, None)
             self._sub_labels.pop(key, None)
+            self._last_zones.pop(key, None)
             return 0
 
         now = time.time()
@@ -233,6 +237,25 @@ class PushEngine:
             average_estimated_speed=obj.average_estimated_speed,
             stationary=obj.stationary,
         )
+        # Zone-transition escalation (delivery_wire.handle_zone_transition):
+        # reviews go quiet on stationary objects, so a loiter drifting into
+        # hotter ground re-routes from the event stream instead. Fires only
+        # when the zone set actually changes; the handler no-ops unless the
+        # new ground routes above the card's current level.
+        zones_now = tuple(obj.current_zones or ())
+        if zones_now and zones_now != self._last_zones.get(key):
+            self._last_zones[key] = zones_now
+            if self.push_config is not None and self.push_config.delivery_enabled:
+                conn = self._conn()
+                try:
+                    devices = store.list_devices(conn)
+                    await delivery_wire.handle_zone_transition(
+                        obj.camera, obj.track_id, zones_now, label=obj.label,
+                        conn=conn, devices=devices, transport=self.transport,
+                        config=self.push_config, engine=self, now=now,
+                    )
+                finally:
+                    conn.close()
         if obj.sub_label:
             old_sub = self._sub_labels.get(key)
             self._sub_labels[key] = obj.sub_label

@@ -1105,6 +1105,98 @@ def _relaxed_level(current_level: str, mode: str) -> str | None:
     return levels[target] if target < idx else None
 
 
+async def handle_zone_transition(
+    camera: str,
+    track_id: str,
+    current_zones: tuple[str, ...],
+    *,
+    label: str,
+    conn: sqlite3.Connection,
+    devices: list[Device],
+    transport: PushTransport,
+    config: PushSection,
+    engine: PushEngine | None = None,
+    now: float | None = None,
+) -> int:
+    """A tracked object's zone set changed (`frigate/events`).
+
+    Reviews own story *existence*; this hook exists because Frigate's review
+    items go quiet on stationary objects — a person who loiters and drifts
+    into hotter ground (driveway → charger) never gets a review update, so
+    the review's frozen zone list kept a Restricted-zone loiter routed
+    Semi-private (observed live 2026-08-14, person at 0.92 in `charger` for
+    minutes with no escalation). The event stream knew within seconds.
+
+    Escalation-only, by design: if the hottest current zone routes ABOVE the
+    card's level, synthesize a review-shaped update through
+    `handle_delivery_event` (which owns escalation, LA late-start, demotion,
+    and sounds). Routing DOWN stays review-authoritative — an object stepping
+    briefly onto cooler ground must not deescalate a story the review still
+    considers hot.
+
+    No card (alias or direct) → no-op: this hook never *creates* stories.
+    """
+    if not config.delivery_enabled or not current_zones:
+        return 0
+    now = time.time() if now is None else now
+
+    probe = ReviewEvent(
+        review_id=f"zone-transition:{camera}:{track_id}", camera=camera,
+        severity="alert", labels=(label,) if label else (),
+        track_ids=(track_id,), zones=tuple(current_zones),
+    )
+    subject_kind = classify_subject(probe)
+
+    card_key = card_store.get_track_alias(conn, camera, track_id)
+    if card_key is None:
+        card_key = build_card_key(camera=camera, subject_kind=subject_kind, subject_id=track_id)
+    card = card_store.get_card(conn, card_key)
+    if card is None or card.closed or card.resolved:
+        return 0
+    from frigate_sidecar.push import ladder_policy
+    if card.level not in ladder_policy.LEVELS:
+        return 0
+
+    policy = policy_settings.get_active()
+    zone_classes = policy["zone_classes"]
+
+    # Rank each current zone by what it would route for this subject —
+    # per-zone Snapshot so zone overrides apply, same authority as the
+    # review path.
+    best_zone: str | None = None
+    best_idx = -1
+    for zone in current_zones:
+        place = zone_classes.get(zone) or policy_settings.guess_zone_class(zone)
+        level = evaluate_ladder(Snapshot(
+            subject=subject_kind, place=place, zone=zone,
+            label=label, nobody_home=False, night=False,
+            dwell_exceeded=False, muted=False,
+        ))
+        if level in ladder_policy.LEVELS:
+            idx = ladder_policy.LEVELS.index(level)
+            if idx > best_idx:
+                best_idx = idx
+                best_zone = zone
+
+    if best_zone is None or best_idx <= ladder_policy.LEVELS.index(card.level):
+        return 0
+
+    logger.info(
+        "push: zone transition escalates card=%s zone=%s (%s -> %s)",
+        card.card_key, best_zone, card.level, ladder_policy.LEVELS[best_idx],
+    )
+    ordered = (best_zone, *(z for z in current_zones if z != best_zone))
+    synthetic = ReviewEvent(
+        review_id=f"zone-transition:{camera}:{track_id}", camera=camera,
+        severity="alert", labels=(label,) if label else (),
+        track_ids=(track_id,), zones=ordered,
+    )
+    return await handle_delivery_event(
+        synthetic, conn=conn, devices=devices, transport=transport,
+        config=config, engine=engine, now=now,
+    )
+
+
 async def handle_recognition_event(
     camera: str,
     track_id: str,
