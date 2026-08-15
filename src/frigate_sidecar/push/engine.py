@@ -948,9 +948,14 @@ class PushEngine:
                 match, thumbnail_revision=int(row["thumbnail_revision"]),
                 tail_s=tail, now=now,
             )
+            # Rows recreated by the app's token re-sync carry no collapse_id,
+            # and the relay rejects an empty one (422) — which stranded the
+            # phone-side LA alive, provoking another token re-sync and an
+            # infinite end-retry loop (observed 2026-08-14). The situation id
+            # (card_key in the card era) is the collapse id everywhere else.
             result = await self.transport.send_live_activity(
                 device, token=row["token"], payload=payload,
-                collapse_id=row["collapse_id"], event="end",
+                collapse_id=row["collapse_id"] or situation.id, event="end",
             )
             if result.ok:
                 sent = 1
