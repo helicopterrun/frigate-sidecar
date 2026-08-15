@@ -311,7 +311,12 @@ CREATE TABLE IF NOT EXISTS push_card_track_aliases (
 # whole migration story the sidecar needs (nothing is ever dropped or
 # retyped, and SQLite's ALTER ... ADD COLUMN is O(1) metadata only).
 _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    # ONE entry per table: a duplicate key in this literal silently clobbers
+    # the earlier one (Python dict semantics) — exactly how the zones_csv
+    # migration vanished on 2026-08-14 and broke every card upsert until
+    # the next restart. Guarded by test_added_columns_has_no_duplicate_keys.
     "push_cards": [
+        ("peak_level", "TEXT NOT NULL DEFAULT 'log'"),
         # Cross-camera dedup by zone-set intersection (2026-08-14): matching
         # only zone_name (the review's first zone) missed merges whenever
         # overlapping cameras listed the same walk under different first-zones.
@@ -335,9 +340,6 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("situation_id", "TEXT NOT NULL DEFAULT ''"),
         ("track_id", "TEXT NOT NULL DEFAULT ''"),
         ("thumbnail", "BLOB"),
-    ],
-    "push_cards": [
-        ("peak_level", "TEXT NOT NULL DEFAULT 'log'"),
     ],
     "push_activities": [
         # Added alongside SIDECAR_SCHEMA's CREATE TABLE without a matching

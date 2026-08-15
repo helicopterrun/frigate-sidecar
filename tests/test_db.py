@@ -188,3 +188,57 @@ def test_recording_coverage_keeps_gaps_above_the_tolerance(tmp_path: Path) -> No
     finally:
         ro.close()
     assert len(result["recorded"]) == 2
+
+
+def test_added_columns_has_no_duplicate_table_keys():
+    """A duplicate table key in the _ADDED_COLUMNS dict literal silently
+    clobbers the earlier entry (Python dict semantics) — how the zones_csv
+    migration vanished on 2026-08-14 and broke every card upsert in
+    production. Parse the source: each table may appear exactly once."""
+    import ast
+    import inspect
+
+    from frigate_sidecar import db as db_module
+
+    tree = ast.parse(inspect.getsource(db_module))
+    for node in ast.walk(tree):
+        target_names = []
+        if isinstance(node, ast.Assign):
+            target_names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            target_names = [node.target.id]
+        if "_ADDED_COLUMNS" in target_names and node.value is not None:
+            keys = [k.value for k in node.value.keys if isinstance(k, ast.Constant)]
+            assert len(keys) == len(set(keys)), f"duplicate table keys: {keys}"
+            break
+    else:
+        raise AssertionError("_ADDED_COLUMNS assignment not found")
+
+
+def test_open_sidecar_migrates_pre_zones_csv_card_table(tmp_path):
+    """A DB created before zones_csv must gain the column on open — the
+    dedup query and every card upsert read it."""
+    import sqlite3
+
+    from frigate_sidecar import db as db_module
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE push_cards ("
+        " card_key TEXT PRIMARY KEY, level TEXT NOT NULL,"
+        " subject_kind TEXT NOT NULL DEFAULT '', place_class TEXT NOT NULL DEFAULT '',"
+        " camera TEXT NOT NULL DEFAULT '', zone_name TEXT NOT NULL DEFAULT '',"
+        " created_at REAL NOT NULL, updated_at REAL NOT NULL,"
+        " state_since_at REAL NOT NULL, sound_count INTEGER NOT NULL DEFAULT 0,"
+        " handled INTEGER NOT NULL DEFAULT 0, handled_at REAL, last_sound_at REAL,"
+        " resound_count INTEGER NOT NULL DEFAULT 0, resolved INTEGER NOT NULL DEFAULT 0,"
+        " closed INTEGER NOT NULL DEFAULT 0)"
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = db_module.open_sidecar(path)
+    cols = {r["name"] for r in migrated.execute("PRAGMA table_info(push_cards)")}
+    assert "zones_csv" in cols
+    assert "peak_level" in cols
