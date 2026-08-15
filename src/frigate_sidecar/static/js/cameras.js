@@ -153,6 +153,7 @@
   // ---- Layout map (top-down, north = up) -----------------------------
 
   var detailPanel = document.getElementById("camera-detail");
+  var clearSecureBtn = document.getElementById("clear-secure");
   var detailName = document.getElementById("detail-name");
   var detailAzimuth = document.getElementById("detail-azimuth");
   var detailFov = document.getElementById("detail-fov");
@@ -359,6 +360,30 @@
     });
     mapEl.appendChild(svg);
 
+    // Secure area rectangle (drawn by dragging empty map space).
+    if (doc.secure_area) {
+      var sa = doc.secure_area;
+      var rect = document.createElementNS(SVG_NS, "rect");
+      rect.setAttribute("x", Math.min(sa.x0, sa.x1));
+      rect.setAttribute("y", Math.min(sa.y0, sa.y1));
+      rect.setAttribute("width", Math.abs(sa.x1 - sa.x0));
+      rect.setAttribute("height", Math.abs(sa.y1 - sa.y0));
+      rect.setAttribute("fill", "var(--ok, #4caf82)");
+      rect.setAttribute("fill-opacity", "0.10");
+      rect.setAttribute("stroke", "var(--ok, #4caf82)");
+      rect.setAttribute("stroke-width", "0.004");
+      rect.setAttribute("stroke-dasharray", "0.015 0.01");
+      svg.appendChild(rect);
+      var saLabel = document.createElementNS(SVG_NS, "text");
+      saLabel.setAttribute("x", Math.min(sa.x0, sa.x1) + 0.012);
+      saLabel.setAttribute("y", Math.min(sa.y0, sa.y1) + 0.035);
+      saLabel.setAttribute("font-size", "0.026");
+      saLabel.setAttribute("fill", "var(--ok, #4caf82)");
+      saLabel.textContent = "secure area";
+      svg.appendChild(saLabel);
+    }
+    clearSecureBtn.style.display = doc.secure_area ? "inline-block" : "none";
+
     var north = document.createElement("div");
     north.textContent = "N ↑";
     north.className = "help";
@@ -411,6 +436,45 @@
       renderMap();
     }
   }
+
+  // Drawing the secure area: a drag that STARTS on empty map background
+  // (not a dot, wedge, or arrow) sketches the rectangle corner-to-corner.
+  mapEl.addEventListener("pointerdown", function (ev) {
+    if (ev.target !== mapEl) return;
+    var rect = mapEl.getBoundingClientRect();
+    function unit(e) {
+      return {
+        x: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)),
+        y: Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height)),
+      };
+    }
+    var start = unit(ev);
+    var moved = false;
+    mapEl.setPointerCapture(ev.pointerId);
+    function move(mv) {
+      var p = unit(mv);
+      if (Math.hypot(p.x - start.x, p.y - start.y) < 0.02) return;
+      moved = true;
+      doc.secure_area = {
+        x0: +start.x.toFixed(4), y0: +start.y.toFixed(4),
+        x1: +p.x.toFixed(4), y1: +p.y.toFixed(4),
+      };
+      renderMap();
+    }
+    function up() {
+      mapEl.removeEventListener("pointermove", move);
+      mapEl.removeEventListener("pointerup", up);
+      if (moved) markDirty();
+    }
+    mapEl.addEventListener("pointermove", move);
+    mapEl.addEventListener("pointerup", up);
+  });
+
+  clearSecureBtn.addEventListener("click", function () {
+    doc.secure_area = null;
+    markDirty();
+    renderMap();
+  });
 
   function syncDetailPanel() {
     if (!selectedCamera) { detailPanel.style.display = "none"; return; }

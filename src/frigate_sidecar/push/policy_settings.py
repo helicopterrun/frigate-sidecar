@@ -202,6 +202,10 @@ def default_settings() -> dict[str, Any]:
         # the /cameras layout map, up = north by convention. Feeds neighbor
         # suggestions (wedge overlap); never affects routing.
         "camera_layout": {},
+        # {"x0","y0","x1","y1"} in 0..1 on the layout map: the drawn
+        # "secure area" rectangle (home + protected ground). Declarative
+        # for now — display and future direction semantics.
+        "secure_area": None,
     }
 
 
@@ -417,6 +421,15 @@ def validate_settings(data: Any) -> list[str]:
                         "(optional azimuth degrees, fov 10..360)"
                     )
 
+    secure_area = data.get("secure_area")
+    if secure_area is not None:
+        ok = isinstance(secure_area, dict) and all(
+            isinstance(secure_area.get(k), (int, float)) and 0.0 <= secure_area[k] <= 1.0
+            for k in ("x0", "y0", "x1", "y1")
+        )
+        if not ok:
+            errors.append("secure_area must be null or {x0, y0, x1, y1} within 0..1")
+
     return errors
 
 
@@ -562,6 +575,24 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
                 entry["fov"] = round(float(fov), 1)
             cleaned_layout[str(cam)] = entry
         merged["camera_layout"] = cleaned_layout
+
+    secure_area = data.get("secure_area")
+    if isinstance(secure_area, dict):
+        vals = {}
+        for k in ("x0", "y0", "x1", "y1"):
+            v = secure_area.get(k)
+            if isinstance(v, (int, float)) and 0.0 <= v <= 1.0:
+                vals[k] = float(v)
+        if len(vals) == 4:
+            # Normalize corner order so (x0,y0) is always top-left.
+            merged["secure_area"] = {
+                "x0": round(min(vals["x0"], vals["x1"]), 4),
+                "y0": round(min(vals["y0"], vals["y1"]), 4),
+                "x1": round(max(vals["x0"], vals["x1"]), 4),
+                "y1": round(max(vals["y0"], vals["y1"]), 4),
+            }
+    elif secure_area is None and "secure_area" in data:
+        merged["secure_area"] = None
 
     return merged
 

@@ -20,9 +20,10 @@
   <p class="help" style="margin:0 0 0.75em">
     Drag cameras where they live around the property. Drag a camera's small
     handle to aim its <em>view pie</em> in the compass direction it faces;
-    click a camera to fine-tune azimuth and field-of-view width. Neighbor
-    suggestions come from overlapping pies — cameras that watch the same
-    ground. Never used for routing.
+    click a camera to fine-tune azimuth and field-of-view width. Drag on
+    empty map space to draw the <em>secure area</em> rectangle (home + the
+    ground you protect). Neighbor suggestions come from overlapping pies —
+    cameras that watch the same ground. Never used for routing.
   </p>
   <div id="layout-map" style="position:relative;width:min(560px,100%);aspect-ratio:1;
        background:var(--surface);border:1px solid var(--stroke);border-radius:var(--radius-md)"></div>
@@ -35,6 +36,9 @@
     <label style="margin-left:0.75em">field of view
       <input id="detail-fov" type="number" min="10" max="360" step="5" style="width:4.5em">°
     </label>
+  </div>
+  <div style="margin:0.5em 0">
+    <button id="clear-secure" class="test-push" style="display:none">Clear secure area</button>
   </div>
 
   <div style="margin-top:0.75em">

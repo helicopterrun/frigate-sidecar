@@ -290,3 +290,26 @@ def test_camera_layout_accepts_azimuth_and_fov(client: TestClient):
 
     doc["camera_layout"] = {"doorbell": {"x": 0.2, "y": 0.3, "fov": 5}}  # fov too narrow
     assert client.put("/v1/push/settings", json=doc).status_code == 400
+
+
+def test_secure_area_round_trips_and_clears(client: TestClient):
+    doc = client.get("/v1/push/settings").json()["settings"]
+    doc["secure_area"] = {"x0": 0.8, "y0": 0.1, "x1": 0.2, "y1": 0.6}
+    assert client.put("/v1/push/settings", json=doc).status_code == 200
+    saved = client.get("/v1/push/settings").json()["settings"]["secure_area"]
+    # Corners normalize to top-left / bottom-right.
+    assert saved == {"x0": 0.2, "y0": 0.1, "x1": 0.8, "y1": 0.6}
+
+    # Omitting the key (app-style PUT) keeps it...
+    app_doc = {k: v for k, v in doc.items() if k != "secure_area"}
+    assert client.put("/v1/push/settings", json=app_doc).status_code == 200
+    assert client.get("/v1/push/settings").json()["settings"]["secure_area"] == saved
+
+    # ...explicit null clears it.
+    doc["secure_area"] = None
+    assert client.put("/v1/push/settings", json=doc).status_code == 200
+    assert client.get("/v1/push/settings").json()["settings"]["secure_area"] is None
+
+    # Malformed rejects.
+    doc["secure_area"] = {"x0": 0.2, "y0": 0.1, "x1": 1.4, "y1": 0.6}
+    assert client.put("/v1/push/settings", json=doc).status_code == 400
