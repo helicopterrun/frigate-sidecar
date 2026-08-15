@@ -517,3 +517,94 @@ async def test_delivery_disabled_is_a_no_op(sidecar_db_path: Path):
     )
     assert mutated == 0
     assert conn.execute("SELECT COUNT(*) FROM push_cards").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_neighbor_cameras_merge_despite_disjoint_zones(sidecar_db_path: Path):
+    """The 2026-08-14 20:55 walk: stairway-tight (no shared zones) and
+    walkway saw the same person 10s apart and produced two stories. With
+    the cameras declared neighbors, the second track merges onto the first
+    card even though the zone sets are disjoint."""
+    from frigate_sidecar.push import policy_settings
+
+    settings = policy_settings.default_settings()
+    settings["camera_neighbors"] = {"stairway-tight": ["walkway"]}
+    policy_settings.apply_settings(settings)
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    await handle_delivery_event(
+        make_event("stairway-tight", "trkA", zones=("stairs",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    # Walkway lists a completely different zone -- old dedup missed this.
+    await handle_delivery_event(
+        make_event("walkway", "trkB", zones=("walkway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+
+    rows = conn.execute("SELECT card_key FROM push_cards").fetchall()
+    assert [r["card_key"] for r in rows] == ["stairway-tight:person:trkA"]
+    alias = conn.execute(
+        "SELECT card_key FROM push_card_track_aliases WHERE camera = 'walkway'"
+    ).fetchone()
+    assert alias is not None and alias["card_key"] == "stairway-tight:person:trkA"
+
+
+@pytest.mark.asyncio
+async def test_neighbor_declaration_is_symmetric(sidecar_db_path: Path):
+    from frigate_sidecar.push import policy_settings
+
+    settings = policy_settings.default_settings()
+    settings["camera_neighbors"] = {"stairway-tight": ["walkway"]}
+    policy_settings.apply_settings(settings)
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    # First sighting on the *declared* side; second on the undeclared side.
+    await handle_delivery_event(
+        make_event("walkway", "trkA", zones=("walkway",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    await handle_delivery_event(
+        make_event("stairway-tight", "trkB", zones=("stairs",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+
+    rows = conn.execute("SELECT card_key FROM push_cards").fetchall()
+    assert [r["card_key"] for r in rows] == ["walkway:person:trkA"]
+
+
+@pytest.mark.asyncio
+async def test_non_neighbor_cameras_with_disjoint_zones_still_split(sidecar_db_path: Path):
+    from frigate_sidecar.push import policy_settings
+
+    settings = policy_settings.default_settings()
+    settings["camera_neighbors"] = {"stairway-tight": ["walkway"]}
+    policy_settings.apply_settings(settings)
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    config = PushSection(delivery_enabled=True)
+    device = make_device()
+
+    await handle_delivery_event(
+        make_event("stairway-tight", "trkA", zones=("stairs",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    # "garden" is not declared a neighbor of stairway-tight.
+    await handle_delivery_event(
+        make_event("garden", "trkB", zones=("front_garden",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+
+    rows = conn.execute("SELECT card_key FROM push_cards ORDER BY created_at").fetchall()
+    assert {r["card_key"] for r in rows} == {
+        "stairway-tight:person:trkA", "garden:person:trkB",
+    }

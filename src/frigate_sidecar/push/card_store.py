@@ -229,6 +229,7 @@ def find_dedup_candidate(
     now: float,
     window_s: float,
     zones: tuple[str, ...] = (),
+    neighbor_cameras: frozenset[str] | set[str] = frozenset(),
 ) -> str | None:
     """The oldest open card sharing `subject_kind` and at least one zone with
     this event, created within `window_s` of `now` -- the cross-camera dedup
@@ -236,6 +237,12 @@ def find_dedup_candidate(
     doesn't exist yet). Oldest, not newest: with three cameras sharing a
     zone, the first one's card is the one every later camera should merge
     onto, not whichever alias happened to be looked up last.
+
+    `neighbor_cameras` widens the match: a candidate owned by a declared
+    neighbor camera merges even with a disjoint zone set. Adjacent cameras
+    watching the same approach often have no zone in common at all
+    (stairway-tight vs walkway, observed 2026-08-14 as one walk producing
+    an LA + summary row per camera).
 
     Matching is **zone-set intersection**, not first-zone equality: two
     overlapping cameras list the same walk under different first-zones
@@ -251,10 +258,10 @@ def find_dedup_candidate(
     event_zones = {z for z in zones if z}
     if zone_name:
         event_zones.add(zone_name)
-    if not event_zones:
+    if not event_zones and not neighbor_cameras:
         return None
     rows = conn.execute(
-        "SELECT card_key, zone_name, zones_csv FROM push_cards "
+        "SELECT card_key, zone_name, zones_csv, camera FROM push_cards "
         "WHERE subject_kind = ? AND closed = 0 AND resolved = 0 "
         "AND card_key != ? AND created_at >= ? "
         "ORDER BY created_at ASC",
@@ -265,6 +272,8 @@ def find_dedup_candidate(
         if row["zone_name"]:
             candidate_zones.add(row["zone_name"])
         if event_zones & candidate_zones:
+            return row["card_key"]
+        if row["camera"] and row["camera"] in neighbor_cameras:
             return row["card_key"]
     return None
 

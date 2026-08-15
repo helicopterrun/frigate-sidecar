@@ -390,11 +390,12 @@ def _resolve_card_for_track(
 
     natural_key = build_card_key(camera=camera, subject_kind=subject_kind, subject_id=track_id)
     existing = card_store.get_card(conn, natural_key)
-    if existing is None and zone_name:
+    neighbor_cameras = policy_settings.camera_neighbor_set(camera)
+    if existing is None and (zone_name or neighbor_cameras):
         candidate_key = card_store.find_dedup_candidate(
             conn, subject_kind=subject_kind, zone_name=zone_name,
             exclude_key=natural_key, now=now, window_s=_DEDUP_WINDOW_S,
-            zones=zones,
+            zones=zones, neighbor_cameras=neighbor_cameras,
         )
         if candidate_key is not None:
             candidate = card_store.get_card(conn, candidate_key)

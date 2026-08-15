@@ -185,6 +185,12 @@ def default_settings() -> dict[str, Any]:
         "escalation_sound": "urgent",
         "mute_sounds": True,
         "quiet_hours": None,
+        # camera -> [cameras that watch the same physical approach]. Dedup
+        # merges same-kind stories across declared neighbors even when their
+        # zone sets are disjoint (the stairway-tight/walkway split,
+        # 2026-08-14). Symmetric at read time -- declaring one direction is
+        # enough. Config-side only for now; the app never writes it.
+        "camera_neighbors": {},
     }
 
 
@@ -341,6 +347,19 @@ def validate_settings(data: Any) -> list[str]:
                     f"quiet_hours.mode must be 'cap_quiet' or 'mute_sounds', got {mode!r}"
                 )
 
+    camera_neighbors = data.get("camera_neighbors")
+    if camera_neighbors is not None:
+        if not isinstance(camera_neighbors, dict):
+            errors.append("camera_neighbors must be an object of camera -> [cameras]")
+        else:
+            for cam, neighbors in camera_neighbors.items():
+                if not isinstance(neighbors, list) or not all(
+                    isinstance(n, str) for n in neighbors
+                ):
+                    errors.append(
+                        f"camera_neighbors[{cam!r}] must be a list of camera names"
+                    )
+
     return errors
 
 
@@ -434,7 +453,31 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
         if _valid_time(start) and _valid_time(end) and mode in ("cap_quiet", "mute_sounds"):
             merged["quiet_hours"] = {"start": start, "end": end, "mode": mode}
 
+    camera_neighbors = data.get("camera_neighbors")
+    if isinstance(camera_neighbors, dict):
+        cleaned_neighbors: dict[str, list[str]] = {}
+        for cam, neighbors in camera_neighbors.items():
+            if not isinstance(neighbors, list):
+                continue
+            names = [str(n) for n in neighbors if isinstance(n, str) and n and n != cam]
+            if names:
+                cleaned_neighbors[str(cam)] = names
+        merged["camera_neighbors"] = cleaned_neighbors
+
     return merged
+
+
+def camera_neighbor_set(camera: str, settings: dict[str, Any] | None = None) -> frozenset[str]:
+    """Cameras declared adjacent to `camera`, symmetric closure -- declaring
+    `a: [b]` makes `b` a neighbor of `a` AND `a` a neighbor of `b`."""
+    table = (settings if settings is not None else get_active()).get("camera_neighbors", {})
+    if not isinstance(table, dict):
+        return frozenset()
+    out = {str(n) for n in table.get(camera, []) if n}
+    out |= {str(cam) for cam, neighbors in table.items()
+            if isinstance(neighbors, list) and camera in neighbors}
+    out.discard(camera)
+    return frozenset(out)
 
 
 def load_settings(path: str | Path) -> dict[str, Any]:
