@@ -180,3 +180,61 @@ def test_put_unknown_top_level_field_does_not_fail(client: TestClient):
     ok["a_future_field"] = {"whatever": True}
     resp = client.put("/v1/push/settings", json=ok)
     assert resp.status_code == 200
+
+
+def test_get_includes_friendly_names_and_reloads_them(
+    client: TestClient, tmp_path: Path,
+):
+    """`friendly_name` rides along in available_zones, and editing Frigate's
+    config shows up on the next GET without a sidecar restart."""
+    resp = client.get("/v1/push/settings")
+    zones = {z["zone"]: z for z in resp.json()["available_zones"]}
+    assert zones["front_door"]["friendly_name"] is None
+
+    config = tmp_path / "frigate-config.yml"
+    doc = yaml.safe_load(config.read_text())
+    doc["cameras"]["doorbell"]["zones"]["front_door"]["friendly_name"] = "Front Door"
+    config.write_text(yaml.safe_dump(doc))
+
+    resp = client.get("/v1/push/settings")
+    zones = {z["zone"]: z for z in resp.json()["available_zones"]}
+    assert zones["front_door"]["friendly_name"] == "Front Door"
+
+
+def test_get_includes_available_cameras(client: TestClient):
+    resp = client.get("/v1/push/settings")
+    assert resp.json()["available_cameras"] == ["backyard", "doorbell", "street"]
+
+
+def test_put_round_trips_zone_page_fields(client: TestClient):
+    """The /zones page PUTs the whole doc with classes, overrides, and an
+    explicit camera_neighbors map."""
+    doc = client.get("/v1/push/settings").json()["settings"]
+    doc["zone_classes"] = {"front_door": "doors", "garage": "off_limits"}
+    doc["zone_overrides"] = {"sidewalk": {"person": "notify"}}
+    doc["camera_neighbors"] = {"doorbell": ["street"]}
+
+    assert client.put("/v1/push/settings", json=doc).status_code == 200
+    saved = client.get("/v1/push/settings").json()["settings"]
+    assert saved["zone_classes"] == {"front_door": "doors", "garage": "off_limits"}
+    assert saved["zone_overrides"] == {"sidewalk": {"person": "notify"}}
+    assert saved["camera_neighbors"] == {"doorbell": ["street"]}
+
+    # An app-style PUT that omits camera_neighbors must not wipe it...
+    app_doc = {k: v for k, v in doc.items() if k != "camera_neighbors"}
+    assert client.put("/v1/push/settings", json=app_doc).status_code == 200
+    saved = client.get("/v1/push/settings").json()["settings"]
+    assert saved["camera_neighbors"] == {"doorbell": ["street"]}
+
+    # ...but the page sending an explicit empty map clears it.
+    doc["camera_neighbors"] = {}
+    assert client.put("/v1/push/settings", json=doc).status_code == 200
+    saved = client.get("/v1/push/settings").json()["settings"]
+    assert saved["camera_neighbors"] == {}
+
+
+def test_zones_page_renders(client: TestClient):
+    resp = client.get("/zones")
+    assert resp.status_code == 200
+    assert "Camera neighbors" in resp.text
+    assert "/static/js/zones.js" in resp.text

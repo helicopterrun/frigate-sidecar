@@ -724,6 +724,7 @@ def build_available_zones(config_path: str | Path) -> list[dict[str, Any]]:
             "zone": zone,
             "cameras": sorted(cameras),
             "guessed_class": guess_zone_class(zone, tuple(sorted(cameras))),
+            "friendly_name": _zone_display_names.get(zone),
         }
         for zone, cameras in sorted(cameras_by_zone.items())
     ]

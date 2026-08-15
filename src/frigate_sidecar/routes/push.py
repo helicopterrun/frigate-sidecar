@@ -628,8 +628,15 @@ async def get_push_settings(request: Request) -> dict[str, Any]:
     if not settings_path.exists():
         policy_settings.save_settings(settings_path, active)
 
+    # Re-read friendly names on every GET (a cheap yaml load): editing
+    # Frigate's config must show up here without a sidecar restart.
+    policy_settings.load_zone_display_names(settings.frigate.config_path)
+
+    from frigate_sidecar.zones import load_camera_zones
+
     return {
         "settings": active,
+        "available_cameras": sorted(load_camera_zones(settings.frigate.config_path).keys()),
         "available_zones": policy_settings.build_available_zones(settings.frigate.config_path),
         "available_openings": policy_settings.build_available_openings(
             settings.frigate.config_path

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% set active_page = 'zones' %}
+{% block title %}Zone handling · frigate-sidecar{% endblock %}
+
+{% block body %}
+{% include "_header.html" %}
+<main>
+  <p class="help" style="margin:0 0 1em">
+    Place classes and per-zone overrides drive push routing; camera neighbors
+    merge one walk seen by adjacent cameras into a single story. Friendly
+    names are read-only here — set them in Frigate's config
+    (<code>friendly_name:</code> under each camera's zone).
+  </p>
+
+  <div id="zones-banner" class="help" style="display:none;margin:0 0 1em"></div>
+
+  <h3 style="margin:0 0 0.5em">Zones</h3>
+  <div id="zones-list" class="stat-row" style="flex-wrap:wrap"></div>
+
+  <h3 style="margin:1.5em 0 0.5em">Camera neighbors</h3>
+  <p class="help" style="margin:0 0 0.75em">
+    Tick the cameras that watch the same physical approach. Declaring one
+    direction is enough — adjacency is symmetric.
+  </p>
+  <div id="neighbors-list"></div>
+
+  <div style="margin-top:1.5em">
+    <button id="save-btn" class="test-push">Save</button>
+    <span id="save-state" style="margin-left:1em"></span>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/zones.js"></script>
+{% endblock %}
