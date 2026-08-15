@@ -175,7 +175,9 @@ async def test_dry_run_scenario_escalate_urgent():
     decisions = await replay_card.dry_run_scenario(messages, speed=100.0, camera="patio")
 
     mutations = [d["mutation"] for d in decisions]
-    assert "create" in mutations
+    # The quiet-level create no longer pushes (2026-08-14) -- it surfaces in
+    # the trace as "(no push)"; the story's first push is the escalation.
+    assert "(no push)" in mutations
     assert "escalate" in mutations
 
     escalate = next(d for d in decisions if d["mutation"] == "escalate")

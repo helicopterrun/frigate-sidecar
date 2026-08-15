@@ -86,7 +86,7 @@ async def test_media_present_on_create_and_points_at_external_base(sidecar_db_pa
     config = PushSection(delivery_enabled=True, external_base_url=EXTERNAL_BASE_URL)
     event = ReviewEvent(
         review_id="r1", camera="front", severity="alert", labels=("person",),
-        track_ids=("trk1",), zones=("front_yard",),  # non-empty -> place=yard, not street/log
+        track_ids=("trk1",), zones=("front_door",),  # doors -> notify: quiet no longer pushes (2026-08-14)
     )
 
     await handle_delivery_event(
@@ -121,7 +121,7 @@ async def test_media_present_on_enrich_too(sidecar_db_path: Path):
     config = PushSection(delivery_enabled=True, external_base_url=EXTERNAL_BASE_URL)
     event = ReviewEvent(
         review_id="r1", camera="front", severity="alert", labels=("person",),
-        track_ids=("trk1",), zones=("front_yard",),
+        track_ids=("trk1",), zones=("front_door",),
     )
 
     await handle_delivery_event(
@@ -149,7 +149,7 @@ async def test_media_absent_without_external_base_url_even_with_engine(sidecar_d
     config = PushSection(delivery_enabled=True)  # external_base_url left at "" (default)
     event = ReviewEvent(
         review_id="r1", camera="front", severity="alert", labels=("person",),
-        track_ids=("trk1",), zones=("front_yard",),
+        track_ids=("trk1",), zones=("front_door",),
     )
 
     await handle_delivery_event(
@@ -177,11 +177,11 @@ async def test_two_cameras_same_zone_within_window_merge_into_one_card(sidecar_d
     device = make_device()
 
     await handle_delivery_event(
-        make_event("cam-a", "trkA", zones=("driveway",)),
+        make_event("cam-a", "trkA", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     await handle_delivery_event(
-        make_event("cam-b", "trkB", zones=("driveway",)),
+        make_event("cam-b", "trkB", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=5.0,
     )
 
@@ -277,11 +277,11 @@ async def test_dedup_window_expired_creates_separate_card(sidecar_db_path: Path)
     device = make_device()
 
     await handle_delivery_event(
-        make_event("cam-a", "trkA", zones=("driveway",)),
+        make_event("cam-a", "trkA", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     await handle_delivery_event(
-        make_event("cam-b", "trkB", zones=("driveway",)),
+        make_event("cam-b", "trkB", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=20.0,
     )
 
@@ -297,15 +297,15 @@ async def test_three_cameras_sharing_a_zone_all_merge_onto_the_first(sidecar_db_
     device = make_device()
 
     await handle_delivery_event(
-        make_event("cam-a", "trkA", zones=("driveway",)),
+        make_event("cam-a", "trkA", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     await handle_delivery_event(
-        make_event("cam-b", "trkB", zones=("driveway",)),
+        make_event("cam-b", "trkB", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=4.0,
     )
     await handle_delivery_event(
-        make_event("cam-c", "trkC", zones=("driveway",)),
+        make_event("cam-c", "trkC", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=8.0,
     )
 
@@ -336,7 +336,8 @@ async def test_subject_changing_zones_enriches_the_same_card_no_new_one(sidecar_
     rows = conn.execute("SELECT card_key, zone_name FROM push_cards").fetchall()
     assert len(rows) == 1
     assert rows[0]["zone_name"] == "parking_spot"
-    assert transport.sent[1]["payload"]["mutation"] == "enrich"
+    # person/yard routes quiet, and quiet no longer pushes (2026-08-14).
+    assert transport.sent == []
 
 
 @pytest.mark.asyncio
@@ -349,11 +350,11 @@ async def test_resolving_the_merged_secondary_track_leaves_the_primary_card_open
     device = make_device()
 
     await handle_delivery_event(
-        make_event("cam-a", "trkA", zones=("driveway",)),
+        make_event("cam-a", "trkA", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     await handle_delivery_event(
-        make_event("cam-b", "trkB", zones=("driveway",)),
+        make_event("cam-b", "trkB", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=5.0,
     )
 
@@ -382,11 +383,11 @@ async def test_resolving_the_primary_track_resolves_the_card_normally(sidecar_db
     device = make_device()
 
     await handle_delivery_event(
-        make_event("cam-a", "trkA", zones=("driveway",)),
+        make_event("cam-a", "trkA", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     await handle_delivery_event(
-        make_event("cam-b", "trkB", zones=("driveway",)),
+        make_event("cam-b", "trkB", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=5.0,
     )
 

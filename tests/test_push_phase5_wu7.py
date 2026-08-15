@@ -269,10 +269,11 @@ async def test_quiet_hours_cap_quiet_caps_notify_to_quiet(sidecar_db_path: Path)
         _event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=100.0,
     )
-    sends = _sit_sends(transport)
-    assert len(sends) == 1
-    assert sends[0]["payload"]["level"] == "quiet"
-    assert "sound" not in sends[0]["payload"]["aps"]
+    # quiet no longer pushes at all (user feedback 2026-08-14): a story
+    # capped to quiet is recorded, not announced.
+    assert _sit_sends(transport) == []
+    card = card_store.get_card(conn, "doorbell:person:trk1")
+    assert card is not None and card.level == "quiet"
 
 
 @pytest.mark.asyncio
@@ -300,7 +301,8 @@ async def test_quiet_hours_cap_quiet_exempts_urgent(sidecar_db_path: Path):
 async def test_quiet_hours_cap_quiet_with_mute_sounds_does_not_crash(sidecar_db_path: Path):
     """mute_sounds + cap_quiet: mute is now a sound-only control (not
     suppression), so the card evaluates normally, cap_quiet caps notify→quiet,
-    and mute strips sound. Must push at quiet level with no sound."""
+    and mute strips sound. Quiet never pushes (2026-08-14), so the card
+    advances silently with no send and no crash."""
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = _device()
@@ -315,10 +317,9 @@ async def test_quiet_hours_cap_quiet_with_mute_sounds_does_not_crash(sidecar_db_
         _event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=100.0,
     )
-    sends = _sit_sends(transport)
-    assert len(sends) == 1
-    assert sends[0]["payload"]["level"] == "quiet"
-    assert "sound" not in sends[0]["payload"]["aps"]
+    assert _sit_sends(transport) == []
+    card = card_store.get_card(conn, "doorbell:person:trk1")
+    assert card is not None and card.level == "quiet"
 
 
 @pytest.mark.asyncio
@@ -790,8 +791,8 @@ async def test_unmuted_story_silent_at_start_sounds_at_urgent(sidecar_db_path: P
         _event("doorbell", "trk1", "person", zones=("yard",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
-    create_aps = _sit_sends(transport)[0]["payload"]["aps"]
-    assert "sound" not in create_aps
+    # quiet create no longer pushes at all (2026-08-14).
+    assert _sit_sends(transport) == []
 
     # Escalate to urgent (pool): sounds (budget still available).
     await handle_delivery_event(

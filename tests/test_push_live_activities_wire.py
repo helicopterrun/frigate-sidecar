@@ -481,9 +481,9 @@ async def test_la_only_mode_no_banner_ever_and_catch_all_family(sidecar_db_path:
     assert start["payload"]["aps"]["attributes"]["family"] == "activity"
     assert start["payload"]["aps"]["content-state"]["glyph"] == "pawprint.fill"
     assert "sound" not in start["payload"]["aps"]  # fully silent start
-    aps = card_sends(transport)[0]["payload"]["aps"]
-    assert aps["interruption-level"] == "passive"
-    assert "sound" not in aps
+    # quiet never card-pushes (2026-08-14), even in la_only -- the LA is
+    # the whole surface for a quiet story.
+    assert card_sends(transport) == []
 
     # Escalation: LA update stays silent (no alert dict), card push passive.
     attach_token(conn, device=device, card_key="driveway:animal:trk9",

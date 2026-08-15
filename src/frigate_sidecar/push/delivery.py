@@ -65,7 +65,11 @@ CONTRACT_VERSION = 1
 LEVEL_APNS: dict[str, dict[str, Any]] = {
     "urgent": {"push": True, "interruption_level": "time-sensitive"},
     "notify": {"push": True, "interruption_level": "active"},
-    "quiet": {"push": True, "interruption_level": "passive"},
+    # `quiet` ("Noted") stopped pushing entirely on user feedback 2026-08-14:
+    # a parked car re-detected every couple of minutes stacked seven passive
+    # rows in 11 minutes. Noted items live in the app's history, not in
+    # Notification Center. interruption_level stays for demotion paths.
+    "quiet": {"push": False, "interruption_level": "passive"},
     "log": {"push": False, "interruption_level": None},
     SUPPRESSED: {"push": False, "interruption_level": None},
 }

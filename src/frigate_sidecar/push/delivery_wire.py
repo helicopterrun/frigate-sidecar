@@ -705,7 +705,13 @@ async def end_activity_if_card_closed(
         return False
     ctx = card_store.get_card_context(conn, card_key) or {}
     kind = ctx.get("subject_kind", "")
-    elapsed = max(0.0, now - card.state_since_at)
+    # Resolve copy carries the STORY duration (first sighting -> end), the
+    # same clock the LA's frozen timer shows -- not time-in-latest-state,
+    # which read "3s" next to an LA frozen at "11s" (observed 2026-08-14).
+    # This end is deferred (sent when the token lands, possibly seconds
+    # after the story closed), so the clock stops at the card's resolve
+    # write (`updated_at`), never at push time.
+    elapsed = max(0.0, card.updated_at - card.created_at)
     primary, secondary = _copy(kind, "", ctx.get("camera", ""), ctx.get("zone_name", ""), elapsed)
     content_state = live_activities.build_content_state(
         level=card.level, mutation=RESOLVE,
@@ -823,7 +829,11 @@ async def handle_delivery_event(
                 event_id=event.event_id,
             )
 
-        elapsed = max(0.0, now - card.state_since_at)
+        # RESOLVE copy shows the story duration (matches the LA's frozen
+        # timer); live mutations show time-in-current-state.
+        elapsed = max(
+            0.0, now - (card.created_at if mutation == RESOLVE else card.state_since_at)
+        )
         identity = event.sub_labels[0] if event.sub_labels else ""
         if not identity and engine is not None:
             identity = getattr(engine, "_sub_labels", {}).get(
@@ -863,7 +873,9 @@ async def handle_delivery_event(
         # the card push demoted to a silent NC entry -- an LA that failed
         # anywhere along the way leaves the normal banner intact.
         la_only = bool(policy["live_activities"].get("la_only", False))
-        la_catch_all = la_only and should_push(card.level)
+        # la_only's catch-all is quiet+ by its own contract -- decoupled from
+        # should_push, which no longer includes quiet (2026-08-14).
+        la_catch_all = la_only and card.level in ("quiet", "notify", "urgent")
         family = live_activities.should_start_activity(
             subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
             level=card.level,
@@ -1050,7 +1062,9 @@ async def handle_delivery_resolve(
         card, mutation, sound = _advance_card(
             existing, existing.level, card_key=card_key, now=now, resolved=True,
         )
-        elapsed = max(0.0, now - card.state_since_at)
+        elapsed = max(
+            0.0, now - (card.created_at if mutation == RESOLVE else card.state_since_at)
+        )
         primary, secondary = _copy(kind, "", camera, zone_name, elapsed)
         # End the LA first; if the end landed on a confirmed activity, the
         # resolve card push goes out quiet (NC text only, no banner).
