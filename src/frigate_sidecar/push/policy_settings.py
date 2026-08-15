@@ -29,6 +29,7 @@ is "what a *freshly onboarded* settings file starts the user at".
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -191,6 +192,14 @@ def default_settings() -> dict[str, Any]:
         # 2026-08-14). Symmetric at read time -- declaring one direction is
         # enough. Config-side only for now; the app never writes it.
         "camera_neighbors": {},
+        # camera -> {"dx","dy"}: unit vector in normalized image space
+        # (y down) meaning "toward home / the protected area", drawn on the
+        # /cameras page. Movement dotted against it yields the LA heading
+        # chip. Config/page-side only, sticky across app PUTs.
+        "camera_headings": {},
+        # camera -> {"x","y"} in 0..1: position on the /cameras layout map.
+        # Purely visual + neighbor suggestions; never affects routing.
+        "camera_layout": {},
     }
 
 
@@ -360,6 +369,41 @@ def validate_settings(data: Any) -> list[str]:
                         f"camera_neighbors[{cam!r}] must be a list of camera names"
                     )
 
+    camera_headings = data.get("camera_headings")
+    if camera_headings is not None:
+        if not isinstance(camera_headings, dict):
+            errors.append("camera_headings must be an object of camera -> {dx, dy}")
+        else:
+            for cam, vec in camera_headings.items():
+                ok = (
+                    isinstance(vec, dict)
+                    and isinstance(vec.get("dx"), (int, float))
+                    and isinstance(vec.get("dy"), (int, float))
+                    and math.isfinite(vec["dx"]) and math.isfinite(vec["dy"])
+                    and (vec["dx"] or vec["dy"])
+                )
+                if not ok:
+                    errors.append(
+                        f"camera_headings[{cam!r}] must be a non-zero {{dx, dy}} vector"
+                    )
+
+    camera_layout = data.get("camera_layout")
+    if camera_layout is not None:
+        if not isinstance(camera_layout, dict):
+            errors.append("camera_layout must be an object of camera -> {x, y}")
+        else:
+            for cam, pos in camera_layout.items():
+                ok = (
+                    isinstance(pos, dict)
+                    and isinstance(pos.get("x"), (int, float))
+                    and isinstance(pos.get("y"), (int, float))
+                    and 0.0 <= pos["x"] <= 1.0 and 0.0 <= pos["y"] <= 1.0
+                )
+                if not ok:
+                    errors.append(
+                        f"camera_layout[{cam!r}] must be {{x, y}} within 0..1"
+                    )
+
     return errors
 
 
@@ -463,6 +507,41 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
             if names:
                 cleaned_neighbors[str(cam)] = names
         merged["camera_neighbors"] = cleaned_neighbors
+
+    camera_headings = data.get("camera_headings")
+    if isinstance(camera_headings, dict):
+        cleaned_headings: dict[str, dict[str, float]] = {}
+        for cam, vec in camera_headings.items():
+            if not isinstance(vec, dict):
+                continue
+            dx, dy = vec.get("dx"), vec.get("dy")
+            if not (
+                isinstance(dx, (int, float)) and isinstance(dy, (int, float))
+                and math.isfinite(dx) and math.isfinite(dy)
+            ):
+                continue
+            length = math.hypot(dx, dy)
+            if length < 1e-6:
+                continue
+            cleaned_headings[str(cam)] = {
+                "dx": round(dx / length, 4), "dy": round(dy / length, 4),
+            }
+        merged["camera_headings"] = cleaned_headings
+
+    camera_layout = data.get("camera_layout")
+    if isinstance(camera_layout, dict):
+        cleaned_layout: dict[str, dict[str, float]] = {}
+        for cam, pos in camera_layout.items():
+            if not isinstance(pos, dict):
+                continue
+            x, y = pos.get("x"), pos.get("y")
+            if not (
+                isinstance(x, (int, float)) and isinstance(y, (int, float))
+                and 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0
+            ):
+                continue
+            cleaned_layout[str(cam)] = {"x": round(float(x), 4), "y": round(float(y), 4)}
+        merged["camera_layout"] = cleaned_layout
 
     return merged
 

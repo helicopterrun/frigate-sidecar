@@ -42,6 +42,7 @@ from frigate_sidecar.routes import status as status_routes
 from frigate_sidecar.routes import toybox as toybox_routes
 from frigate_sidecar.routes import triage as triage_routes
 from frigate_sidecar.routes import zone_hits as zone_hits_routes
+from frigate_sidecar.routes import cameras_page as cameras_page_routes
 from frigate_sidecar.routes import zones_page as zones_page_routes
 
 _PACKAGE_ROOT = Path(__file__).parent
@@ -379,6 +380,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(push_routes.router)
     app.include_router(replay_routes.router)
     app.include_router(zones_page_routes.router)
+    app.include_router(cameras_page_routes.router)
 
     # Everything registered so far is the sidecar's own surface and requires a
     # Frigate session; the proxy catch-all below must not (Frigate does its own

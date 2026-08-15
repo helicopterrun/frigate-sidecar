@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import secrets
 import time
 from typing import TYPE_CHECKING
@@ -196,40 +197,67 @@ def _glyph_for(subject_kind: str, label: str) -> str:
     return _SUBJECT_GLYPH.get(subject_kind, "motion.detected")
 
 
-def _heading_label(velocity_angle: float | None, stationary: bool) -> str | None:
-    """Derive heading from velocity_angle. Returns one of the §8 vocabulary
-    words or None when unknown."""
+#: Normalized-image-space displacement below which movement is jitter, not
+#: travel. q10 of real person path steps measured at 0.008, median 0.066
+#: (tools/verify_heading.py over config captures, 2026-08-15).
+_HEADING_MIN_DISPLACEMENT = 0.02
+
+
+def _movement_vector(
+    path_data: list[tuple[float, float]] | None,
+) -> tuple[float, float] | None:
+    """Recent direction of travel as a unit vector in normalized image
+    space (y down), from the track's path trail: walk back from the newest
+    point until the displacement clears the jitter floor. None while the
+    trail is too short or the subject hasn't really moved."""
+    if not path_data or len(path_data) < 2:
+        return None
+    x1, y1 = path_data[-1][0], path_data[-1][1]
+    for point in reversed(path_data[:-1]):
+        dx, dy = x1 - point[0], y1 - point[1]
+        dist = math.hypot(dx, dy)
+        if dist >= _HEADING_MIN_DISPLACEMENT:
+            return (dx / dist, dy / dist)
+    return None
+
+
+def _heading_label(
+    path_data: list[tuple[float, float]] | None, stationary: bool, camera: str,
+) -> str | None:
+    """One of the §8 heading words, or None when unknown.
+
+    Measured 2026-08-15 (tools/verify_heading.py, 24,572 captured events):
+    this install's Frigate reports velocity_angle=0 / speed=0 on every
+    message (no zone distance calibration), so the old angle thresholds
+    were reading a constant — every moving subject showed "leaving".
+    Heading now comes from the path trail dotted against the per-camera
+    vector the user draws on /cameras ("toward home"); an uncalibrated
+    camera honestly shows no chip rather than a guess."""
     if stationary:
         return "stationary"
-    if velocity_angle is None:
+    movement = _movement_vector(path_data)
+    if movement is None:
         return None
-    # velocity_angle is degrees from camera's perspective: 0=away, 180=toward.
-    # Simplification: <60 = leaving, >120 = approaching, else passing.
-    angle = velocity_angle % 360
-    if angle > 120 and angle < 240:
+    calib = policy_settings.get_active().get("camera_headings", {}).get(camera)
+    if not isinstance(calib, dict):
+        return None
+    dot = movement[0] * calib.get("dx", 0.0) + movement[1] * calib.get("dy", 0.0)
+    # cos 60° = 0.5: within 60° of the drawn vector = approaching; within
+    # 60° of its opposite = leaving; the perpendicular band = passing.
+    if dot >= 0.5:
         return "approaching"
-    if angle < 60 or angle > 300:
+    if dot <= -0.5:
         return "leaving"
     return "passing"
 
 
 def _build_motion(
-    velocity_angle: float | None, stationary: bool,
-    average_estimated_speed: float | None, has_zone_distances: bool,
+    path_data: list[tuple[float, float]] | None, stationary: bool, camera: str,
 ) -> dict[str, str] | None:
-    heading = _heading_label(velocity_angle, stationary)
+    heading = _heading_label(path_data, stationary, camera)
     if heading is None:
         return None
-    motion: dict[str, str] = {"heading": heading}
-    if has_zone_distances and average_estimated_speed is not None and heading != "stationary":
-        mph = average_estimated_speed
-        if mph < 3:
-            motion["speed_label"] = "walking"
-        elif mph < 8:
-            motion["speed_label"] = "jogging"
-        else:
-            motion["speed_label"] = f"{int(mph)} mph"
-    return motion
+    return {"heading": heading}
 
 
 def _build_zones_ladder(
@@ -928,9 +956,7 @@ async def handle_delivery_event(
             track_state = engine.tracks.get(event.camera, track_id)
             if track_state is not None:
                 la_motion = _build_motion(
-                    track_state.velocity_angle, track_state.stationary,
-                    track_state.average_estimated_speed,
-                    has_zone_distances=False,
+                    track_state.path_data, track_state.stationary, event.camera,
                 )
                 live_zones = tuple(
                     z for z in track_state.first_seen_in_zone if z

@@ -677,10 +677,12 @@ async def put_push_settings(request: Request) -> dict[str, Any]:
         merged["live_activities"]["la_only"] = bool(active_la.get("la_only", False))
     if not (isinstance(la_body, dict) and la_body.get("delivery") in ("la_first", "notifications")):
         merged["live_activities"]["delivery"] = active_la.get("delivery", "la_first")
-    # camera_neighbors is config-side only (the app has no UI for it and its
-    # Codable round-trip drops the key) -- sticky unless explicitly sent.
-    if not isinstance(body.get("camera_neighbors"), dict):
-        merged["camera_neighbors"] = policy_settings.get_active().get("camera_neighbors", {})
+    # camera_neighbors / camera_headings / camera_layout are config-side only
+    # (the app has no UI for them and its Codable round-trip drops the keys)
+    # -- sticky unless explicitly sent.
+    for sticky_key in ("camera_neighbors", "camera_headings", "camera_layout"):
+        if not isinstance(body.get(sticky_key), dict):
+            merged[sticky_key] = policy_settings.get_active().get(sticky_key, {})
     policy_settings.save_settings(settings.push.push_settings_path, merged)
     policy_settings.apply_settings(merged)
     return {"ok": True}

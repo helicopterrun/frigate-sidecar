@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% set active_page = 'cameras' %}
+{% block title %}Camera calibration · frigate-sidecar{% endblock %}
+
+{% block body %}
+{% include "_header.html" %}
+<main>
+  <p class="help" style="margin:0 0 1em">
+    <strong>Direction:</strong> drag an arrow on each snapshot pointing
+    <em>toward your home / the protected area</em>. Movement along that arrow
+    reads as “approaching”, against it as “leaving”. Cameras without an arrow
+    show no direction chip.
+  </p>
+
+  <div id="cameras-banner" class="help" style="display:none;margin:0 0 1em"></div>
+
+  <div id="camera-cards" class="stat-row" style="flex-wrap:wrap"></div>
+
+  <h3 style="margin:1.5em 0 0.5em">Layout</h3>
+  <p class="help" style="margin:0 0 0.75em">
+    Drag cameras roughly where they live around the property (top-down, any
+    orientation). Used only for the neighbor suggestions below — never for
+    routing.
+  </p>
+  <div id="layout-map" style="position:relative;width:min(560px,100%);aspect-ratio:1;
+       background:var(--surface);border:1px solid var(--stroke);border-radius:var(--radius-md)"></div>
+
+  <div style="margin-top:0.75em">
+    <label class="help">Suggest neighbors within
+      <input id="suggest-radius" type="range" min="0.1" max="0.5" step="0.05" value="0.25"
+             style="vertical-align:middle">
+      <span id="suggest-radius-label">0.25</span>
+    </label>
+    <button id="suggest-btn" class="test-push" style="margin-left:0.75em">Suggest neighbors</button>
+  </div>
+  <div id="suggest-diff" class="help" style="margin:0.5em 0"></div>
+
+  <div style="margin-top:1.5em">
+    <button id="save-btn" class="test-push">Save</button>
+    <span id="save-state" style="margin-left:1em"></span>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/cameras.js"></script>
+{% endblock %}

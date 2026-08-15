@@ -238,3 +238,40 @@ def test_zones_page_renders(client: TestClient):
     assert resp.status_code == 200
     assert "Camera neighbors" in resp.text
     assert "/static/js/zones.js" in resp.text
+
+
+def test_put_round_trips_camera_calibration_fields(client: TestClient):
+    """The /cameras page PUTs camera_headings (unit vectors, renormalized)
+    and camera_layout (0..1 positions); app-style PUTs omitting them stay
+    sticky."""
+    doc = client.get("/v1/push/settings").json()["settings"]
+    doc["camera_headings"] = {"doorbell": {"dx": 3.0, "dy": 4.0}}  # not unit length
+    doc["camera_layout"] = {"doorbell": {"x": 0.25, "y": 0.75}}
+
+    assert client.put("/v1/push/settings", json=doc).status_code == 200
+    saved = client.get("/v1/push/settings").json()["settings"]
+    assert saved["camera_headings"] == {"doorbell": {"dx": 0.6, "dy": 0.8}}
+    assert saved["camera_layout"] == {"doorbell": {"x": 0.25, "y": 0.75}}
+
+    app_doc = {
+        k: v for k, v in doc.items() if k not in ("camera_headings", "camera_layout")
+    }
+    assert client.put("/v1/push/settings", json=app_doc).status_code == 200
+    saved = client.get("/v1/push/settings").json()["settings"]
+    assert saved["camera_headings"] == {"doorbell": {"dx": 0.6, "dy": 0.8}}
+    assert saved["camera_layout"] == {"doorbell": {"x": 0.25, "y": 0.75}}
+
+
+def test_put_rejects_malformed_camera_calibration(client: TestClient):
+    doc = client.get("/v1/push/settings").json()["settings"]
+    doc["camera_headings"] = {"doorbell": {"dx": 0, "dy": 0}}  # zero vector
+    assert client.put("/v1/push/settings", json=doc).status_code == 400
+    doc = client.get("/v1/push/settings").json()["settings"]
+    doc["camera_layout"] = {"doorbell": {"x": 1.5, "y": 0.5}}  # out of range
+    assert client.put("/v1/push/settings", json=doc).status_code == 400
+
+
+def test_cameras_page_renders(client: TestClient):
+    resp = client.get("/cameras")
+    assert resp.status_code == 200
+    assert "/static/js/cameras.js" in resp.text
