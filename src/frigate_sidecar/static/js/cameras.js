@@ -199,25 +199,130 @@
     );
   }
 
+  function pointerAzimuth(ev, entry) {
+    var rect = mapEl.getBoundingClientRect();
+    var px = (ev.clientX - rect.left) / rect.width;
+    var py = (ev.clientY - rect.top) / rect.height;
+    var dx = px - entry.x, dy = py - entry.y;
+    if (Math.hypot(dx, dy) < 0.01) return null;
+    return ((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360;
+  }
+
+  function svgLine(svg, x1, y1, x2, y2, attrs) {
+    var line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", x1); line.setAttribute("y1", y1);
+    line.setAttribute("x2", x2); line.setAttribute("y2", y2);
+    Object.keys(attrs).forEach(function (k) { line.setAttribute(k, attrs[k]); });
+    svg.appendChild(line);
+    return line;
+  }
+
   function renderMap() {
     mapEl.textContent = "";
 
-    // Wedge layer + compass rose.
+    // Wedge layer + compass rose. The direction arrow and the two wedge
+    // edges are the manipulation surfaces — same feel as drawing the
+    // snapshot arrows: grab the arrow to aim, grab an edge to widen.
     var svg = document.createElementNS(SVG_NS, "svg");
     svg.setAttribute("viewBox", "0 0 1 1");
     svg.setAttribute("preserveAspectRatio", "none");
     svg.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none";
+    var defs = document.createElementNS(SVG_NS, "defs");
+    var marker = document.createElementNS(SVG_NS, "marker");
+    marker.setAttribute("id", "map-arrowhead");
+    marker.setAttribute("viewBox", "0 0 10 10");
+    marker.setAttribute("refX", "8"); marker.setAttribute("refY", "5");
+    marker.setAttribute("markerWidth", "4.5"); marker.setAttribute("markerHeight", "4.5");
+    marker.setAttribute("orient", "auto-start-reverse");
+    var tip = document.createElementNS(SVG_NS, "path");
+    tip.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+    tip.setAttribute("fill", "var(--accent, #ffb454)");
+    marker.appendChild(tip);
+    defs.appendChild(marker);
+    svg.appendChild(defs);
+
+    function dragOn(el, camera, i, apply) {
+      el.style.pointerEvents = "stroke";
+      el.style.touchAction = "none";
+      el.addEventListener("pointerdown", function (ev) {
+        ev.stopPropagation();
+        selectCamera(camera);
+        el.setPointerCapture(ev.pointerId);
+        function move(mv) {
+          var e = ensureEntry(camera, i);
+          var az = pointerAzimuth(mv, e);
+          if (az === null) return;
+          apply(e, az);
+          renderMap();
+        }
+        function up() {
+          el.removeEventListener("pointermove", move);
+          el.removeEventListener("pointerup", up);
+          markDirty();
+        }
+        el.addEventListener("pointermove", move);
+        el.addEventListener("pointerup", up);
+      });
+    }
+
     cameras.forEach(function (camera, i) {
-      var entry = (doc.camera_layout || {})[camera];
-      if (!entry || entry.azimuth === undefined) return;
-      var path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("d", wedgePath(entry, entry.azimuth, entry.fov || DEFAULT_FOV, reach()));
-      path.setAttribute("fill", "var(--accent, #ffb454)");
-      path.setAttribute("fill-opacity", camera === selectedCamera ? "0.28" : "0.14");
-      path.setAttribute("stroke", "var(--accent, #ffb454)");
-      path.setAttribute("stroke-opacity", "0.5");
-      path.setAttribute("stroke-width", "0.003");
-      svg.appendChild(path);
+      // Unplaced cameras still get a ghost arrow at their default spot —
+      // grabbing it both places and aims them in one motion.
+      var entry = (doc.camera_layout || {})[camera] || layoutEntry(camera, i);
+      var hasAim = entry.azimuth !== undefined;
+      var az = hasAim ? entry.azimuth : 0;
+      var fov = entry.fov || DEFAULT_FOV;
+      var r = reach();
+      var selected = camera === selectedCamera;
+
+      if (hasAim) {
+        var path = document.createElementNS(SVG_NS, "path");
+        path.setAttribute("d", wedgePath(entry, az, fov, r));
+        path.setAttribute("fill", "var(--accent, #ffb454)");
+        path.setAttribute("fill-opacity", selected ? "0.28" : "0.14");
+        path.setAttribute("stroke", "none");
+        svg.appendChild(path);
+
+        // The two wedge edges: visible thin lines + invisible fat grab
+        // lines. Dragging an edge sets the width symmetrically.
+        [az - fov / 2, az + fov / 2].forEach(function (edgeAz) {
+          var d = azDir(edgeAz);
+          var ex = entry.x + d.x * r, ey = entry.y + d.y * r;
+          svgLine(svg, entry.x, entry.y, ex, ey, {
+            stroke: "var(--accent, #ffb454)", "stroke-opacity": "0.55",
+            "stroke-width": "0.004", "stroke-dasharray": "0.012 0.008",
+          });
+          var grab = svgLine(svg, entry.x, entry.y, ex, ey, {
+            stroke: "transparent", "stroke-width": "0.035",
+          });
+          grab.style.cursor = "col-resize";
+          dragOn(grab, camera, i, function (e, pointerAz) {
+            var half = Math.abs(((pointerAz - e.azimuth + 540) % 360) - 180);
+            e.fov = +Math.min(360, Math.max(10, half * 2)).toFixed(1);
+          });
+        });
+      }
+
+      // Direction arrow — the primary aim control, drawn like the snapshot
+      // arrows. Uncalibrated cameras get a faint north-pointing ghost you
+      // grab to set the first aim.
+      var dir = azDir(az);
+      var ax = entry.x + dir.x * r * 0.72, ay = entry.y + dir.y * r * 0.72;
+      var arrow = svgLine(svg, entry.x, entry.y, ax, ay, {
+        stroke: "var(--accent, #ffb454)",
+        "stroke-opacity": hasAim ? "0.95" : "0.35",
+        "stroke-width": "0.008",
+        "marker-end": "url(#map-arrowhead)",
+      });
+      var grabArrow = svgLine(svg, entry.x, entry.y, ax, ay, {
+        stroke: "transparent", "stroke-width": "0.05",
+      });
+      grabArrow.style.cursor = "alias";
+      grabArrow.setAttribute("aria-label", "aim " + camera);
+      dragOn(grabArrow, camera, i, function (e, pointerAz) {
+        e.azimuth = +pointerAz.toFixed(1);
+        if (e.fov === undefined) e.fov = DEFAULT_FOV;
+      });
     });
     mapEl.appendChild(svg);
 
@@ -263,45 +368,6 @@
         dot.addEventListener("pointerup", up);
       });
       mapEl.appendChild(dot);
-
-      // Aim handle: sits on the wedge bisector; drag to point the pie.
-      var entry = (doc.camera_layout || {})[camera];
-      var az = entry && entry.azimuth !== undefined ? entry.azimuth : 0;
-      var dir = azDir(az);
-      var hx = pos.x + dir.x * 0.07, hy = pos.y + dir.y * 0.07;
-      var handle = document.createElement("div");
-      handle.title = "drag to aim " + camera;
-      handle.style.cssText =
-        "position:absolute;transform:translate(-50%,-50%);width:12px;height:12px;" +
-        "border-radius:50%;background:var(--accent, #ffb454);cursor:alias;" +
-        "touch-action:none;opacity:" + (entry && entry.azimuth !== undefined ? "1" : "0.45");
-      handle.style.left = hx * 100 + "%";
-      handle.style.top = hy * 100 + "%";
-      handle.addEventListener("pointerdown", function (ev) {
-        ev.stopPropagation();
-        selectCamera(camera);
-        handle.setPointerCapture(ev.pointerId);
-        function move(mv) {
-          var rect = mapEl.getBoundingClientRect();
-          var px = (mv.clientX - rect.left) / rect.width;
-          var py = (mv.clientY - rect.top) / rect.height;
-          var e = ensureEntry(camera, i);
-          var dx = px - e.x, dy = py - e.y;
-          if (Math.hypot(dx, dy) < 0.01) return;
-          // atan2 with north=up, clockwise.
-          e.azimuth = +(((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360).toFixed(1);
-          if (e.fov === undefined) e.fov = DEFAULT_FOV;
-          renderMap();
-        }
-        function up() {
-          handle.removeEventListener("pointermove", move);
-          handle.removeEventListener("pointerup", up);
-          markDirty();
-        }
-        handle.addEventListener("pointermove", move);
-        handle.addEventListener("pointerup", up);
-      });
-      mapEl.appendChild(handle);
     });
     syncDetailPanel();
   }
