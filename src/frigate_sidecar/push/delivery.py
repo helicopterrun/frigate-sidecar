@@ -27,6 +27,7 @@ Activity.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import replace
@@ -284,6 +285,32 @@ _SEVERITY_INDEX = {"log": 0, "detection": 1, "alert": 2}
 
 _SOUND_RATE_KEY = "_card_sound"
 
+# la_first RESOLVE deferral: the LA's end payload keeps it on the lock screen
+# for a 30s dismissal window (build_la_end_payload's dismissal_offset). The
+# history row landing during that window reads as a duplicate of the frozen
+# LA (user feedback 2026-08-14, second round) -- hold it until the LA is gone.
+RESOLVE_DEFER_S = 33.0
+_DEFERRED_TASKS: set[asyncio.Task] = set()
+
+
+def _schedule_deferred_resolve(
+    transport: PushTransport, device: Device, *,
+    payload: dict[str, Any], collapse_id: str, delay_s: float,
+) -> None:
+    async def _later() -> None:
+        await asyncio.sleep(delay_s)
+        result = await transport.send_situation(
+            device, payload=payload, collapse_id=collapse_id, apns_priority=5,
+        )
+        logger.info(
+            "push: deferred resolve row sent device=%s card_key=%s ok=%s",
+            device.device_id, collapse_id, result.ok,
+        )
+
+    task = asyncio.get_running_loop().create_task(_later())
+    _DEFERRED_TASKS.add(task)
+    task.add_done_callback(_DEFERRED_TASKS.discard)
+
 
 def _device_eligible(
     device: Device, *, camera: str, labels: tuple[str, ...], card_level: str,
@@ -363,6 +390,15 @@ async def send_card_mutation(
 
         dev_payload = payload
         demoted = device.apns_token in demote_tokens
+        if demoted and suppress_demoted and mutation == RESOLVE:
+            # The one durable history row still gets written -- just after
+            # the resolved LA's dismissal window, not on top of it. Payload
+            # is already passive/silent (quiet-resolve block above).
+            _schedule_deferred_resolve(
+                transport, device, payload=payload,
+                collapse_id=card.card_key, delay_s=RESOLVE_DEFER_S,
+            )
+            continue
         if demoted and suppress_demoted and mutation != RESOLVE:
             # LA-first only (`suppress_demoted`): while a Live Activity
             # demonstrably covers this device, the story sends NO card

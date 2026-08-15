@@ -1090,6 +1090,7 @@ async def handle_delivery_resolve(
             conn, transport, devices, card, mutation, payload,
             subject_kind=kind, camera=camera, zone_name=zone_name,
             now=now, demote_tokens=demote_resolve,
+            suppress_demoted=delivery_mode == "la_first" and not la_only,
         )
         conn.commit()
         resolved += 1

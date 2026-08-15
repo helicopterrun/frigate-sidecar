@@ -432,3 +432,69 @@ async def test_backfill_staleness_filters_old_events():
 
 def test_delivery_enabled_defaults_true():
     assert PushSection().delivery_enabled is True
+
+
+# ---------------------------------------------------------------------------
+# la_first: RESOLVE row deferred past the LA's dismissal window
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_la_covered_resolve_row_is_deferred(
+    sidecar_db_path: Path, monkeypatch,
+):
+    """The resolved LA lingers 30s on the lock screen (dismissal_offset);
+    its history row must arrive after that window, not alongside it."""
+    import asyncio
+
+    from frigate_sidecar.push import delivery
+    from frigate_sidecar.push.cards import RESOLVE, Card
+
+    monkeypatch.setattr(delivery, "RESOLVE_DEFER_S", 0.0)
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    card = Card(
+        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        created_at=1.0, updated_at=9.0, state_since_at=1.0,
+        resolved=True, closed=True,
+    )
+    payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+
+    await send_card_mutation(
+        conn, transport, [device], card, RESOLVE, payload,
+        subject_kind="person", camera="doorbell", now=10.0,
+        demote_tokens={"tok1"}, suppress_demoted=True,
+    )
+    # Nothing lands synchronously — the row is scheduled, not sent.
+    assert situation_sends(transport) == []
+
+    # Let the deferred task (delay patched to 0) run.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    sends = situation_sends(transport)
+    assert len(sends) == 1
+    aps = sends[0]["payload"]["aps"]
+    assert aps["interruption-level"] == "passive"
+    assert "sound" not in aps
+
+
+@pytest.mark.asyncio
+async def test_non_covered_device_resolve_row_is_immediate(sidecar_db_path: Path):
+    from frigate_sidecar.push.cards import RESOLVE, Card
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    card = Card(
+        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        created_at=1.0, updated_at=9.0, state_since_at=1.0,
+        resolved=True, closed=True,
+    )
+    payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+    await send_card_mutation(
+        conn, transport, [device], card, RESOLVE, payload,
+        subject_kind="person", camera="doorbell", now=10.0,
+        demote_tokens=set(), suppress_demoted=True,
+    )
+    assert len(situation_sends(transport)) == 1
