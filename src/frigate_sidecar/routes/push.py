@@ -640,10 +640,13 @@ async def get_push_settings(request: Request) -> dict[str, Any]:
         if (vec := policy_settings.derived_camera_heading(cam, active)) is not None
     }
 
+    from frigate_sidecar.analysis import optics
+
     return {
         "settings": active,
         "available_cameras": available_cameras,
         "derived_headings": derived_headings,
+        "placement_deployments": optics.deployment_map(),
         "available_zones": policy_settings.build_available_zones(settings.frigate.config_path),
         "available_openings": policy_settings.build_available_openings(
             settings.frigate.config_path

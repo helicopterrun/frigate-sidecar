@@ -303,6 +303,21 @@ _CAMERAS: list[dict[str, Any]] = [
 ]
 
 
+def deployment_map() -> dict[str, dict[str, Any]]:
+    """Per-camera deployment facts for other pages (the /cameras
+    calibration UI pulls hfov/mount_ft/tilt_deg/faces from here so the
+    placement page stays the single source of optics truth)."""
+    return {
+        cam["id"]: {
+            "hfov": cam.get("hfov"),
+            "mount_ft": cam.get("mount_ft"),
+            "tilt_deg": cam.get("tilt_deg"),
+            "faces": cam.get("faces"),
+        }
+        for cam in _CAMERAS
+    }
+
+
 def _lens_with_fit(lens: dict[str, Any]) -> dict[str, Any]:
     """Attach fitted ``W``/``f0`` to a varifocal lens so JS can evaluate HFOV(f)."""
     out = dict(lens)

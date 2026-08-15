@@ -37,6 +37,7 @@
     <label style="margin-left:0.75em">field of view
       <input id="detail-fov" type="number" min="10" max="360" step="5" style="width:4.5em">°
     </label>
+    <span id="detail-placement" style="margin-left:0.75em"></span>
   </div>
   <div style="margin:0.5em 0">
     <button id="clear-secure" class="test-push" style="display:none">Clear secure area</button>
@@ -49,6 +50,8 @@
       <span id="suggest-radius-label">0.25</span>
     </label>
     <button id="suggest-btn" class="test-push" style="margin-left:0.75em">Suggest neighbors</button>
+    <button id="placement-fov-btn" class="test-push" style="margin-left:0.75em"
+            title="Set each pie's width from the placement page's measured HFOV">Pull FOV from placement</button>
   </div>
   <div id="suggest-diff" class="help" style="margin:0.5em 0"></div>
 

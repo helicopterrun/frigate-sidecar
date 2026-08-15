@@ -12,6 +12,22 @@
 
   var doc = null;
   var cameras = [];
+  var placements = {}; // camera -> {hfov, mount_ft, tilt_deg, faces} from the placement page
+
+  var CARDINAL_DEG = {
+    N: 0, NNE: 22.5, NE: 45, ENE: 67.5, E: 90, ESE: 112.5, SE: 135, SSE: 157.5,
+    S: 180, SSW: 202.5, SW: 225, WSW: 247.5, W: 270, WNW: 292.5, NW: 315, NNW: 337.5,
+  };
+
+  function defaultFov(camera) {
+    var p = placements[camera];
+    return p && p.hfov ? p.hfov : 90;
+  }
+  function defaultAzimuth(camera) {
+    var p = placements[camera];
+    return p && p.faces !== undefined && CARDINAL_DEG[p.faces] !== undefined
+      ? CARDINAL_DEG[p.faces] : 0;
+  }
 
   function showBanner(text, isError) {
     banner.textContent = text;
@@ -330,8 +346,8 @@
       // grabbing it both places and aims them in one motion.
       var entry = (doc.camera_layout || {})[camera] || layoutEntry(camera, i);
       var hasAim = entry.azimuth !== undefined;
-      var az = hasAim ? entry.azimuth : 0;
-      var fov = entry.fov || DEFAULT_FOV;
+      var az = hasAim ? entry.azimuth : defaultAzimuth(camera);
+      var fov = entry.fov || defaultFov(camera);
       var r = reach();
       var selected = camera === selectedCamera;
 
@@ -388,7 +404,7 @@
       grabArrow.setAttribute("aria-label", "aim " + camera);
       dragOn(grabArrow, camera, i, function (e, pointerAz) {
         e.azimuth = +pointerAz.toFixed(1);
-        if (e.fov === undefined) e.fov = DEFAULT_FOV;
+        if (e.fov === undefined) e.fov = defaultFov(camera);
       });
 
       if (hasAim) {
@@ -522,6 +538,20 @@
     mapEl.addEventListener("pointerup", up);
   });
 
+  document.getElementById("placement-fov-btn").addEventListener("click", function () {
+    var changed = 0;
+    cameras.forEach(function (camera) {
+      var entry = (doc.camera_layout || {})[camera];
+      var p = placements[camera];
+      if (!entry || !p || !p.hfov) return;
+      if (entry.fov !== p.hfov) { entry.fov = p.hfov; changed++; }
+    });
+    if (changed) { markDirty(); renderMap(); }
+    suggestDiff.textContent = changed
+      ? "set " + changed + " pie width(s) from placement HFOV — remember to Save."
+      : "all placed pies already match placement HFOV.";
+  });
+
   clearSecureBtn.addEventListener("click", function () {
     doc.secure_area = null;
     markDirty();
@@ -534,23 +564,28 @@
     detailPanel.style.display = "block";
     detailName.textContent = selectedCamera;
     detailAzimuth.value = entry && entry.azimuth !== undefined ? entry.azimuth : "";
-    detailFov.value = entry && entry.fov !== undefined ? entry.fov : DEFAULT_FOV;
+    detailFov.value = entry && entry.fov !== undefined ? entry.fov : defaultFov(selectedCamera);
     document.getElementById("detail-cardinal").textContent =
       entry && entry.azimuth !== undefined ? cardinalOf(entry.azimuth) : "";
+    var p = placements[selectedCamera];
+    document.getElementById("detail-placement").textContent = p
+      ? "placement: " + p.hfov + "° HFOV · " + p.mount_ft + "ft mount · "
+        + p.tilt_deg + "° down · faces " + p.faces
+      : "";
   }
 
   detailAzimuth.addEventListener("change", function () {
     if (!selectedCamera) return;
     var e = ensureEntry(selectedCamera, cameras.indexOf(selectedCamera));
     e.azimuth = ((parseFloat(detailAzimuth.value) || 0) % 360 + 360) % 360;
-    if (e.fov === undefined) e.fov = DEFAULT_FOV;
+    if (e.fov === undefined) e.fov = defaultFov(selectedCamera);
     markDirty();
     renderMap();
   });
   detailFov.addEventListener("change", function () {
     if (!selectedCamera) return;
     var e = ensureEntry(selectedCamera, cameras.indexOf(selectedCamera));
-    e.fov = Math.min(360, Math.max(10, parseFloat(detailFov.value) || DEFAULT_FOV));
+    e.fov = Math.min(360, Math.max(10, parseFloat(detailFov.value) || defaultFov(selectedCamera)));
     markDirty();
     renderMap();
   });
@@ -679,6 +714,7 @@
       var data = await fetchJson("/v1/push/settings");
       doc = data.settings;
       cameras = data.available_cameras || [];
+      placements = data.placement_deployments || {};
       cardsEl.textContent = "";
       cameras.forEach(function (camera) {
         cardsEl.appendChild(renderCard(camera));
