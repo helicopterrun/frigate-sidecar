@@ -279,6 +279,16 @@ class MqttReviewSubscriber:
                     client.connect, self.settings.mqtt_host, self.settings.mqtt_port
                 )
                 client.loop_start()
+                # CONNACK is processed on paho's network thread *after*
+                # `connect()` returns — checking `is_connected()` immediately
+                # is a race that a low-latency LAN usually wins and anything
+                # slower (an ssh-tunneled broker, diagnosed 2026-08-14)
+                # always loses, producing a silent reconnect storm. Give the
+                # handshake a bounded moment to land first.
+                for _ in range(100):
+                    if client.is_connected() or self._stopped:
+                        break
+                    await asyncio.sleep(0.1)
                 attempt = 0
                 # Idle until the connection drops or we're asked to stop.
                 while not self._stopped and client.is_connected():
