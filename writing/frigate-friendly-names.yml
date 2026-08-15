@@ -1,0 +1,101 @@
+# Frigate zone friendly_name reference — add the `friendly_name:` line into
+# each existing zone block (alongside `coordinates:`) in Frigate's config.
+# Frigate needs it under EVERY camera that defines the zone; the sidecar
+# picks changes up on its next settings fetch (no restart needed).
+
+cameras:
+  doorbell:
+    zones:
+      front_critter:
+        friendly_name: Front Garden
+      front_garden:
+        friendly_name: Front Garden
+      doorbell_approach:
+        friendly_name: Front Door
+
+  street:
+    zones:
+      nw_49th_st:
+        friendly_name: NW 49th St
+      front_garden:
+        friendly_name: Front Garden
+      sidewalk:
+        friendly_name: Sidewalk
+      front_critter:
+        friendly_name: Front Garden
+
+  garden:
+    zones:
+      front_critter:
+        friendly_name: Front Garden
+      front_entry_person:
+        friendly_name: Front Entry
+
+  gate:
+    zones:
+      sidewalk:
+        friendly_name: Sidewalk
+      front_critter:
+        friendly_name: Front Garden
+      front_entry_person:
+        friendly_name: Front Entry
+      package_drop:
+        friendly_name: Package Drop
+
+  crows-nest:
+    zones:
+      rooftop_critter:
+        friendly_name: Rooftop
+
+  package:
+    zones:
+      front_critter:
+        friendly_name: Front Garden
+      package_drop:
+        friendly_name: Package Drop
+
+  stairway-wide:
+    zones:
+      back_walkway:
+        friendly_name: Walkway
+      driveway:
+        friendly_name: Driveway
+      parking_spot:
+        friendly_name: Parking Spot
+      alley:
+        friendly_name: Alley
+      back_critter:
+        friendly_name: Back Lot
+
+  stairway-tight:
+    zones:
+      driveway:
+        friendly_name: Driveway
+      parking_spot:
+        friendly_name: Parking Spot
+      alley:
+        friendly_name: Alley
+      back_critter:
+        friendly_name: Back Lot
+      charger:
+        friendly_name: Charger
+
+  alley-wide:
+    zones:
+      alley:
+        friendly_name: Alley
+      driveway:
+        friendly_name: Driveway
+      parking_spot:
+        friendly_name: Parking Spot
+      back_walkway:
+        friendly_name: Walkway
+      back_critter:
+        friendly_name: Back Lot
+
+  walkway:
+    zones:
+      back_walkway:
+        friendly_name: Walkway   # already set — no change needed
+      back_critter:
+        friendly_name: Back Lot
