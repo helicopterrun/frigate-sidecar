@@ -162,6 +162,49 @@ def test_find_dedup_candidate_matches_subject_kind_and_zone_within_window(sideca
     ) is None
 
 
+def test_find_dedup_candidate_matches_on_zone_set_intersection(sidecar_db_path: Path):
+    """The exact live miss (2026-08-14): stairway-wide's review listed
+    ['back_walkway', 'driveway'] (card zone_name = back_walkway), alley-wide's
+    listed ['driveway'] — same walk, no first-zone match, two lock-screen
+    rows. Intersection on the full zone set must merge them."""
+    conn = open_conn(sidecar_db_path)
+    card = Card(card_key="stairway-wide:person:trkA", level="quiet",
+                created_at=0.0, updated_at=0.0, state_since_at=0.0)
+    card_store.upsert_card(
+        conn, card, subject_kind="person", camera="stairway-wide",
+        zone_name="back_walkway", zones=("back_walkway", "driveway"),
+    )
+
+    hit = card_store.find_dedup_candidate(
+        conn, subject_kind="person", zone_name="driveway",
+        exclude_key="alley-wide:person:trkB", now=5.0, window_s=15.0,
+        zones=("driveway",),
+    )
+    assert hit == "stairway-wide:person:trkA"
+
+    # Reverse direction: candidate stored only "driveway"; the new event's
+    # first zone differs but its set includes it.
+    card2 = Card(card_key="alley-wide:person:trkC", level="quiet",
+                 created_at=6.0, updated_at=6.0, state_since_at=6.0)
+    card_store.upsert_card(
+        conn, card2, subject_kind="person", camera="alley-wide",
+        zone_name="driveway", zones=("driveway",),
+    )
+    hit = card_store.find_dedup_candidate(
+        conn, subject_kind="person", zone_name="parking_spot",
+        exclude_key="stairway-tight:person:trkD", now=8.0, window_s=15.0,
+        zones=("parking_spot", "driveway"),
+    )
+    assert hit == "stairway-wide:person:trkA"  # oldest open still wins
+
+    # Disjoint zone sets never merge.
+    assert card_store.find_dedup_candidate(
+        conn, subject_kind="person", zone_name="front_garden",
+        exclude_key="garden:person:trkE", now=8.0, window_s=15.0,
+        zones=("front_garden",),
+    ) is None
+
+
 def test_find_dedup_candidate_ignores_closed_cards(sidecar_db_path: Path):
     conn = open_conn(sidecar_db_path)
     card = Card(card_key="cam-a:stranger:trk1", level="quiet", created_at=0.0, updated_at=0.0,

@@ -51,6 +51,7 @@ def upsert_card(
     place_class: str = "",
     camera: str = "",
     zone_name: str = "",
+    zones: tuple[str, ...] = (),
 ) -> None:
     """Insert or fully overwrite the row for `card.card_key`.
 
@@ -59,17 +60,30 @@ def upsert_card(
     single delivery pipeline that owns its full state -- there is nothing to
     merge, so this is a plain replace.
     """
+    # Union with anything already recorded: overlapping cameras each
+    # contribute their own zone list to the shared story.
+    zone_set = {z for z in zones if z}
+    if zone_name:
+        zone_set.add(zone_name)
+    existing = conn.execute(
+        "SELECT zones_csv FROM push_cards WHERE card_key = ?", (card.card_key,)
+    ).fetchone()
+    if existing is not None and existing["zones_csv"]:
+        zone_set.update(z for z in existing["zones_csv"].split(",") if z)
+    zones_csv = ",".join(sorted(zone_set))
     conn.execute(
         "INSERT INTO push_cards "
         "(card_key, level, peak_level, subject_kind, place_class, camera, zone_name, "
+        " zones_csv, "
         " created_at, updated_at, state_since_at, sound_count, handled, handled_at, "
         " last_sound_at, resound_count, resolved, closed) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(card_key) DO UPDATE SET "
         "level=excluded.level, peak_level=excluded.peak_level, "
         "subject_kind=excluded.subject_kind, "
         "place_class=excluded.place_class, camera=excluded.camera, "
-        "zone_name=excluded.zone_name, updated_at=excluded.updated_at, "
+        "zone_name=excluded.zone_name, zones_csv=excluded.zones_csv, "
+        "updated_at=excluded.updated_at, "
         "state_since_at=excluded.state_since_at, "
         "sound_count=excluded.sound_count, handled=excluded.handled, "
         "handled_at=excluded.handled_at, last_sound_at=excluded.last_sound_at, "
@@ -77,7 +91,7 @@ def upsert_card(
         "closed=excluded.closed",
         (
             card.card_key, card.level, card.peak_level, subject_kind, place_class,
-            camera, zone_name,
+            camera, zone_name, zones_csv,
             card.created_at, card.updated_at, card.state_since_at, card.sound_count,
             int(card.handled), card.handled_at, card.last_sound_at, card.resound_count,
             int(card.resolved), int(card.closed),
@@ -147,17 +161,23 @@ def migrate_drop_zone_from_card_keys(conn: sqlite3.Connection) -> int:
             peak_level = winner["peak_level"]
         except (IndexError, KeyError):
             peak_level = winner["level"]
+        try:
+            winner_zones = winner["zones_csv"]
+        except (IndexError, KeyError):
+            winner_zones = ""
         conn.execute(
             "INSERT INTO push_cards "
             "(card_key, level, peak_level, subject_kind, place_class, camera, zone_name, "
+            " zones_csv, "
             " created_at, updated_at, state_since_at, sound_count, handled, handled_at, "
             " last_sound_at, resound_count, resolved, closed) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(card_key) DO UPDATE SET "
             "level=excluded.level, peak_level=excluded.peak_level, "
             "subject_kind=excluded.subject_kind, "
             "place_class=excluded.place_class, camera=excluded.camera, "
-            "zone_name=excluded.zone_name, created_at=excluded.created_at, "
+            "zone_name=excluded.zone_name, zones_csv=excluded.zones_csv, "
+            "created_at=excluded.created_at, "
             "updated_at=excluded.updated_at, state_since_at=excluded.state_since_at, "
             "sound_count=excluded.sound_count, handled=excluded.handled, "
             "handled_at=excluded.handled_at, last_sound_at=excluded.last_sound_at, "
@@ -166,7 +186,8 @@ def migrate_drop_zone_from_card_keys(conn: sqlite3.Connection) -> int:
             (
                 new_key, winner["level"], peak_level or winner["level"],
                 winner["subject_kind"], winner["place_class"],
-                winner["camera"], winner["zone_name"], winner["created_at"], winner["updated_at"],
+                winner["camera"], winner["zone_name"], winner_zones,
+                winner["created_at"], winner["updated_at"],
                 winner["state_since_at"], winner["sound_count"], winner["handled"],
                 winner["handled_at"], winner["last_sound_at"], winner["resound_count"],
                 winner["resolved"], winner["closed"],
@@ -207,27 +228,45 @@ def find_dedup_candidate(
     exclude_key: str,
     now: float,
     window_s: float,
+    zones: tuple[str, ...] = (),
 ) -> str | None:
-    """The oldest open card sharing `subject_kind`/`zone_name` and created
-    within `window_s` of `now` -- the cross-camera dedup candidate for a
-    *fresh* track (caller only calls this when its own card doesn't exist
-    yet). Oldest, not newest: with three cameras sharing a zone, the first
-    one's card is the one every later camera should merge onto, not
-    whichever alias happened to be looked up last.
+    """The oldest open card sharing `subject_kind` and at least one zone with
+    this event, created within `window_s` of `now` -- the cross-camera dedup
+    candidate for a *fresh* track (caller only calls this when its own card
+    doesn't exist yet). Oldest, not newest: with three cameras sharing a
+    zone, the first one's card is the one every later camera should merge
+    onto, not whichever alias happened to be looked up last.
+
+    Matching is **zone-set intersection**, not first-zone equality: two
+    overlapping cameras list the same walk under different first-zones
+    (`['driveway']` vs `['back_walkway', 'driveway']`), which the old
+    zone_name comparison missed — observed live 2026-08-14 as one walk
+    producing a lock-screen row per camera.
 
     `exclude_key` guards against a card matching itself; in practice the
     caller's own key can't have a row yet (that's the precondition for
     calling this at all), but the check is free and cheap insurance against
     a future caller getting that precondition wrong.
     """
-    row = conn.execute(
-        "SELECT card_key FROM push_cards "
-        "WHERE subject_kind = ? AND zone_name = ? AND closed = 0 AND resolved = 0 "
+    event_zones = {z for z in zones if z}
+    if zone_name:
+        event_zones.add(zone_name)
+    if not event_zones:
+        return None
+    rows = conn.execute(
+        "SELECT card_key, zone_name, zones_csv FROM push_cards "
+        "WHERE subject_kind = ? AND closed = 0 AND resolved = 0 "
         "AND card_key != ? AND created_at >= ? "
-        "ORDER BY created_at ASC LIMIT 1",
-        (subject_kind, zone_name, exclude_key, now - window_s),
-    ).fetchone()
-    return row["card_key"] if row is not None else None
+        "ORDER BY created_at ASC",
+        (subject_kind, exclude_key, now - window_s),
+    ).fetchall()
+    for row in rows:
+        candidate_zones = {z for z in (row["zones_csv"] or "").split(",") if z}
+        if row["zone_name"]:
+            candidate_zones.add(row["zone_name"])
+        if event_zones & candidate_zones:
+            return row["card_key"]
+    return None
 
 
 def get_track_alias(conn: sqlite3.Connection, camera: str, track_id: str) -> str | None:

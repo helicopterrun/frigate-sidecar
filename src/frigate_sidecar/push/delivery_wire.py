@@ -351,6 +351,7 @@ def _resolve_card_for_track(
     track_id: str,
     subject_kind: str,
     zone_name: str,
+    zones: tuple[str, ...] = (),
     now: float,
 ) -> tuple[str, Card | None, str]:
     """Which card this (camera, track_id) evaluation belongs to, applying
@@ -393,6 +394,7 @@ def _resolve_card_for_track(
         candidate_key = card_store.find_dedup_candidate(
             conn, subject_kind=subject_kind, zone_name=zone_name,
             exclude_key=natural_key, now=now, window_s=_DEDUP_WINDOW_S,
+            zones=zones,
         )
         if candidate_key is not None:
             candidate = card_store.get_card(conn, candidate_key)
@@ -805,7 +807,7 @@ async def handle_delivery_event(
     for track_id in track_ids:
         card_key, existing, owning_camera = _resolve_card_for_track(
             conn, camera=event.camera, track_id=track_id, subject_kind=subject_kind,
-            zone_name=zone_name, now=now,
+            zone_name=zone_name, zones=event.zones, now=now,
         )
         card, mutation, sound = _advance_card(existing, level, card_key=card_key, now=now)
 
@@ -958,7 +960,8 @@ async def handle_delivery_event(
             conn, transport, devices, card, mutation, payload,
             subject_kind=subject_kind, place_class=place_class,
             camera=owning_camera, zone_name=zone_name,
-            labels=event.labels, now=now, demote_tokens=demote_tokens,
+            labels=event.labels, zones=event.zones, now=now,
+            demote_tokens=demote_tokens,
             suppress_demoted=delivery_mode == "la_first" and not la_only,
         )
         if warm_task is not None:

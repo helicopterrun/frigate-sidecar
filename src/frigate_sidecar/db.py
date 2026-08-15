@@ -264,6 +264,10 @@ CREATE TABLE IF NOT EXISTS push_cards (
     place_class   TEXT NOT NULL DEFAULT '',
     camera        TEXT NOT NULL DEFAULT '',
     zone_name     TEXT NOT NULL DEFAULT '',
+    -- Every zone the triggering review listed (comma-separated), not just
+    -- the first: cross-camera dedup matches on set intersection, because
+    -- overlapping cameras list the same walk under different first-zones.
+    zones_csv     TEXT NOT NULL DEFAULT '',
     created_at    REAL NOT NULL,
     updated_at    REAL NOT NULL,
     -- When the *current* level became true (resets on create/escalate/
@@ -307,6 +311,12 @@ CREATE TABLE IF NOT EXISTS push_card_track_aliases (
 # whole migration story the sidecar needs (nothing is ever dropped or
 # retyped, and SQLite's ALTER ... ADD COLUMN is O(1) metadata only).
 _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "push_cards": [
+        # Cross-camera dedup by zone-set intersection (2026-08-14): matching
+        # only zone_name (the review's first zone) missed merges whenever
+        # overlapping cameras listed the same walk under different first-zones.
+        ("zones_csv", "TEXT NOT NULL DEFAULT ''"),
+    ],
     "push_devices": [
         # v2 registration shape (notification-experience plan §8). Everything
         # here is persisted whether or not this phase evaluates it, so the app

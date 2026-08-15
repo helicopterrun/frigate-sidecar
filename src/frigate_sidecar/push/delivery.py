@@ -315,6 +315,7 @@ async def send_card_mutation(
     camera: str = "",
     zone_name: str = "",
     labels: tuple[str, ...] = (),
+    zones: tuple[str, ...] = (),
     now: float | None = None,
     demote_tokens: frozenset[str] | set[str] = frozenset(),
     suppress_demoted: bool = False,
@@ -333,7 +334,7 @@ async def send_card_mutation(
     now = _time.time() if now is None else now
     card_store.upsert_card(
         conn, card, subject_kind=subject_kind, place_class=place_class,
-        camera=camera, zone_name=zone_name,
+        camera=camera, zone_name=zone_name, zones=zones,
     )
     if payload is None:
         return 0
