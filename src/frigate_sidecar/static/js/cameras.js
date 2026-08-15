@@ -185,6 +185,14 @@
     return { x: Math.sin(r), y: -Math.cos(r) };
   }
 
+  var CARDINALS = [
+    "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+    "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
+  ];
+  function cardinalOf(azDeg) {
+    return CARDINALS[Math.round((azDeg % 360) / 22.5) % 16];
+  }
+
   function wedgePath(pos, azDeg, fovDeg, r) {
     var a0 = ((azDeg - fovDeg / 2) * Math.PI) / 180;
     var a1 = ((azDeg + fovDeg / 2) * Math.PI) / 180;
@@ -242,7 +250,7 @@
     svg.appendChild(defs);
 
     function dragOn(el, camera, i, apply) {
-      el.style.pointerEvents = "stroke";
+      if (!el.style.pointerEvents) el.style.pointerEvents = "stroke";
       el.style.touchAction = "none";
       el.addEventListener("pointerdown", function (ev) {
         ev.stopPropagation();
@@ -281,6 +289,13 @@
         path.setAttribute("fill", "var(--accent, #ffb454)");
         path.setAttribute("fill-opacity", selected ? "0.28" : "0.14");
         path.setAttribute("stroke", "none");
+        // The whole pie is a rotation surface: drag anywhere inside it to
+        // swing the aim — the biggest possible target.
+        path.style.pointerEvents = "fill";
+        path.style.cursor = "grab";
+        dragOn(path, camera, i, function (e, pointerAz) {
+          e.azimuth = +pointerAz.toFixed(1);
+        });
         svg.appendChild(path);
 
         // The two wedge edges: visible thin lines + invisible fat grab
@@ -323,6 +338,24 @@
         e.azimuth = +pointerAz.toFixed(1);
         if (e.fov === undefined) e.fov = DEFAULT_FOV;
       });
+
+      if (hasAim) {
+        // Cardinal readout floats just past the arrow tip: "SW 225°".
+        var lx = entry.x + dir.x * (r * 0.72 + 0.045);
+        var ly = entry.y + dir.y * (r * 0.72 + 0.045);
+        var text = document.createElementNS(SVG_NS, "text");
+        text.setAttribute("x", lx);
+        text.setAttribute("y", ly);
+        text.setAttribute("text-anchor", "middle");
+        text.setAttribute("dominant-baseline", "middle");
+        text.setAttribute("font-size", "0.028");
+        text.setAttribute("fill", "var(--accent, #ffb454)");
+        text.setAttribute("stroke", "var(--surface, #111)");
+        text.setAttribute("stroke-width", "0.006");
+        text.setAttribute("paint-order", "stroke");
+        text.textContent = cardinalOf(az) + " " + Math.round(az) + "°";
+        svg.appendChild(text);
+      }
     });
     mapEl.appendChild(svg);
 
@@ -386,6 +419,8 @@
     detailName.textContent = selectedCamera;
     detailAzimuth.value = entry && entry.azimuth !== undefined ? entry.azimuth : "";
     detailFov.value = entry && entry.fov !== undefined ? entry.fov : DEFAULT_FOV;
+    document.getElementById("detail-cardinal").textContent =
+      entry && entry.azimuth !== undefined ? cardinalOf(entry.azimuth) : "";
   }
 
   detailAzimuth.addEventListener("change", function () {
