@@ -380,6 +380,16 @@ class PushSection(BaseModel):
     # Dwell input only -- `frigate/reviews` stays the sole authority on
     # whether anything is push-worthy. See `dwell_source` below.
     mqtt_topic_events: str = "frigate/events"
+    # -- MQTT flight recorder --
+    # Rolling capture of every consumed reviews/events message, so any real
+    # situation can be replayed exactly (tools/replay_capture.py) instead of
+    # approximated by a hand-written scenario. JSONL, size-rotated (one .1
+    # sibling kept). Empty path -> "mqtt-capture.jsonl" next to
+    # push_settings_path.
+    capture_enabled: bool = True
+    capture_path: str = ""
+    capture_max_bytes: int = 64 * 1024 * 1024
+
     # Reconnect backoff (spec §5, "MQTT broker unreachable from the sidecar").
     reconnect_backoff_s: float = 2.0
     reconnect_backoff_max_s: float = 60.0

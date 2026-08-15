@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -135,6 +136,16 @@ class MqttReviewSubscriber:
         self.frigate_online: bool = True
         self._client: mqtt.Client | None = None
         self._stopped = False
+        # Flight recorder (capture.py): every consumed reviews/events message,
+        # so real situations replay exactly. Never on the failure path — a
+        # capture error logs once and the pipeline continues.
+        self._capture: "MqttCapture | None" = None
+        if settings.capture_enabled:
+            from frigate_sidecar.push.capture import MqttCapture
+            capture_path = settings.capture_path or ""
+            if not capture_path:
+                capture_path = str(Path(settings.push_settings_path).parent / "mqtt-capture.jsonl")
+            self._capture = MqttCapture(capture_path, max_bytes=settings.capture_max_bytes)
 
     def _handle_reviews_message(self, payload_bytes: bytes) -> None:
         self.last_seen = time.time()
@@ -205,8 +216,12 @@ class MqttReviewSubscriber:
 
     def on_message(self, _client: Any, _userdata: Any, msg: mqtt.MQTTMessage) -> None:
         if msg.topic == self.settings.mqtt_topic_reviews:
+            if self._capture is not None:
+                self._capture.append(msg.topic, msg.payload)
             self._handle_reviews_message(msg.payload)
         elif msg.topic == self.settings.mqtt_topic_events:
+            if self._capture is not None:
+                self._capture.append(msg.topic, msg.payload)
             self._handle_events_message(msg.payload)
         elif msg.topic == self.settings.mqtt_topic_available:
             self._handle_available_message(msg.payload)
