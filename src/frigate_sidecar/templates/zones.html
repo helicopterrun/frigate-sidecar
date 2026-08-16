@@ -3,22 +3,21 @@
 {% block title %}Zone handling · frigate-sidecar{% endblock %}
 
 {% block body %}
-{% include "_header.html" %}
 <main>
-  <p class="help" style="margin:0 0 1em">
+  <p class="help page-intro">
     Place classes and per-zone overrides drive push routing; camera neighbors
     merge one walk seen by adjacent cameras into a single story. Friendly
     names are read-only here — set them in Frigate's config
     (<code>friendly_name:</code> under each camera's zone).
   </p>
 
-  <div id="zones-banner" class="help" style="display:none;margin:0 0 1em"></div>
+  <div id="zones-banner" class="help page-intro" style="display:none"></div> {# JS-toggled #}
 
-  <h3 style="margin:0 0 0.5em">Zones</h3>
-  <div id="zones-list" class="stat-row" style="flex-wrap:wrap"></div>
+  <h3 class="section-title first">Zones</h3>
+  <div id="zones-list" class="stat-row"></div>
 
-  <h3 style="margin:1.5em 0 0.5em">Camera neighbors</h3>
-  <p class="help" style="margin:0 0 0.75em">
+  <h3 class="section-title">Camera neighbors</h3>
+  <p class="help page-intro">
     Tick the cameras that watch the same physical approach. Declaring one
     direction is enough — adjacency is symmetric. Prefer dragging?
     <a href="/cameras" class="page-link">Arrange cameras visually</a> and use
@@ -26,24 +25,24 @@
   </p>
   <div id="neighbors-list"></div>
 
-  <div style="margin-top:1.5em">
-    <button id="save-btn" class="test-push">Save</button>
-    <span id="save-state" style="margin-left:1em"></span>
+  <div class="section-block">
+    <button id="save-btn" class="btn-primary">Save</button>
+    <span id="save-state" class="save-state"></span>
   </div>
 
-  <h3 style="margin:1.5em 0 0.5em">Sync between instances</h3>
-  <p class="help" style="margin:0 0 0.75em">
+  <h3 class="section-title">Sync between instances</h3>
+  <p class="help page-intro">
     Export downloads this instance's full policy (routing, zones, camera
     calibration, secure area — no device registrations). Import applies an
     exported file to <em>this</em> instance immediately. To copy dev →
     production: export here, open production's /zones, import there.
   </p>
-  <button id="export-btn" class="test-push">Export settings</button>
-  <label class="test-push" style="margin-left:0.75em;display:inline-block;cursor:pointer">
+  <button id="export-btn" class="btn-primary">Export settings</button>
+  <label class="btn-primary inline-label">
     Import settings…
-    <input id="import-file" type="file" accept=".json,application/json" style="display:none">
+    <input id="import-file" type="file" accept=".json,application/json" class="hidden">
   </label>
-  <span id="sync-state" class="help" style="margin-left:1em"></span>
+  <span id="sync-state" class="help save-state"></span>
 </main>
 {% endblock %}
 

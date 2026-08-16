@@ -5,15 +5,14 @@
 {% set qs = request.url.query %}
 {% set prev_url = ('/event/' ~ prev_id ~ ('?' ~ qs if qs else '')) if prev_id else '' %}
 {% set next_url = ('/event/' ~ next_id ~ ('?' ~ qs if qs else '')) if next_id else '' %}
-{% set list_url = '/' ~ ('?' ~ qs if qs else '') %}
+{% set list_url = '/triage' ~ ('?' ~ qs if qs else '') %}
+{% set summary = ('event ' ~ position[0] ~ ' of ' ~ position[1]) if position else 'event detail' %}
 
 {% block body_attrs %} data-event-id="{{ event.id }}" data-prev-url="{{ prev_url }}" data-next-url="{{ next_url }}"{% endblock %}
 
 {% block body %}
-{% set summary = ('event ' ~ position[0] ~ ' of ' ~ position[1]) if position else 'event detail' %}
-{% include "_header.html" %}
 <main>
-  <div class="nav" style="margin-bottom:16px">
+  <div class="nav detail-nav">
     <a href="{{ list_url }}">← back to list</a>
     {% if prev_id %}
       <a href="{{ prev_url }}">← prev (k)</a>
@@ -106,25 +105,25 @@
           <button class="btn-fp {% if event.triage_label == 'fp' %}active{% endif %}" data-label="fp">FP (f)</button>
           <button class="btn-skip {% if event.triage_label == 'skip' %}active{% endif %}" data-label="skip">skip (s)</button>
         </div>
-        <div style="margin-top:8px">
-          <button class="btn-clear" data-clear style="width:100%;padding:6px;border:0;border-radius:4px;cursor:pointer">clear (c)</button>
+        <div class="panel-gap">
+          <button class="btn-clear btn-clear-full" data-clear>clear (c)</button>
         </div>
         {% if plus_enabled %}
-        <div class="plus-toggle" style="margin-top:10px;font-size:12px">
+        <div class="plus-toggle panel-gap">
           <label title="Also submit TP/FP to Frigate+ when labeling">
             <input type="checkbox" id="plus-submit"
                    {% if not plus_submittable %}disabled{% endif %}>
             also submit to Frigate+ (<kbd>p</kbd>)
           </label>
-          <div id="plus-status" class="plus-status" style="margin-top:4px;color:#888;min-height:1em"></div>
+          <div id="plus-status" class="plus-status plus-status-line"></div>
           {% if not plus_submittable %}
-            <div class="plus-skip-reason" style="margin-top:2px;color:#a66;font-size:11px">
+            <div class="plus-skip-reason">
               {% if not event.has_snapshot %}no snapshot — can't submit{% elif not event.box %}no bounding box — can't submit{% elif not event.end_time %}in-progress event{% endif %}
             </div>
           {% endif %}
         </div>
         {% endif %}
-        <div style="margin-top:12px">
+        <div class="panel-gap">
           <textarea id="note" class="note-input" rows="2" placeholder="optional note">{{ event.triage_note or '' }}</textarea>
         </div>
         <div class="help">
@@ -135,7 +134,7 @@
       <div class="panel">
         <h2>Event</h2>
         <dl class="kv">
-          <dt>id</dt><dd style="font-family:ui-monospace,monospace;font-size:11px">{{ event.id }}</dd>
+          <dt>id</dt><dd class="mono-id">{{ event.id }}</dd>
           <dt>camera</dt><dd>{{ event.camera }}</dd>
           <dt>label</dt><dd>{{ event.label }}{% if event.sub_label %} / {{ event.sub_label }}{% endif %}</dd>
           <dt>zones</dt><dd>{{ event.zones|join(', ') or '—' }}</dd>
@@ -151,7 +150,7 @@
 
       <div class="panel">
         <h2>Raw</h2>
-        <div style="display:flex;flex-direction:column;gap:4px;font-size:12px">
+        <div class="hotkey-list">
           {% if snapshot_url %}<a href="{{ snapshot_url }}" target="_blank">snapshot.jpg</a>{% endif %}
           {% if clip_url %}<a href="{{ clip_url }}" target="_blank">clip.mp4</a>{% endif %}
           <a href="{{ frigate_base }}/api/events/{{ event.id }}" target="_blank">api/events/{{ event.id }}</a>

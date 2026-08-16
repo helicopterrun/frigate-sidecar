@@ -3,7 +3,6 @@
 {% block title %}Placement Planner · frigate-sidecar{% endblock %}
 
 {% block body %}
-{% include "_header.html" %}
 <main>
   <div class="ctrls">
     <div class="ctrl-row">
@@ -11,7 +10,7 @@
       <label>Deployed<select id="sel-camera"><option value="">— none —</option></select></label>
       <label>Resolution<select id="sel-res"></select></label>
       <label>Object<select id="sel-object"></select></label>
-      <label id="wrap-hfov-custom" style="display:none">HFOV°<input id="in-hfov" type="number" min="5" max="170" step="1" value="90" style="width:74px"></label>
+      <label id="wrap-hfov-custom" style="display:none" {# JS-toggled #}>HFOV°<input id="in-hfov" type="number" min="5" max="170" step="1" value="90" class="num-80"></label>
     </div>
     <div class="ctrl-row sliders">
       <label id="wrap-focal">Zoom <span id="focal-val">2.7</span> mm<input id="in-focal" type="range" min="2.7" max="12" step="0.1" value="2.7"></label>
@@ -55,21 +54,21 @@
     <div class="view view-chart">
       <svg id="plan-chart" class="plan-svg" viewBox="0 0 520 300" role="img"
            aria-label="Object on-screen pixel width as a function of distance"></svg>
-      <p class="help" id="dori-legend" style="margin-top:6px"></p>
+      <p class="help" id="dori-legend"></p>
     </div>
   </div>
 
   <details class="advanced">
     <summary>Object target (editable) &amp; reference notes</summary>
-    <div class="filters" style="margin-top:10px">
-      <label>width (ft)<input id="in-owidth" type="number" step="0.1" style="width:80px"></label>
-      <label>aspect H/W<input id="in-oaspect" type="number" step="0.05" style="width:80px"></label>
-      <label>target px (width)<input id="in-otarget" type="number" step="1" style="width:80px"></label>
-      <span class="help" style="align-self:flex-end">
+    <div class="filters subsection">
+      <label>width (ft)<input id="in-owidth" type="number" step="0.1" class="num-80"></label>
+      <label>aspect H/W<input id="in-oaspect" type="number" step="0.05" class="num-80"></label>
+      <label>target px (width)<input id="in-otarget" type="number" step="1" class="num-80"></label>
+      <span class="help self-end">
         target_area = target_px² × aspect — compare to <code>objects.filters.&lt;obj&gt;.min_area</code>.
       </span>
     </div>
-    <p class="help" style="margin-top:10px">
+    <p class="help footnote">
       Width: <code>max_ft = width_ft · det_w / (2 · target_px · tan(HFOV/2))</code>.
       Varifocal HFOV from a two-point datasheet fit (114° @ 2.7mm → 47° @ 12mm).
       bbox <em>height</em> is geometric (mount height + down-angle), so a high steep

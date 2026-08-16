@@ -206,7 +206,7 @@
     var clear = document.createElement("button");
     clear.textContent = "Clear";
     clear.title = "Remove the manual arrow (falls back to the map-derived one if available)";
-    clear.className = "test-push";
+    clear.className = "btn-primary";
     clear.style.marginTop = "0.4em";
     clear.addEventListener("click", function () {
       if (doc.camera_headings) delete doc.camera_headings[camera];
@@ -762,7 +762,7 @@
     if (add.length || remove.length) {
       var apply = document.createElement("button");
       apply.textContent = "Apply";
-      apply.className = "test-push";
+      apply.className = "btn-primary";
       apply.style.marginLeft = "0.6em";
       apply.addEventListener("click", function () {
         var table = {};

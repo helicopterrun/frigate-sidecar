@@ -2,7 +2,6 @@
 {% set active_page = 'debug' %}
 {% block title %}debug — frigate-sidecar{% endblock %}
 {% block body %}
-{% include "_header.html" %}
 <main>
   <div class="stat-row">
     <div class="stat-card">
@@ -19,6 +18,6 @@
   </ul>
 
   <h2 class="section-h">Capabilities (what the app sees)</h2>
-  <div class="panel"><pre style="margin:0; font-size:12px; overflow-x:auto;">{{ capabilities_json }}</pre></div>
+  <div class="panel"><pre class="debug-json">{{ capabilities_json }}</pre></div>
 </main>
 {% endblock %}

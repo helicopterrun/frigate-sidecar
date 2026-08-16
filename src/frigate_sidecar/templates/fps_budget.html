@@ -3,10 +3,9 @@
 {% block title %}FPS Budget · frigate-sidecar{% endblock %}
 
 {% block body %}
-{% include "_header.html" %}
 <main>
   {% if error %}
-    <div class="empty" style="color:#f87171">{{ error }}</div>
+    <div class="empty error">{{ error }}</div>
   {% else %}
     <div class="stat-row">
       <div class="stat-card">
@@ -76,7 +75,7 @@
       {% endfor %}
     </ul>
 
-    <p class="help" style="margin-top:24px">
+    <p class="help footnote">
       Snapshot at request time. Refresh the page to re-query Frigate.
       Hard guardrail: never propose <code>detect.fps &gt; 10</code> per upstream.
     </p>

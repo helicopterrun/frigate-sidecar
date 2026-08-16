@@ -90,7 +90,7 @@ def test_devices_page_lists_registered(
     r = client.get("/devices")
     assert r.status_code == 200
     assert "doorbell" in r.text
-    assert "test-push" in r.text
+    assert "btn-primary" in r.text
 
 
 def test_scrub_viewer_disabled(client: TestClient) -> None:

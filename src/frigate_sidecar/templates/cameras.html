@@ -3,9 +3,8 @@
 {% block title %}Camera calibration · frigate-sidecar{% endblock %}
 
 {% block body %}
-{% include "_header.html" %}
 <main>
-  <p class="help" style="margin:0 0 1em">
+  <p class="help page-intro">
     <strong>Direction:</strong> aim each camera's pie on the map below and
     draw the secure area — arrows appear here automatically (dashed = derived
     from the map). Drag on a snapshot to override with a manual arrow;
@@ -13,12 +12,12 @@
     “approaching”, against it as “leaving”.
   </p>
 
-  <div id="cameras-banner" class="help" style="display:none;margin:0 0 1em"></div>
+  <div id="cameras-banner" class="help page-intro" style="display:none"></div> {# JS-toggled #}
 
-  <div id="camera-cards" class="stat-row" style="flex-wrap:wrap"></div>
+  <div id="camera-cards" class="stat-row"></div>
 
-  <h3 style="margin:1.5em 0 0.5em">Layout <span class="help" style="font-weight:normal">— top-down, north is up</span></h3>
-  <p class="help" style="margin:0 0 0.75em">
+  <h3 class="section-title">Layout <span class="help">— top-down, north is up</span></h3>
+  <p class="help page-intro">
     Drag cameras where they live around the property. Drag a camera's small
     handle to aim its <em>view pie</em> in the compass direction it faces;
     click a camera to fine-tune azimuth and field-of-view width. Drag on
@@ -26,30 +25,29 @@
     ground you protect). Neighbor suggestions come from overlapping pies —
     cameras that watch the same ground. Never used for routing.
   </p>
-  <div id="layout-map" style="position:relative;width:min(560px,100%);aspect-ratio:1;
-       background:var(--surface);border:1px solid var(--stroke);border-radius:var(--radius-md)"></div>
-  <div id="camera-detail" class="help" style="margin:0.5em 0;display:none">
+  <div id="layout-map" class="cam-map"></div>
+  <div id="camera-detail" class="help control-row" style="display:none"> {# JS-toggled #}
     <strong id="detail-name"></strong>
-    <label style="margin-left:0.75em">azimuth
-      <input id="detail-azimuth" type="number" min="0" max="359" step="1" style="width:4.5em">°
+    <label class="inline-label">azimuth
+      <input id="detail-azimuth" type="number" min="0" max="359" step="1" class="num-4e">°
       <strong id="detail-cardinal"></strong>
     </label>
-    <label style="margin-left:0.75em">field of view
-      <input id="detail-fov" type="number" min="10" max="360" step="5" style="width:4.5em">°
+    <label class="inline-label">field of view
+      <input id="detail-fov" type="number" min="10" max="360" step="5" class="num-4e">°
     </label>
-    <span id="detail-placement" style="margin-left:0.75em"></span>
+    <span id="detail-placement" class="inline-label"></span>
   </div>
-  <div style="margin:0.5em 0">
-    <button id="clear-secure" class="test-push" style="display:none">Clear secure area</button>
+  <div class="control-row">
+    <button id="clear-secure" class="btn-primary" style="display:none">Clear secure area</button>
   </div>
 
-  <div style="margin-top:0.5em" class="help">
+  <div class="help subsection">
     <label>Map width
-      <input id="map-scale" type="number" min="10" max="100000" step="5" style="width:5.5em"> ft
+      <input id="map-scale" type="number" min="10" max="100000" step="5" class="num-5e"> ft
       <span class="help">(real-world width of the square above — unlocks world trails &amp; speed cross-checks)</span>
     </label>
-    <label style="margin-left:1em"><input type="checkbox" id="coverage-toggle"> Coverage view</label>
-    <label style="margin-left:1em">Walks
+    <label class="inline-label-lg"><input type="checkbox" id="coverage-toggle"> Coverage view</label>
+    <label class="inline-label-lg">Walks
       <select id="trails-window">
         <option value="">off</option>
         <option value="15">last 15 min</option>
@@ -57,24 +55,24 @@
         <option value="360">last 6 h</option>
       </select>
     </label>
-    <span id="trails-note" class="help" style="margin-left:0.6em"></span>
+    <span id="trails-note" class="help inline-label"></span>
   </div>
 
-  <div style="margin-top:0.75em">
+  <div class="subsection">
     <label class="help">View reach
       <input id="suggest-radius" type="range" min="0.1" max="0.5" step="0.05" value="0.25"
-             style="vertical-align:middle">
+             class="va-middle">
       <span id="suggest-radius-label">0.25</span>
     </label>
-    <button id="suggest-btn" class="test-push" style="margin-left:0.75em">Suggest neighbors</button>
-    <button id="placement-fov-btn" class="test-push" style="margin-left:0.75em"
+    <button id="suggest-btn" class="btn-primary inline-label">Suggest neighbors</button>
+    <button id="placement-fov-btn" class="btn-primary inline-label"
             title="Set each pie's width from the placement page's measured HFOV">Pull FOV from placement</button>
   </div>
-  <div id="suggest-diff" class="help" style="margin:0.5em 0"></div>
+  <div id="suggest-diff" class="help control-row"></div>
 
-  <div style="margin-top:1.5em">
-    <button id="save-btn" class="test-push">Save</button>
-    <span id="save-state" style="margin-left:1em"></span>
+  <div class="section-block">
+    <button id="save-btn" class="btn-primary">Save</button>
+    <span id="save-state" class="save-state"></span>
   </div>
 </main>
 {% endblock %}

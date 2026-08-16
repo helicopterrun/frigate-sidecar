@@ -3,7 +3,6 @@
 {% block title %}Zone hits · frigate-sidecar{% endblock %}
 
 {% block body %}
-{% include "_header.html" %}
 <main>
   <form class="filters" method="get" action="/zone-hits">
     <label>camera
@@ -15,13 +14,13 @@
       </select>
     </label>
     <label>days
-      <input type="number" name="days" value="{{ days }}" min="1" max="365" style="width:70px">
+      <input type="number" name="days" value="{{ days }}" min="1" max="365" class="num-70">
     </label>
     <button type="submit">Apply</button>
   </form>
 
   {% if error %}
-    <div class="empty" style="color:var(--live)">{{ error }}</div>
+    <div class="empty error">{{ error }}</div>
   {% elif result %}
     <h2 class="section-h">Zone hits (last {{ result.days }} days)</h2>
     {% if result.hits %}

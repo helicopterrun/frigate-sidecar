@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% set active_page = 'debug' %}
+{% set active_page = 'toybox' %}
+{% set summary = '50 states quiz' %}
 {% block title %}Toybox · frigate-sidecar{% endblock %}
 
 {% block body %}
-{% set summary = '50 states quiz' %}
-{% include "_header.html" %}
 <main class="toybox">
+  <p class="help"><a href="/debug">&larr; debug</a></p>
   <div class="tb-layout">
     <section class="tb-game">
       <div class="tb-hud">

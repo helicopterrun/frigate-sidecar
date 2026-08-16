@@ -1,10 +1,9 @@
 {% extends "base.html" %}
 {% set active_page = 'triage' %}
+{% set summary = events|length ~ ' matching event' ~ ('s' if events|length != 1 else '') %}
 {% block title %}Triage · frigate-sidecar{% endblock %}
 
 {% block body %}
-{% set summary = events|length ~ ' matching event' ~ ('s' if events|length != 1 else '') %}
-{% include "_header.html" %}
 <main>
   <form class="filters" method="get" action="/triage">
     <label>camera
@@ -30,8 +29,8 @@
         {% endfor %}
       </select>
     </label>
-    <label>days back <input type="number" name="days" value="{{ filters.days }}" min="1" max="365" style="width:70px"></label>
-    <label>limit <input type="number" name="limit" value="{{ filters.limit }}" min="1" max="500" style="width:70px"></label>
+    <label>days back <input type="number" name="days" value="{{ filters.days }}" min="1" max="365" class="num-70"></label>
+    <label>limit <input type="number" name="limit" value="{{ filters.limit }}" min="1" max="500" class="num-70"></label>
     <label>order
       <select name="order">
         {% for v in ['newest', 'oldest'] %}
@@ -40,7 +39,7 @@
       </select>
     </label>
     <button type="submit">apply</button>
-    <button type="button" class="secondary" onclick="window.location='/'">reset</button>
+    <button type="button" class="secondary" onclick="window.location='/triage'">reset</button>
   </form>
 
   {% if events %}

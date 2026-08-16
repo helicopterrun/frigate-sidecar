@@ -3,16 +3,15 @@
 {% block title %}Motion · frigate-sidecar{% endblock %}
 
 {% block body %}
-{% include "_header.html" %}
 <main>
   <form class="filters motion-form" method="get" action="/motion">
     <label>baseline range (blank = single-window view)
       <input type="text" name="baseline" value="{{ baseline }}"
-             placeholder="YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD" style="width:280px">
+             placeholder="YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD" class="field-280">
     </label>
     <label>target range
       <input type="text" name="target" value="{{ target }}"
-             placeholder="today, yesterday, or YYYY-MM-DD[..YYYY-MM-DD]" style="width:280px">
+             placeholder="today, yesterday, or YYYY-MM-DD[..YYYY-MM-DD]" class="field-280">
     </label>
     <button type="submit">compute</button>
   </form>
@@ -26,9 +25,9 @@
   </div>
 
   {% if error %}
-    <div class="empty" style="color:#f87171">{{ error }}</div>
+    <div class="empty error">{{ error }}</div>
   {% elif mode == 'compare' %}
-    <h2 style="margin-top:24px;font-size:14px;color:#8a92a6">
+    <h2 class="section-h">
       baseline <code>{{ range_labels.baseline }}</code> vs target <code>{{ range_labels.target }}</code>
     </h2>
     {% if rows %}
@@ -59,7 +58,7 @@
       <div class="empty">No qualifying rows for that window.</div>
     {% endif %}
   {% elif mode == 'single' %}
-    <h2 style="margin-top:24px;font-size:14px;color:#8a92a6">
+    <h2 class="section-h">
       single-window view · since <code>{{ range_labels.target }}</code>
     </h2>
     {% if rows %}
@@ -94,7 +93,7 @@
     <div class="empty">Set a target range above or pick a preset.</div>
   {% endif %}
 
-  <p class="help" style="margin-top:24px">
+  <p class="help footnote">
     <strong>mu/hr</strong> = motion-units per recorded hour. Per-camera relative; not comparable
     across cameras (different masks/FOVs). <strong>yield/kmu</strong> = surviving tracked events
     per 1,000 motion-units. Low yield + high mu/hr = motion firing on stuff the object detector

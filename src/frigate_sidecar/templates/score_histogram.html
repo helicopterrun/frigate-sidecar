@@ -3,11 +3,10 @@
 {% block title %}Score Histogram · frigate-sidecar{% endblock %}
 
 {% block body %}
-{% include "_header.html" %}
 <main>
   <form class="filters" method="get" action="/score-histogram">
     <label>days back
-      <input type="number" name="days" value="{{ filters.days }}" min="1" max="365" style="width:80px">
+      <input type="number" name="days" value="{{ filters.days }}" min="1" max="365" class="num-80">
     </label>
     <label>camera
       <select name="camera">
@@ -26,7 +25,7 @@
       </select>
     </label>
     <label>min samples
-      <input type="number" name="min_samples" value="{{ filters.min_samples }}" min="1" max="500" style="width:80px">
+      <input type="number" name="min_samples" value="{{ filters.min_samples }}" min="1" max="500" class="num-80">
     </label>
     <button type="submit">apply</button>
     <button type="button" class="secondary" onclick="window.location='/score-histogram'">reset</button>
@@ -66,7 +65,7 @@
   {% if result.buckets %}
   <details class="bucket-block">
     <summary>Top-score buckets ({{ result.buckets|length }} cells)</summary>
-    <table class="motion-table" style="margin-top:8px">
+    <table class="motion-table">
       <thead><tr><th>camera / label</th><th>bucket</th><th>count</th></tr></thead>
       <tbody>
       {% for key, counts in result.buckets.items() %}
@@ -87,7 +86,7 @@
     <div class="empty">No events in the last {{ filters.days }} days for these filters.</div>
   {% endif %}
 
-  <p class="help" style="margin-top:24px">
+  <p class="help footnote">
     <strong>min_score</strong> = per-frame floor (events below are dropped pre-tracking).
     <strong>threshold</strong> = applied to the median of the tracked object's score history.
     Suggestions are computed from triage-labeled <code>tp</code> events when available
