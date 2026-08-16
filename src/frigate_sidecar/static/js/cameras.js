@@ -433,31 +433,68 @@
         });
       }
 
-      // Direction arrow — the primary aim control, drawn like the snapshot
-      // arrows. Uncalibrated cameras get a faint north-pointing ghost you
-      // grab to set the first aim.
       var dir = azDir(az);
-      var ax = entry.x + dir.x * r * 0.72, ay = entry.y + dir.y * r * 0.72;
-      var arrow = svgLine(camGroup, entry.x, entry.y, ax, ay, {
-        stroke: "var(--accent, #ffb454)",
-        "stroke-opacity": hasAim ? "0.95" : "0.35",
-        "stroke-width": "0.008",
-        "marker-end": "url(#map-arrowhead)",
-      });
-      var grabArrow = svgLine(camGroup, entry.x, entry.y, ax, ay, {
-        stroke: "transparent", "stroke-width": "0.05",
-      });
-      grabArrow.style.cursor = "alias";
-      grabArrow.setAttribute("aria-label", "aim " + camera);
-      dragOn(grabArrow, camera, i, function (e, pointerAz) {
-        e.azimuth = +pointerAz.toFixed(1);
-        if (e.fov === undefined) e.fov = defaultFov(camera);
-      });
 
-      if (hasAim) {
-        // Cardinal readout floats just past the arrow tip: "SW 225°".
-        var lx = entry.x + dir.x * (r * 0.72 + 0.045);
-        var ly = entry.y + dir.y * (r * 0.72 + 0.045);
+      // The camera itself: a filled dot exactly where it's mounted.
+      // Selected = accent, others = muted. The label pill hangs below it.
+      var pt = document.createElementNS(SVG_NS, "circle");
+      pt.setAttribute("cx", entry.x); pt.setAttribute("cy", entry.y);
+      pt.setAttribute("r", selected ? "0.014" : "0.010");
+      pt.setAttribute("fill", selected ? "var(--accent, #ffb454)" : "var(--muted, #8f9fb8)");
+      pt.setAttribute("stroke", "var(--surface, #111)");
+      pt.setAttribute("stroke-width", "0.004");
+      pt.style.pointerEvents = "none";
+      camGroup.appendChild(pt);
+
+      // Rotation wheel: shown only for the selected camera, so "turn" has
+      // its own visible control distinct from "move" (dragging the pill).
+      // Drag anywhere on the ring — or its knob — to swing the azimuth.
+      if (selected) {
+        var rw = 0.055;
+        var ring = document.createElementNS(SVG_NS, "circle");
+        ring.setAttribute("cx", entry.x); ring.setAttribute("cy", entry.y);
+        ring.setAttribute("r", rw);
+        ring.setAttribute("fill", "none");
+        ring.setAttribute("stroke", "var(--accent, #ffb454)");
+        ring.setAttribute("stroke-opacity", "0.7");
+        ring.setAttribute("stroke-width", "0.005");
+        ring.setAttribute("stroke-dasharray", "0.01 0.008");
+        ring.style.pointerEvents = "none";
+        camGroup.appendChild(ring);
+        var ringGrab = document.createElementNS(SVG_NS, "circle");
+        ringGrab.setAttribute("cx", entry.x); ringGrab.setAttribute("cy", entry.y);
+        ringGrab.setAttribute("r", rw);
+        ringGrab.setAttribute("fill", "none");
+        ringGrab.setAttribute("stroke", "transparent");
+        ringGrab.setAttribute("stroke-width", "0.045");
+        ringGrab.style.cursor = "grab";
+        ringGrab.setAttribute("aria-label", "aim " + camera);
+        dragOn(ringGrab, camera, i, function (e, pointerAz) {
+          e.azimuth = +pointerAz.toFixed(1);
+          if (e.fov === undefined) e.fov = defaultFov(camera);
+        });
+        camGroup.appendChild(ringGrab);
+        // Knob sits on the ring at the current aim.
+        var knob = document.createElementNS(SVG_NS, "circle");
+        knob.setAttribute("cx", entry.x + dir.x * rw);
+        knob.setAttribute("cy", entry.y + dir.y * rw);
+        knob.setAttribute("r", "0.013");
+        knob.setAttribute("fill", "var(--accent, #ffb454)");
+        knob.setAttribute("stroke", "var(--surface, #111)");
+        knob.setAttribute("stroke-width", "0.004");
+        knob.style.pointerEvents = "fill";
+        knob.style.cursor = "grab";
+        dragOn(knob, camera, i, function (e, pointerAz) {
+          e.azimuth = +pointerAz.toFixed(1);
+          if (e.fov === undefined) e.fov = defaultFov(camera);
+        });
+        camGroup.appendChild(knob);
+      }
+
+      if (hasAim && selected) {
+        // Cardinal readout floats just outside the wheel: "SW 225°".
+        var lx = entry.x + dir.x * 0.11;
+        var ly = entry.y + dir.y * 0.11;
         var text = document.createElementNS(SVG_NS, "text");
         text.setAttribute("x", lx);
         text.setAttribute("y", ly);
@@ -517,20 +554,17 @@
       var pos = layoutEntry(camera, i);
       var isSel = camera === selectedCamera;
       var dot = document.createElement("div");
-      var icon = document.createElement("span");
-      icon.textContent = "📷";
-      icon.style.cssText = "font-size:1.25em;line-height:1;margin-right:3px";
-      dot.appendChild(icon);
-      dot.appendChild(document.createTextNode(camera));
+      dot.textContent = camera;
+      // Hangs below the dot marking the exact mount point; dragging the
+      // pill MOVES the camera (turning is the selected camera's wheel).
       dot.style.cssText =
-        "position:absolute;transform:translate(-50%,-50%);padding:2px 7px;" +
-        "display:flex;align-items:center;" +
-        "background:var(--surface-2);border:1px solid " +
+        "position:absolute;transform:translate(-50%," + (isSel ? "30px" : "9px") + ");" +
+        "padding:1px 7px;background:var(--surface-2);border:1px solid " +
         (isSel ? "var(--accent, #ffb454)" : "var(--stroke)") + ";" +
-        "border-radius:999px;font-size:0.62em;cursor:grab;user-select:none;" +
+        "border-radius:999px;font-size:0.62em;cursor:move;user-select:none;" +
         "touch-action:none;white-space:nowrap;" +
         (isSel
-          ? "box-shadow:0 0 0 2px var(--accent, #ffb454), 0 0 14px var(--accent, #ffb454);z-index:2;"
+          ? "box-shadow:0 0 10px var(--accent, #ffb454);z-index:2;"
           : selectedCamera ? "opacity:0.35;" : "");
       dot.style.left = pos.x * 100 + "%";
       dot.style.top = pos.y * 100 + "%";
