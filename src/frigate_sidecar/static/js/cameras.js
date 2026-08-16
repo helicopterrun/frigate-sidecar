@@ -1227,6 +1227,28 @@
     renderMap(); // wedges are drawn at view-reach radius
   });
 
+  // ---- Reload Frigate config -----------------------------------------
+
+  var configRefreshBtn = document.getElementById("config-refresh-btn");
+  var configRefreshState = document.getElementById("config-refresh-state");
+  configRefreshBtn.addEventListener("click", async function () {
+    configRefreshBtn.disabled = true;
+    configRefreshState.textContent = "syncing from Frigate...";
+    try {
+      var data = await fetchJson("/v1/push/frigate-config/refresh", { method: "POST" });
+      if (data.changed) {
+        configRefreshState.textContent = "config updated — reloading page...";
+        window.location.reload();
+        return;
+      }
+      configRefreshState.textContent = "already up to date (" +
+        (data.cameras || []).length + " cameras).";
+    } catch (err) {
+      configRefreshState.textContent = "error: " + err.message;
+    }
+    configRefreshBtn.disabled = false;
+  });
+
   // ---- Save ----------------------------------------------------------
 
   saveBtn.addEventListener("click", async function () {

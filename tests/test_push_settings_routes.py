@@ -377,3 +377,56 @@ def test_put_rejects_malformed_camera_optics(client: TestClient):
         json={"camera_optics": {"street": {"hfov": 400, "mount_ft": 35, "tilt_deg": 22}}},
     )
     assert resp.status_code == 400
+
+
+def _refresh_client(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path, upstream_yaml: Any,
+) -> TestClient:
+    import httpx
+
+    settings = _settings(frigate_db_path, sidecar_db_path, tmp_path)
+    app = create_app(settings)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/config/raw"
+        if isinstance(upstream_yaml, int):
+            return httpx.Response(upstream_yaml, text="nope")
+        return httpx.Response(200, text=upstream_yaml)
+
+    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return TestClient(app)
+
+
+def test_config_refresh_writes_changed_snapshot(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+):
+    new_yaml = (
+        "cameras:\n  renamed-cam:\n    zones:\n      new_zone:\n"
+        "        coordinates: 0,0,1,0,1,1,0,1\n"
+    )
+    client = _refresh_client(frigate_db_path, sidecar_db_path, tmp_path, new_yaml)
+    resp = client.post("/v1/push/frigate-config/refresh")
+    assert resp.status_code == 200
+    assert resp.json() == {"changed": True, "cameras": ["renamed-cam"]}
+    assert (tmp_path / "frigate-config.yml").read_text() == new_yaml
+    # Second call: identical upstream -> no-op.
+    resp = client.post("/v1/push/frigate-config/refresh")
+    assert resp.json()["changed"] is False
+
+
+def test_config_refresh_rejects_non_config_response(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+):
+    client = _refresh_client(frigate_db_path, sidecar_db_path, tmp_path, "<html>login</html>")
+    before = (tmp_path / "frigate-config.yml").read_text()
+    resp = client.post("/v1/push/frigate-config/refresh")
+    assert resp.status_code == 502
+    assert (tmp_path / "frigate-config.yml").read_text() == before  # untouched
+
+
+def test_config_refresh_propagates_upstream_denial(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+):
+    client = _refresh_client(frigate_db_path, sidecar_db_path, tmp_path, 401)
+    resp = client.post("/v1/push/frigate-config/refresh")
+    assert resp.status_code == 502

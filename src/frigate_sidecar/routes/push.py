@@ -713,6 +713,76 @@ async def put_push_settings(request: Request) -> dict[str, Any]:
     return {"ok": True}
 
 
+_ERR_CONFIG_REFRESH = "config_refresh_failed"
+
+
+@router.post("/frigate-config/refresh")
+async def refresh_frigate_config(request: Request) -> dict[str, Any]:
+    """Re-sync the sidecar's Frigate-config copy from Frigate itself.
+
+    A deployment whose `frigate.config_path` points at the live config file
+    (prod) never needs this — camera/zone reads go to that file per request.
+    A dev instance reads a *snapshot*, which goes stale the moment cameras
+    or zones are renamed in Frigate; this fetches `/api/config/raw` from the
+    authenticated origin (with the requester's own session cookie, so it
+    grants nothing the caller doesn't already have) and rewrites the
+    snapshot when it changed."""
+    import httpx
+
+    from frigate_sidecar.frigate_api import get_async_client
+
+    settings = request.app.state.settings
+    upstream = settings.frigate.proxy_base_url.rstrip("/") + "/api/config/raw"
+    client = get_async_client(request.app)
+    try:
+        resp = await client.get(
+            upstream,
+            headers={"cookie": request.headers.get("cookie", "")},
+            timeout=10.0,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail={"error": _ERR_CONFIG_REFRESH, "message": str(exc)},
+        ) from exc
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": _ERR_CONFIG_REFRESH,
+                "message": f"frigate answered HTTP {resp.status_code}",
+            },
+        )
+    raw = resp.text
+    try:
+        import yaml
+
+        parsed = yaml.safe_load(raw)
+    except Exception:
+        parsed = None
+    if not (isinstance(parsed, dict) and isinstance(parsed.get("cameras"), dict)):
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": _ERR_CONFIG_REFRESH,
+                "message": "response did not look like a Frigate config",
+            },
+        )
+
+    path = pathlib.Path(settings.frigate.config_path)
+    current = path.read_text() if path.exists() else None
+    changed = raw != current
+    if changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(raw)
+        tmp.replace(path)
+        policy_settings.load_zone_display_names(path)
+
+    from frigate_sidecar.zones import load_camera_zones
+
+    return {"changed": changed, "cameras": sorted(load_camera_zones(path).keys())}
+
+
 _ERR_BAD_FLOORPLAN = "bad_floorplan"
 _ERR_FLOORPLAN_NOT_FOUND = "floorplan_not_found"
 _FLOORPLAN_MAX_BYTES = 10 * 1024 * 1024
