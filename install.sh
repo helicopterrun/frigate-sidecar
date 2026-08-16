@@ -73,8 +73,10 @@ EOF
     die "python3 -m venv failed (on Debian/Ubuntu: apt install python3-venv)"
   }
   "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
-  "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade frigate-sidecar 2>/dev/null || \
-    "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "frigate-sidecar @ git+https://github.com/$REPO"
+  # [http2]: long-lived HTTP/2 relay connection instead of the HTTP/1.1
+  # keep-alive fallback (push/transport.py warns at startup without it).
+  "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "frigate-sidecar[http2]" 2>/dev/null || \
+    "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "frigate-sidecar[http2] @ git+https://github.com/$REPO"
 
   mkdir -p /etc/frigate-sidecar
   if [ ! -f /etc/frigate-sidecar/sidecar.yml ]; then
