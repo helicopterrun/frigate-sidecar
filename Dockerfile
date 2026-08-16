@@ -17,7 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
-RUN pip install .
+# http2: one long-lived HTTP/2 connection to the push relay instead of the
+# HTTP/1.1 keep-alive fallback (push/transport.py logs a warning without it).
+RUN pip install '.[http2]'
 
 ENV FRIGATE_SIDECAR_CONFIG=/etc/frigate-sidecar/sidecar.yml
 
