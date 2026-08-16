@@ -6,6 +6,12 @@
   var KEY = "sidecar.theme";
   var picker = document.getElementById("theme-picker");
   if (!picker) return;
+  // Elsinore became the default (value "") on 2026-08-15; migrate the old
+  // explicit selection so the picker doesn't show a stale unknown value.
+  if (localStorage.getItem(KEY) === "elsinore") {
+    localStorage.removeItem(KEY);
+    document.documentElement.removeAttribute("data-theme");
+  }
   picker.value = localStorage.getItem(KEY) || "";
   picker.addEventListener("change", function () {
     if (picker.value) {

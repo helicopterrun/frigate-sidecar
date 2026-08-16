@@ -7,21 +7,22 @@
    Theme is picked via data-theme on <html> (static/js/theme.js). */
 :root {
   color-scheme: dark;
-  /* Kronborg Signal -- the brand default (matches the app icon). */
-  --panel: #031C38;          /* page background */
-  --surface: #0A2845;        /* cards, header, tables */
-  --surface-2: #123653;      /* hover states, secondary panels */
-  --stroke: #1A3D59;         /* borders */
-  --stroke-soft: #12314A;    /* soft row separators */
-  --deep: #02141F;           /* media wells, map background */
-  --text: #C8D2DA;
-  --muted: #91A2AF;
-  --muted-2: #71869A;
-  --muted-3: #53687C;
-  --accent: #FF5A1F;         /* controlTint */
-  --accent-2: #FF6B2C;       /* reelAccent (hover/secondary accent) */
-  --btn-neutral: #23486B;
-  --btn-neutral-hover: #2E567C;
+  /* Elsinore -- the default palette (graphite + amber), matching the app's
+     default since 2026-08-15. */
+  --panel: #121318;          /* page background */
+  --surface: #1C1D24;        /* cards, header, tables */
+  --surface-2: #262831;      /* hover states, secondary panels */
+  --stroke: #30323B;         /* borders */
+  --stroke-soft: #23252D;    /* soft row separators */
+  --deep: #0B0C10;           /* media wells, map background */
+  --text: #D1D5DB;
+  --muted: #9AA3AB;
+  --muted-2: #7B838C;
+  --muted-3: #5C646D;
+  --accent: #E8A33D;         /* controlTint */
+  --accent-2: #F1B24D;       /* reelAccent (hover/secondary accent) */
+  --btn-neutral: #31333E;
+  --btn-neutral-hover: #3C3F4C;
   /* Shared semantic roles (identical in every app theme). */
   --live: #FF5D57;
   --gap-c: #765B4C;
@@ -39,12 +40,13 @@
   --info: #93C5FD;    --info-bg: #1E40AF;   --info-text: #BFDBFE;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
-:root[data-theme="elsinore"] {
-  --panel: #121318; --surface: #1C1D24; --surface-2: #262831;
-  --stroke: #30323B; --stroke-soft: #23252D; --deep: #0B0C10;
-  --text: #D1D5DB; --muted: #9AA3AB; --muted-2: #7B838C; --muted-3: #5C646D;
-  --accent: #E8A33D; --accent-2: #F1B24D;
-  --btn-neutral: #31333E; --btn-neutral-hover: #3C3F4C;
+:root[data-theme="kronborg-signal"] {
+  /* The icon-matched navy + orange, formerly the default. */
+  --panel: #031C38; --surface: #0A2845; --surface-2: #123653;
+  --stroke: #1A3D59; --stroke-soft: #12314A; --deep: #02141F;
+  --text: #C8D2DA; --muted: #91A2AF; --muted-2: #71869A; --muted-3: #53687C;
+  --accent: #FF5A1F; --accent-2: #FF6B2C;
+  --btn-neutral: #23486B; --btn-neutral-hover: #2E567C;
 }
 :root[data-theme="moss-terracotta"] {
   --panel: #1D2920; --surface: #27362A; --surface-2: #324535;
