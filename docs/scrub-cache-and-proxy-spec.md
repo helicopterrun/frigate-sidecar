@@ -603,9 +603,9 @@ Follow the existing `tests/` conventions (`test_api.py`, `test_sampler.py`, `tes
 
 ---
 
-## 12. Open decisions — need sign-off before/while building
+## 12. Build-shaping decisions (mostly resolved; kept as the record)
 
-The first two (from §3) change the build shape; the rest are the requirements doc's open questions, carried here so they're decided deliberately. Several are now resolved by Phase 1 measurement rather than left open — marked below.
+The subsystem has shipped and survived a production repair cycle, so these are no longer awaiting sign-off — they're kept as the record of what was decided and why. The first two (from §3) changed the build shape; the rest were the requirements doc's open questions. Only #5 (default camera set) and #6 (backfill mode) remain genuinely undecided, and the shipped behavior stands in as the answer until someone cares.
 
 1. **Generation source** — recordings via `/media` RO mount (recommended: uniform + no hourly hole) vs HTTP-only preview (no mount, but can't promise clean cadence). §3.1. **Unchanged — still recording segments.**
 2. **Proxy target & `/v1` auth** — proxy to authed `:8971` with cookie pass-through. **`/v1` auth is now resolved, not open: authenticate it (option (a)), per §3.2.** The earlier "trust the LAN" option would have made the sidecar a way around Frigate's own auth for footage stills.

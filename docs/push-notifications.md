@@ -1,264 +1,129 @@
 # Push notifications
 
-Implements the design in Elsinore's `sidecar-push-notifications-spec.md`
-(v0.3 draft). This doc is a short pointer at the sidecar's own code, not a
-restatement of the full spec — see that doc for the complete rationale
-(architecture, APNs key custody, NSE contract, testing plan).
+How the sidecar turns Frigate detections into APNs pushes and Live
+Activities. This is the current-state design doc for everything under
+`frigate_sidecar/push/`; the wire contract for card payloads lives in
+`docs/apns-payload-spec.md`.
 
-## What's implemented
+## The routing model: the merged outcome ladder
 
-- **Event source:** `frigate_sidecar/push/mqtt.py` subscribes to
-  `frigate/reviews` over MQTT (not `/api/events` polling, per the spec).
-  `frigate/available` is also watched so a Frigate outage is distinguished
-  from "no devices matched"; `offline_silence_s` of broker silence triggers
-  the same back-fill path (`GET /api/events?after=...`) used on reconnect.
-- **Decision engine:** `frigate_sidecar/push/decision.py` is a pure,
-  dependency-free module — parses a `frigate/reviews` payload into a
-  `ReviewEvent` and matches it against each registered device's
-  `cameras`/`labels`/`min_severity` subscription filters. `[]` means "all" for
-  both list filters, matching the registration contract.
-- **Device registry:** `PUT`/`DELETE /v1/push/devices/{apns_token}`
-  (`routes/push.py`) behind the sidecar's existing Frigate-session auth — no
-  second credential. Registration is an idempotent PUT keyed on the token
-  itself (`push/store.py`), so a relaunch that reuses the same token
-  overwrites filter state rather than duplicating it.
-- **Publisher, behind a transport interface** (`push/transport.py`):
-  - `LogTransport` — logs what would be sent and always succeeds. This is
-    the default (`push.transport: mock`) and what every test in this repo
-    runs against, since no real APNs credentials exist yet.
-  - `RelayTransport` — posts `{device_token, environment, handle, server_id,
-    severity, apns-collapse-id}` to `push.relay_base_url`. The deployed
-    relay implementing this contract is
-    [elsinore-push-relay](https://github.com/helicopterrun/elsinore-push-relay)
-    (a Cloudflare Worker holding the one team-bound APNs key), the default
-    `relay_base_url`. To go live: `push.enabled: true`,
-    `push.transport: relay`, and MQTT pointed at Frigate's broker. Tests
-    still run against a mock relay, never real Apple infrastructure.
+One dial per **subject × place** answering "what happens?". Subjects are
+`person` / `vehicle` / `animal` / `thing`; places are `street` / `yard` /
+`doors` / `private` / `off_limits`. Each cell holds one of five ordinal
+outcomes (`policy_settings.OUTCOMES`):
 
-  **`prod` vs `production`.** This sidecar's `/v1/push/devices` API, its DB
-  CHECK constraint and spec §1 all spell the production environment `prod`;
-  the relay's wire API spells it `production` and rejects anything else with
-  422. `RelayTransport` translates at that one boundary, so `prod` stays the
-  only spelling everywhere else here. Before that, every push to a
-  prod-registered device would have been rejected and no production device
-  could ever have been notified — invisible only while the mock transport is
-  in use.
+| Outcome | Meaning |
+|---|---|
+| `off` | suppressed entirely — never evaluated, never logged as a card |
+| `log` | recorded, visible in the app, no delivery |
+| `glance` | Live Activity only — never a banner or sound |
+| `notify` | banner + Live Activity |
+| `alarm` | urgent: sound, re-sounds, time-sensitive |
 
-  **Situation pushes use a third relay route.** A situation's title is its
-  user-authored name and its body names the label and dwell, none of which a
-  fixed severity-keyed template can produce — so the sidecar builds the whole
-  APNs body and `send_situation` posts it to `POST
-  {relay_base_url}/v1/relay/situation` as
-  `{device_token, environment, "apns-collapse-id", payload}`. The relay signs
-  the JWT, sets `apns-topic`/`apns-push-type`/`apns-priority` itself, and
-  forwards `payload` verbatim; it validates `payload.aps` and 422s anything
-  over 4KB. Deliberately *not* `/v1/relay/push`: that route templates its own
-  text, so handing it a situation would deliver a generic "New alert" banner
-  while reporting success. Implemented in elsinore-push-relay `4278bdf`;
-  until that is deployed to Workers a situation send 404s, which surfaces as
-  a logged send failure and `502 test_send_failed` from the app's test button
-  — visibly broken rather than silently wrong, and v1-shape pushes keep
-  working throughout. Plan §8's relay boundary governs: the relay forwards
-  these bytes to APNs in flight without persisting, logging, or inspecting
-  them, which is what "content-free *at rest*" has always meant. Snapshots
-  still never transit it.
+In the settings document, **`outcomes` is authoritative**. The evaluator
+itself still consumes four routing *levels* (`log < quiet < notify <
+urgent`, `ladder_policy.LEVELS`), so `routing_table_v2` is derived from
+`outcomes` on every save (`glance → quiet`, `alarm → urgent`, `off → log`)
+— older app builds reading `routing_table_v2` and the evaluator stay in
+step by construction. `off` has no legacy level, so it is enforced as
+**pre-evaluation suppression**: `apply_settings` collects every `off` cell
+into `ladder_policy.set_off_cells`, and the evaluator answers `SUPPRESSED`
+for them before any nudge could raise the result. A legacy settings body
+(no `outcomes` block) has its outcomes derived from its levels, and a
+stored `off` cell survives that round trip: the legacy shape renders `off`
+as `log`, so stored-off + incoming-log stays off.
 
-  **`apns-collapse-id` is capped at 64 bytes**, by Apple and again by the
-  relay, which truncates rather than rejects. `build_collapse_id` trims the
-  *situation* id and keeps the track id whole: cutting the tail instead would
-  make two people arriving 30s apart share a collapse id, and one
-  notification would silently replace the other.
+**Zone overrides outrank table cells** — including `off` cells. An
+explicit per-zone rule is the user's most specific statement.
 
-  **Live Activities need a fourth relay route.** `/v1/relay/situation`
-  hardcodes `apns-push-type: alert` and `apns-topic: env.APNS_TOPIC`
-  (elsinore-push-relay `43c5209`). A live-activity push differs in all three
-  of the fields that matter — `apns-push-type: liveactivity`, the
-  `<APNS_TOPIC>.push-type.liveactivity` topic, and a token that is neither the
-  device's alert token nor the same one for start vs update — so
-  `send_live_activity` posts to `POST {relay_base_url}/v1/relay/liveactivity`
-  as `{device_token, environment, "apns-collapse-id", event, payload}`.
-  `event` is `start` | `update` | `end`, passed so the relay can validate the
-  shape (a `start` must carry `attributes` and `attributes-type`) rather than
-  letting Apple 400 it. Implemented in elsinore-push-relay: the route derives
-  the topic from `APNS_TOPIC` and flips the push type to `liveactivity`.
-  Delivery hints ride as `apns_priority`/`apns_expiration` (underscores — the
-  relay's `checkDeliveryHints` key spelling; hyphenated keys are ignored).
+The legacy `routing_table` (subjects `stranger`/`known`/`animal`/`thing`)
+is still stored and validated for old clients; `startup` migrates a v1-only
+file to v2 once (`migrate_v1_to_v2`: `person` := stranger row, `vehicle` :=
+thing row bumped one tier at doors/off_limits, `recognition` inferred from
+the stranger/known gap). The evaluator uses `routing_table_v2` when
+present, falling back to `routing_table`.
 
-  **Test push needs a second relay route.** `send_test` posts
-  `{device_token, environment}` to `POST {relay_base_url}/v1/relay/test`:
-  `/v1/relay/push` validates `handle` as required and templates its text by
-  severity, so the test payload (fixed literal text, no `handle`, no
-  `mutable-content`) cannot go through it. Added in
-  [elsinore-push-relay#1](https://github.com/helicopterrun/elsinore-push-relay/pull/1)
-  — until that is merged and deployed, a test send returns 404 from the relay
-  and surfaces as `502 test_send_failed`, visibly broken rather than a silent
-  success.
-- **Test push:** `POST /v1/push/devices/{apns_token}/test` sends one fixed
-  alert (`"Test notification"` / `"Push notifications are working."`,
-  `sound: default`) to exactly that device, bypassing its camera/label/severity
-  filters but **not** its environment routing — the point is to prove the APNs
-  pipe, so a black-holed sandbox/prod mismatch must still fail here. `200
-  {"sent": true}` means APNs accepted the request; there is no delivery
-  receipt. `404` is reserved for "token not registered" (the released iOS
-  client maps it to "your server doesn't support test notifications yet", so
-  nothing else may borrow it); push switched off is `503 push_disabled` and a
-  rejected send is `502 test_send_failed`. A `410`/`400` deletes the device row
-  via the same §5 cleanup a real send applies.
-- **Handle redemption:** `GET /v1/push/handle/{handle}` resolves a
-  sidecar-minted, short-lived opaque handle to `{camera, event_id,
-  snapshot_url}` for the iOS NSE to fetch a thumbnail from. The mapping never
-  appears in the APNs payload itself.
-- **Failure modes:**
-  - A `410`/`400` from the transport is treated as a permanent dead token
-    (spec §5) and the device row is pruned immediately (`push/engine.py`),
-    never retried.
-  - MQTT broker disconnects reconnect with capped exponential backoff
-    (`compute_backoff`) and back-fill the missed window on resume.
-  - Any transport/network error that *isn't* a 410/400 is logged and left
-    for the next live event — no retry queue in this version, matching the
-    spec's "degrades to no notifications, not a crash" framing.
+**Recognition** (`recognition.known_person` / `known_vehicle`, one of
+`off` / `relax_one` / `relax_to_quiet`) replaces the old `known` subject
+row: a recognized subject relaxes the person/vehicle cell rather than
+routing through a separate table row. `probe_recognition_available` checks
+Frigate's config for face recognition and LPR so the app can hide the
+controls when the capability doesn't exist.
 
-## Situations (notification-experience plan, Phase 1)
+## Event sources
 
-Implements Phase 1 of Elsinore's `notification-experience-plan-2026-08-05.md`:
-the notification primitive moves from "a review item fired" to "a situation is
-happening" — a user-authored rule over camera + label + zone + loiter +
-time-of-day. Everything not matching a situation is silent as far as *push* is
-concerned; the reel and the digests are unaffected.
+`push/mqtt.py` subscribes to `frigate/reviews` and `frigate/events` over
+MQTT (not `/api/events` polling). `frigate/available` is watched so a
+Frigate outage is distinguished from "no devices matched";
+`offline_silence_s` of broker silence triggers the same back-fill path
+(`GET /api/events?after=...`) used on reconnect. Broker disconnects
+reconnect with capped exponential backoff (`compute_backoff`).
 
-**Two paths, one deploy.** A device with no `situations` keeps firing exactly
-what it fires today (everything above this section). A device with a non-empty
-`situations` array switches to situation-only evaluation, its v1
-`cameras`/`labels`/`min_severity` surviving as a cheap pre-filter. No phone
-loses a push on upgrade.
+Division of labor between the two topics, measured against this deployment:
+`frigate/reviews` publishes only on *data* changes (a person standing still
+generates no traffic), so it is the sole authority on whether anything is
+push-worthy; `frigate/events` (~0.2–0.5s per object) carries
+`current_zones` — live occupancy that drops a zone on exit — so dwell,
+loiter, and resolution come from there. Backfilled events have no
+`severity`; they are treated as `severity="alert"` (the conservative
+choice) with the event's own `label` used for label filtering.
 
-- **Registration (v2):** `PUT /v1/push/devices/{token}` additionally accepts
-  `schema_version`, `timezone`, `location`, `situations`, `snoozes`,
-  `live_activity_token`, `morning_digest`, `llm`. The last three are persisted
-  and deliberately unread until Phase 2/4. The response echoes the
-  `schema_version` the sidecar will actually evaluate the device under, plus
-  `situations_accepted` — a rule the sidecar couldn't parse would otherwise
-  look enabled in the app and never fire. Omitting `snoozes` leaves existing
-  ones alone (the app re-registers on every launch; a launch must not cancel a
-  snooze the user set an hour ago). An explicit `[]` clears them.
-- **Evaluation:** `push/situations.py` — pure, dependency-free. Only the
-  `interrupt` tier has a delivery surface this phase; `present` and `ambient`
-  situations parse, persist, and evaluate but do not send, since Live
-  Activities (Phase 2) and widgets (Phase 3) are what deliver them. The
-  sidecar logs once per device rather than dropping them silently.
-- **New endpoints:** `GET /v1/push/situations/library` (starter situations),
-  `GET /v1/push/sounds`, `POST /v1/push/snooze`, `DELETE
-  /v1/push/snooze/{scope}`, `POST /v1/push/test/{situation_id}`, `GET
-  /v1/push/thumbnail/{handle}`.
-- **Rate limiting:** max 10 pushes per situation per device per rolling hour
-  (`push.rate_limit_per_hour`). Beyond it, matches are suppressed silently and
-  the next push that gets through carries a `" · +X more"` suffix. Counted in
-  SQLite, not memory, so bouncing the process can't reset a runaway camera's
-  ceiling.
-- **`sent_at`:** every situation payload carries unix epoch seconds to the
-  millisecond, stamped in `build_payload` at the last moment the sidecar
-  controls before the bytes leave for the relay. The app's NSE subtracts it for
-  `sidecar_to_nse_ms` / `sidecar_to_present_ms` — the only way to see the APNs
-  hop from outside, since Apple gives no delivery receipt. Sub-second on
-  purpose: whole seconds would quantise a measurement whose interesting range
-  is hundreds of milliseconds. Not present on v1-path or plain-test pushes,
-  whose bodies the relay templates (see the relay note above).
-- **Pre-warmed thumbnails:** on a match the sidecar pulls the snapshot, resizes
-  to ~320px/q60 (~10–20KB) and parks it under the push's handle for 24h; the
-  NSE fetches it from `GET /v1/push/thumbnail/{handle}` against an already-warm
-  cache. The fetch runs *in parallel* with the send, never in series, and every
-  failure path costs the notification its image rather than its existence.
+## The attention ladder (evaluation)
 
-## Attention ladder (Elsinore Phase 1: routing engine)
+`push/ladder.py` answers one question, statelessly: given a detection
+snapshot, how loud is it? Output is one routing level or `SUPPRESSED`. All
+policy is data in `ladder_policy.py` — the live subject × place `TABLE`,
+`OFF_CELLS`, `ZONE_OVERRIDES`, `WORRY_REASONS` / `CALM_REASONS` nudges,
+`DANGEROUS_ANIMAL_LABELS` (reclassify as stranger/person),
+`SYSTEM_CARD_LEVEL`. `policy_settings.apply_settings` rebinds these module
+globals; `ladder.py` reads them at call time, so a settings PUT is live on
+the very next evaluation with no cache to invalidate.
 
-`frigate_sidecar/push/ladder.py` answers one question, statelessly: given a
-detection snapshot, how loud is it? It has no APNs, delivery, Live Activity,
-or HTTP surface of its own — later phases wrap `evaluate_ladder` rather than
-duplicate its policy.
+Evaluation order: mute → system-card short-circuit (`source == "system"`
+has no subject/place and returns a fixed level) → safety exceptions
+(`audio_safety`, `ai_flagged` → unconditional `urgent`) → dangerous-animal
+reclassification → zone override (replaces the table result outright,
+bypassing nudges/floor/caps — "always" is the point) → off-cell suppression
+→ base table lookup → one net worry/calm nudge (`animal` never nudges;
+recognized subjects never nudge up) → child-hazard-zone floor (at least
+`notify`) → street/unconfirmed-detector caps (at most `quiet`).
 
-- **Output:** one of four ordinal attention levels, `log < quiet < notify <
-  urgent` (`ladder_policy.LEVELS`), or `ladder.SUPPRESSED` for a muted
-  snapshot.
-- **Input:** `ladder.Snapshot` — a pre-classified `subject`
-  (`stranger`/`known`/`animal`/`thing`) and `place`
-  (`street`/`yard`/`doors`/`private`/`off_limits`), the raw Frigate `label`,
-  and a set of context/exception booleans. `source == "system"` (e.g. a
-  camera-offline card) has no subject or place and short-circuits to a fixed
-  level instead of touching the table.
-- **All policy is data, in `ladder_policy.py`:** the subject x place base
-  table, which reasons nudge the result up (`WORRY_REASONS`) or down
-  (`CALM_REASONS`), which Frigate labels reclassify as `stranger`
-  (`DANGEROUS_ANIMAL_LABELS`), and the system-card level
-  (`SYSTEM_CARD_LEVEL`). Retuning any of these is a data edit; `ladder.py`
-  itself should not need to change.
-- **Evaluation order** (see `ladder.py`'s module docstring for the full
-  rationale): mute → system-card short-circuit → safety exceptions
-  (`audio_safety`, `ai_flagged`, unconditional `urgent`) → dangerous-animal
-  reclassification → base table lookup → one net-worry/calm nudge (`animal`
-  never nudges; `known` never nudges up) → child-hazard-zone floor (at least
-  `notify`) → `street`/unconfirmed-detector caps (at most `quiet`).
+To change built-in policy: edit `ladder_policy.py`, then run
+`pytest tests/test_push_ladder.py`. `fixtures/ladder/ladder_cases.json` is
+the golden suite — hand-authored, one row per precedence rule; a policy
+change that alters a case's outcome must update its `expected` value
+deliberately, in the same commit.
 
-**To change policy:** edit `ladder_policy.py`, then run the golden suite:
+### Subject and place classification
 
-```sh
-pytest tests/test_push_ladder.py
-```
+`delivery_wire.classify_subject` is a deliberate MVP: `person` +
+`sub_labels` (known if present, never the reverse), `_VEHICLE_LABELS`,
+`_ANIMAL_LABELS`, else `thing`. `classify_place` checks the user's
+`settings.zone_classes` first, then `policy_settings.guess_zone_class` — a
+name heuristic checking doors → off_limits → street → private → yard
+patterns in that order (most specific/alarming first; the order resolves
+real collisions like "front_entry_person" and "sidewalk"), falling back to
+the camera name, defaulting to `yard`. Tightening either is a data change
+in `delivery_wire.py`, never a change to `ladder.py`.
 
-`fixtures/ladder/ladder_cases.json` is the golden suite — one row per
-precedence rule the engine has to get right (e.g. "a known-subject nudge never
-crosses the up direction", "a safety exception beats the street cap"). It's
-hand-authored, not generated: a policy change that alters a case's outcome
-must update its `expected` value deliberately, in the same commit as the
-policy edit, not be silently re-blessed.
-
-## Attention ladder: delivery pipeline (Elsinore Phase 2)
-
-*Not to be confused with the "Live Activities (Phase 2)" section below --
-that is the notification-experience plan's own Phase 2, already shipped.
-This section is the attention ladder project's Phase 2: the stateful layer
-that wraps Phase 1's `evaluate_ladder` (previous section) and turns a
-stream of detection snapshots into ordinary alert/silent APNs pushes.*
+## Cards: the delivery pipeline
 
 `push/cards.py` (pure), `push/card_store.py` (sqlite), `push/delivery.py`
-(payload + orchestration), and `push/delivery_wire.py` (live wire-up) --
-config-gated behind `push.delivery_enabled` (default **off**), independent
-of `push.enabled` and the situations/Live-Activity machinery below. It
-ships dark: enabling it does not change anything about the v1 or v2
-(situations) paths, which are untouched.
+(payload + orchestration), `push/delivery_wire.py` (wire-up), gated by
+`push.delivery_enabled`.
 
-### The card model
-
-A **card** is the unit of user-facing state: one card per subject. Five
-detections of the same person over two minutes mutate one card, they don't
-create five. `card_key` is stable per ongoing subject and doubles as the
-`apns-collapse-id`:
+A **card** is the unit of user-facing state: one card per ongoing subject.
+Five detections of the same person over two minutes mutate one card.
+`card_key` is stable and doubles as the `apns-collapse-id`:
 
 ```
 {camera}:{subject_kind}:{tracked_object_id-or-opening-id}
-{camera}:system:{reason}                                          # system cards
+{camera}:system:{reason}
 ```
 
-**Zone is deliberately not part of identity**, unlike the design brief's
-literal example. An earlier version keyed on
-`{camera}:{zone}:{subject_kind}:{subject_id}`; the first supervised live run
-(2026-08-08) showed exactly the failure that predicts -- a car first seen
-with no zone, then entering `parking_spot`, produced two cards
-(`alley-wide:_:thing:...-m0d7oe` then `alley-wide:parking_spot:thing:...
--m0d7oe`) for the same tracked object, because the zone-bearing key changed
-out from under it. Zone still travels on every payload as `zone_name` and
-still drives mutation classification when it changes the routed level (an
-enrich, or an escalate/deescalate if the level moves) -- it's mutation
-context, not identity. See `delivery.build_card_key`'s docstring.
-
-A card (`cards.Card`) holds exactly what the mutation classifier and sound
-accounting need: `level`, `created_at`/`updated_at`, `state_since_at` (when
-the *current* level became true -- resets on create/escalate/deescalate,
-held steady across enrich/resolve), `sound_count`, `handled`/`handled_at`,
-`last_sound_at`, `resound_count`, `resolved`, `closed`. Everything else
-(camera, zone, copy) is threaded through the payload builder by the caller
-rather than duplicated on the card -- see `card_store.list_open_urgent_cards`
-for where that context is actually persisted (the `push_cards` table has
-it; the `Card` dataclass doesn't).
+Zone is deliberately **not** part of identity (a live run showed a car
+crossing into a zone forking two cards when it was); zone travels on every
+payload as `zone_name` and drives mutation classification, not identity.
 
 ### Mutation classification
 
@@ -269,591 +134,324 @@ Each new ladder evaluation against a card key is classified
 |---|---|---|
 | `create` | no existing (or closed) card | alert at the routed level, sound per budget |
 | `enrich` | same level, new facts | silent, same collapse id |
-| `escalate` | new level > old level | alert with sound, subject to the budget |
-| `deescalate` | new level < old level | silent, same collapse id |
+| `escalate` | new level > old | alert with sound, subject to the budget |
+| `deescalate` | new level < old | silent, same collapse id |
 | `resolve` | explicit `resolved=True` signal | silent, never a sound |
-| `suppressed` | ladder returns `SUPPRESSED` (muted) | no push; card closes |
+| `suppressed` | ladder returns `SUPPRESSED` | no push; card closes |
 
-**`resolved` is not derived from the level.** A `thing` at a non-street
-place never evaluates below `quiet` (`ladder_policy.TABLE`), so there is no
-`new_level` a caller could pass that would mean "the subject is gone" --
-that has to be an explicit signal from whatever the real end-of-condition
-source is (a Frigate object `end`, a door-closed sensor, `frigate/available`
-coming back). `advance_card(..., resolved=True)` is how the wire-up says so;
-`classify_mutation`'s docstring has the full rationale. Mute beats resolve,
-matching the ladder's own "mute beats everything" rule.
+`resolved` is never derived from the level — a `thing` at a non-street
+place never evaluates below `quiet`, so "the subject is gone" must be an
+explicit signal. It rides on `frigate/events`' object `end` message
+(`handle_delivery_resolve`). Mute beats resolve.
 
-### Sound accounting -- the entire anti-spam policy
+### Sound accounting — the entire anti-spam policy
 
-- Sound **at most twice per card**: once at `create` (only if the level is
-  `notify`/`urgent` -- a `quiet` create never sounds), once at the first
-  `escalate` past `quiet`.
-- Budget is spent by *sounds emitted*, not by beats: a silent `quiet`
-  create doesn't spend it, so the card's first-ever escalation can still be
-  sound #1, and a second escalation (`quiet` → `notify` → `urgent`, say)
-  can legitimately be sound #2.
-- Further escalations after the budget is spent still update level and
-  content, silently.
-- **Urgent re-sound, once:** an `urgent` card unhandled after
-  `push.delivery_urgent_resound_s` (default 120s) may re-alert exactly
-  once (`cards.urgent_resound_due`, `delivery.apply_urgent_resound`),
-  config-gated by `push.delivery_urgent_resound_enabled` (default on).
-  "Handled" is a hook, not a solved problem -- multi-device dismissal sync
-  doesn't exist yet, so today only the sidecar's own timer sets `handled`
-  (there is no client-facing "mark handled" endpoint in this phase). The
-  re-sound is a third, urgent-only sound; it doesn't touch `sound_count`.
-- All accounting lives on the card row, keyed by `card_key`.
+Sound at most twice per card: once at `create` (only if `notify`/`urgent` —
+a `quiet` create never sounds), once at the first escalation past `quiet`.
+Budget is spent by sounds *emitted*, not beats. Further escalations update
+level and content silently. An `urgent` card unhandled after
+`push.delivery_urgent_resound_s` (default 120s) may re-alert exactly once
+(`push.delivery_urgent_resound_enabled`, its own sweep loop in
+`server.py`); this third sound doesn't touch `sound_count`. Settings-side,
+`mute_sounds` and `quiet_hours` (below) can further quiet all of this.
 
 ### Level → APNs mapping
 
 | Level | Push? | `interruption-level` | Sound |
 |---|---|---|---|
-| `urgent` | yes | `time-sensitive` | default sound (no Critical Alerts entitlement -- `critical` is never attempted) |
-| `notify` | yes | `active` | default sound |
+| `urgent` | yes | `time-sensitive` | default (no Critical Alerts entitlement; `critical` is never attempted) |
+| `notify` | yes | `active` | default |
 | `quiet` | yes | `passive` | none |
-| `log` | no | -- | -- (recorded for the timeline/digest, out of scope this phase) |
-| `suppressed` | no, card invisible | -- | -- |
+| `log` | no | — | recorded for the decision trace/timeline |
 
-Silent mutations reuse the same alert-push channel with `aps.sound` omitted
-and the same `apns-collapse-id`, so the card replaces in place --
-`content-available` background pushes are not needed for this.
-
-### Payload contract
-
-`docs/apns-payload-spec.md` is the versioned (`"v": 1`) contract the app and
-NSE build against: `card_key`, `mutation`, `level`, `subject_kind`,
-`place_class`, `camera`, `zone_name`, a semantic `glyph` id (icon mapping is
-entirely client-side), `primary`/`secondary` copy (state-what-is-true
-grammar -- never asserts an identity that hasn't resolved), `event_ts`,
-`state_since_ts`, and optional `media`/`deep_link`. `delivery.build_card_payload`
-implements it; `delivery.py`'s module docstring has the layering.
-
-### Wire-up (ships dark)
-
-`push/delivery_wire.py` hooks into the two entry points every
-`frigate/reviews` and `frigate/events` message already passes through --
-`PushEngine.handle_event` and `handle_object_payload`'s object-end branch --
-guarded by `push.delivery_enabled`. No new transport (sends through the
-existing `PushTransport.send_situation`, same as the situations payload)
-and no new MQTT subscription.
-
-**Snapshot media** (`media`, `docs/apns-payload-spec.md`): on `create`/`enrich`
-only (never `escalate`/`deescalate`/`resolve` -- see the spec doc for why),
-`delivery_wire._media_for` mints a handle (`store.mint_handle`, same table
-situations use) and fires `PushEngine.prewarm_thumbnail` concurrently with
-the send, exactly like the situations path's `_fire_group` -- the push
-carries the URL optimistically and a slow/failed Frigate fetch costs the
-notification its image, never its existence. Unlike situations (which send
-just `handle` + `server_id` and let the already-registered app resolve the
-base URL itself), the card contract documents `media` as one complete,
-self-authorizing URL, so building it needs the sidecar's own phone-reachable
-address -- `push.external_base_url` (empty by default; `media` is simply
-omitted until it's set to something real, e.g. `http://192.168.50.207:5001`
-on this deployment). This is never Frigate's own address -- Frigate stays
-LAN-internal (`frigate.base_url`) and the sidecar re-hosts the fetched
-snapshot behind the handle, same trust boundary as every other push image
-this codebase sends.
-
-**Subject/place classification is a deliberate MVP**, not the full-fidelity
-mapping the ladder deserves: `classify_subject` reads `person` +
-`sub_labels` (known if present, stranger if not -- never the reverse) or an
-animal-label set off `frigate/reviews` alone; `classify_place` looks up
-`event.zones` against `push.delivery_zone_place_map` (falling back to
-`yard` if any zone is present, else `street`). Both are heuristics,
-documented as such, safe to ship because the whole pipeline defaults off.
-Tightening them is a config/data change in `delivery_wire.py`, not a change
-to `ladder.py` or `delivery.py` -- the same policy/evaluation split
-`ladder_policy.py` already established.
-
-Resolution rides on `frigate/events`' object `end` message
-(`handle_delivery_resolve`) rather than being derived from a review, since
-that is the actual "the subject is gone" signal Frigate provides (see the
-mutation-classification note above on why a ladder level can't say this by
-itself). It re-checks every subject-kind's card key for that track id,
-since the object stream alone doesn't carry which kind a review classified
-it as.
-
-The one-time urgent re-sound runs on its own sweep
-(`_delivery_resound_sweep_loop` in `server.py`, interval
-`push.delivery_resound_sweep_interval_s`, default 15s) -- the same "only
-ever tightens, never a keep-alive" shape as the Live Activity resolution
-sweeper below.
+Silent mutations reuse the alert channel with `aps.sound` omitted and the
+same collapse id, so the card replaces in place. A `glance` outcome cell
+demotes the card's banner entirely — Live Activity only (see below).
 
 ### Cross-camera deduplication
 
-Overlapping fields of view mean the same physical event can produce several
-independent cards -- one per camera that happens to track it -- since each
-camera runs its own tracker with its own `track_id`. The first supervised
-run's own numbers made this concrete: one person walking the property
-generated five stranger cards in 30 seconds across `stairway-wide`,
-`stairway-tight`, `alley-wide`, `walkway`, and `street`.
+Overlapping fields of view mean one physical event can produce a card per
+camera. When a fresh `(camera, track_id)` carries a zone,
+`_resolve_card_for_track` looks for an open card with the same
+`subject_kind` and `zone_name` created within the last 15s
+(`_DEDUP_WINDOW_S`); a hit aliases the track onto it
+(`push_card_track_aliases`) instead of minting a new card. The merged
+card's `camera` stays whichever camera created it; the enriching camera
+appears in the copy (`"… · also on {camera}"`). `camera_neighbors` in
+settings extends this: declared-adjacent cameras merge same-kind cards even
+with disjoint zone sets (symmetric at read time — declaring one direction
+is enough). Resolution is asymmetric: an aliased track resolving drops its
+alias silently; only the owning track's resolve closes the card.
 
-Frigate zone names are the correlation signal: two cameras with a zone
-named e.g. `driveway` are assumed to see the same physical space. When a
-*fresh* `(camera, track_id)` -- one with no card of its own yet -- carries a
-zone, `delivery_wire._resolve_card_for_track` looks for an open card with
-the same `subject_kind` and `zone_name` created within the last 15 seconds
-(`_DEDUP_WINDOW_S`; real-world gaps between cameras picking up the same
-walk-through measured 3-4s, so 15s is deliberately generous without risking
-merging genuinely separate events). If one exists, this track is *aliased*
-onto it (`push_card_track_aliases`, keyed on `(camera, track_id)`) instead
-of minting a new card key -- every later event for this track routes
-straight to the merged card via the alias, without re-running the query.
-The merged card's `camera` field stays whichever camera created it first
-(the app's timeline routing depends on that field naming a real,
-resolvable camera); the enriching camera is surfaced in the copy instead
-(`"... · also on {camera}"`).
+### Payload contract
 
-A subject changing zones mid-lifetime on its *own* already-existing card
-(no dedup involved -- see the zone-identity note above) just enriches that
-card's `zone_name` in place, the same as any other mutation; it never
-mints a new key. Three or more cameras sharing a zone all merge onto
-whichever card is oldest, not whichever alias was looked up last.
+`docs/apns-payload-spec.md` is the versioned (`"v": 1`) contract:
+`card_key`, `mutation`, `level`, `subject_kind`, `place_class`, `camera`,
+`zone_name`, a semantic `glyph` id (icon mapping is client-side),
+`primary`/`secondary` copy (state-what-is-true grammar), `event_ts`,
+`state_since_ts`, optional `media`/`deep_link`. Zone display names in copy:
+the sidecar-edited `zone_names` setting wins, Frigate's `friendly_name` is
+the fallback, humanized key last (`policy_settings.zone_display_name`).
 
-No dedup is attempted when either side has no zone at all (Frigate hasn't
-told us where the object is, so there's nothing to correlate on) or when
-`subject_kind` or `zone_name` differ -- those always get independent cards.
-The 15s window is measured from the *candidate* card's `created_at`, so two
-detections of the same subject arriving more than 15s apart (a genuinely
-separate visit) correctly get separate cards.
+`media` is minted on `create`/`enrich` only (never
+escalate/deescalate/resolve): a handle is minted and the thumbnail
+pre-warmed concurrently with the send — a slow or failed Frigate fetch
+costs the notification its image, never its existence. `media` is one
+complete URL built from `push.external_base_url` (omitted until set);
+Frigate itself stays LAN-internal and the sidecar re-hosts the snapshot
+behind the handle.
 
-Resolution stays asymmetric on purpose: an aliased (non-owning) track
-resolving just drops its alias silently -- the owning camera may well still
-be tracking the subject, so the shared card is not touched. Only the
-*owning* camera's track resolving (its own natural card key, no alias)
-resolves the card, exactly as it always did before dedup existed. If a
-still-tracking secondary camera keeps reporting after that, it gets a fresh
-card under its own key on the next event, per the ordinary create path --
-by then it will typically have moved to a different zone anyway (the same
-walk-through scenario that motivated this feature in the first place).
+## Live Activities
 
-No configuration knob for v1 -- the zone-name-equality assumption is
-undocumented policy, not a setting: a camera that happens to reuse a zone
-name for a genuinely different physical space (a coincidence, not a
-correlated view) would incorrectly dedup against it. That's an explicit
-non-goal this phase, same spirit as every other MVP heuristic in this
-module.
+`push/live_activities.py` (pure) plus `_deliver_live_activities` in
+`delivery_wire.py`, gated by `push.delivery_la_enabled` (default on, only
+reachable through `push.delivery_enabled`).
 
-### Tests
+**Three tokens.** The device's alert token carries ordinary pushes.
+`push_to_start_token` (one per install, on the registration) creates
+activities. A per-activity token, uploaded via `POST
+/v1/push/activity/token` once iOS mints it, carries updates and the end —
+iOS rejects update/end on the push-to-start token. There is always a window
+where an activity is on screen the sidecar cannot yet update; updates
+resume on the next observation. A card that resolves before its token
+arrives is flagged `pending_end` and the token-upload route sends the
+deferred end immediately (`end_activity_if_card_closed`).
 
-`fixtures/ladder/delivery_cases.json` + `tests/test_push_delivery.py`
-extend the ladder's golden-suite approach to **sequences**: each case is an
-ordered list of snapshots (plus, for the urgent case, timer checks and a
-"mark handled" event) against one card key, with an expected
-`(mutation, level, sound, push)` row per step. `tests/test_push_cards.py`
-and `tests/test_push_card_store.py` cover the pure classifier/sound-budget
-logic and the sqlite persistence directly; `tests/test_push_delivery_payload.py`
-covers payload construction and the send/sweep orchestration against
-`LogTransport`.
+**Families** (`should_start_activity`, gated by the per-family booleans in
+`settings.live_activities`): `package`, `bins`, `openings` (with
+`opening_picks` — empty means "nothing curated yet, everything qualifies",
+not "nothing qualifies"), `person` (person at `doors`), and an `activity`
+catch-all used when Live Activities are the sole surface.
 
-### Not built this phase
+**Glance / la_only.** A `glance` outcome cell is la_only applied per cell:
+the card runs a Live Activity and its banner push is demoted to
+passive/silent. The global `live_activities.la_only` flag does the same for
+every pushable card — starts carry no sound, updates never carry an alert
+dict, the urgent re-sound is silent. Both `la_only` and
+`live_activities.delivery` (`la_first` | `notifications`) are **sticky**
+across PUTs that omit them, because the app's settings model round-trips
+through a fixed Codable type that drops unknown keys.
 
-The daily digest and any settings/config UI surface for cards -- out of
-scope, per the design brief. `ladder.py`/`ladder_policy.py` are untouched.
-(Live Activity start/update/end and pushToStart tokens for cards *were*
-this phase's own "not built" list -- see "Live Activities for cards" below,
-Elsinore Phase 3.)
+**Lifecycle.** `start` (push-to-start token, on a qualifying create;
+carries `attributes` / `attributes-type: "ElsinoreActivityAttributes"` —
+the exact Swift type ActivityKit routes by) → `update` (per-activity token,
+on later mutations, silent by construction) → `end` (on resolve;
+`dismissal-date` is timestamp + 30 so the resolved state shows briefly).
+`content-state` field names are snake_case to match the Swift `CodingKeys`:
+`level`, `mutation`, `glyph`, `primary`, `secondary`, `elapsed_seconds`,
+`deep_link_card_key`, `thumbnail_handle`, `thumbnail_revision` (the same
+handle the card push's `media` uses — no second handle per snapshot).
+Updates are rate-limited per activity (`_LA_UPDATE_MIN_INTERVAL_S`, 3s) and
+delta-gated (in-memory previous-state snapshot; a restart just means the
+first post-restart push always goes out). `camera_headings` /
+`camera_layout` / `secure_area` / `map_scale_ft` in settings feed the LA's
+heading chip and map trail (`derived_camera_heading` projects "toward home"
+from drawn geometry; an explicit heading always wins) — display only, never
+routing.
 
-## Live Activities for cards (Elsinore Phase 3)
+Activities live in the `push_activities` table keyed on
+`(apns_token, situation_id, track_id)` — one activity per (device, card),
+which a nullable column on `push_cards` could not represent. The track id
+is parsed from `card_key`'s final component, so cross-camera dedup keeps
+updating the same activity. `DELETE /v1/push/activity/token/{activity_id}`
+drops the row when the app ends the activity locally.
 
-*Not the same feature as "Live Activities (Phase 2)" below -- that is the
-notification-experience plan's own Live Activity for **situations**
-(`push/activity.py`, `ATTRIBUTES_TYPE = "SituationActivityAttributes"`,
-already shipped). This is a Live Activity for **cards** (`push/cards.py`,
-the previous section), an additional output channel on the same card
-lifecycle -- create/enrich/escalate/deescalate/resolve -- the ordinary card
-push already drives. The two run independently and share nothing but the
-`push_activities` table.*
+## Situations (legacy v2 registration path)
 
-`push/live_activities.py` (pure: family detection, glyph mapping, the three
-payload shapes) plus the wiring inside `push/delivery_wire.py`
-(`_deliver_live_activities`), gated by `push.delivery_la_enabled` (default
-**on**, but only ever reachable through `push.delivery_enabled` -- an LA is
-additive to a card, never a substitute for it).
+A device registering with a non-empty `situations` array (user-authored
+rules over camera + label + zone + loiter + time-of-day,
+`push/situations.py`) evaluates situation-only; its v1
+`cameras`/`labels`/`min_severity` survive as a pre-filter. A device with no
+situations fires on the plain v1 filters. Both predate the card pipeline
+and still work; supporting pieces: starter library
+(`GET /v1/push/situations/library`), rate limiting (10 pushes per situation
+per device per rolling hour, counted in SQLite, `" · +X more"` suffix on
+the next push through), `sent_at` epoch-ms stamping for the app's
+`sidecar_to_nse_ms` latency measurement, and a Present-tier Live Activity
+stage machine (`push/activity.py`) with its own resolution sweeper and
+budgets (`activity_updates_per_hour`).
 
-### Family detection
+## The settings document
 
-A card qualifies for a Live Activity when it maps to one of four families
-(`live_activities.should_start_activity`, MVP hard-coded rules):
+`push/policy_settings.py` owns the shape, defaults, validation,
+persistence (`config/push_settings.json` — JSON, not YAML, because the app
+PUTs JSON and YAML type coercion on the way back out is a bug factory), and
+application. Top-level keys, per `default_settings()`:
 
-| Family | Rule |
+| Key | Contents |
 |---|---|
-| `package` | `subject_kind == "thing"` and label `"package"` |
-| `bins` | `subject_kind == "thing"` and label `"waste_bin"` or `"garbage_truck"` |
-| `openings` | `subject_kind == "thing"` and label in `{"door", "gate", "garage"}` |
-| `person` | `subject_kind in ("stranger", "known")` and `place_class == "doors"` |
-| `activity` | catch-all, only in `live_activities.la_only` mode: any pushable card the rules above miss |
+| `v` | `SETTINGS_VERSION` (1), bumped only on breaking shape changes |
+| `outcomes` | **authoritative** subject × place → outcome grid (v2 subjects) |
+| `routing_table_v2` | derived levels the evaluator consumes |
+| `routing_table` | legacy v1 (stranger/known) table, kept for old clients |
+| `recognition` | `known_person` / `known_vehicle`: `off` \| `relax_one` \| `relax_to_quiet` |
+| `zone_classes` | zone → place class (user-confirmed) |
+| `zone_names` | zone → display name for notification copy; wins over Frigate's `friendly_name` |
+| `zone_overrides` | `{zone: {subject: level}}` — outranks everything but mute/system/safety |
+| `live_activities` | per-family booleans, `opening_picks`, `delivery`, `alert_all_changes`, `la_only` |
+| `escalation_sound`, `mute_sounds` | sound tuning |
+| `quiet_hours` | `null` or `{start, end, mode}` (HH:MM, wrap-around ok; `cap_quiet` \| `mute_sounds`) |
+| `camera_neighbors` | camera → adjacent cameras, for cross-camera dedup |
+| `camera_headings` | camera → unit `{dx, dy}` "toward home" vector (LA heading chip) |
+| `camera_layout` | camera → `{x, y[, azimuth, fov]}` on the layout map |
+| `secure_area`, `map_scale_ft` | drawn secure rectangle and map scale (world projection) |
 
-`live_activities.la_only` (settings, default `false`): Live Activities are
-the sole surface. Every pushable card gets an activity (the `activity`
-catch-all family, glyphed per subject kind), every card push is demoted to
-passive/silent regardless of LA confirmation, LA starts carry no sound, LA
-updates never carry an alert dict, and the urgent re-sound is silent. The
-flag is sticky across `PUT /v1/push/settings` calls that omit it, because
-the app's settings model round-trips through a fixed Codable type.
+`validate_settings` returns human-readable errors; unknown *top-level*
+fields are ignored (forward compat), but an unknown subject/place/family
+key inside a known block is a 400 — those vocabularies are closed, so a
+typo there is more likely a client bug than a field the sidecar hasn't
+learned. `normalize_settings` merges a partial document onto defaults so an
+older-shaped file works forever; empty zone-override rows are dropped on
+save. `zone_overrides` outer keys are unrestricted (the user may configure
+a zone before it exists in Frigate); the inner vocabulary is closed.
+`save_settings` is write-then-rename; `load_settings` falls back to plain
+defaults on a missing or corrupt file rather than failing every evaluation.
 
-`push.delivery_la_families` (`{family: bool}`, absent or `True` = enabled)
-is checked last, wrapping detection rather than replacing it -- a disabled
-family's cards never start an activity even when they'd otherwise match,
-but the rules above don't need config to exist at all. One activity per
-`(device, card)`: a card already running one for a device gets updates, not
-a second start.
+### Settings sync: `GET`/`PUT /v1/push/settings`
 
-### Push-to-start, updates, and end
+`GET` returns the *live, applied* policy (`get_active()`), never an
+independent disk read, so it can never show something other than what the
+evaluator is using; a fresh install's first `GET` creates the file. The
+response wraps `settings` with derived, read-only context so the app needs
+no second call: `available_cameras`, `available_zones` (each with cameras,
+`guessed_class`, `friendly_name`), `available_openings`, `derived_headings`,
+`placement_deployments`, `recognition_available`.
 
-Three payload shapes (`live_activities.build_la_start_payload` /
-`build_la_update_payload` / `build_la_end_payload`), all
-`apns-push-type: liveactivity`, `apns-topic:
-com.houseofpaimon.Elsinore.push-type.liveactivity`:
+`PUT` validates, normalizes, persists, and applies immediately
+(`apply_settings` → `set_table` / `set_off_cells` / `set_zone_overrides`;
+everything else is read via `get_active()` per card event). Config-side
+keys the app has no UI for (`camera_neighbors`, `camera_headings`,
+`camera_layout`, `zone_names`) are sticky unless explicitly sent, as are
+`la_only` and `delivery`; `secure_area` / `map_scale_ft` distinguish absent
+(sticky) from explicit null (clear).
 
-* **start** -- to the device's push-to-start token, on a qualifying card's
-  `create`. Carries `attributes`/`attributes-type` (`"ElsinoreActivityAttributes"`
-  exactly -- the Swift type ActivityKit routes the push by) and
-  `content-state`.
-* **update** -- to the per-activity token the app uploads via the existing
-  `POST /v1/push/activity/token` after the activity starts, on every later
-  mutation (`enrich`/`escalate`/`deescalate`). Silent by construction (no
-  `alert` key).
-* **end** -- on `resolve`. `dismissal-date` is `timestamp + 30`: the resolved
-  state shows briefly, then iOS clears it from the lock screen (the
-  activity itself lingers in the recent-activities area up to 4h more,
-  system-controlled). Sent via the per-activity token only -- iOS rejects
-  update/end on the push-to-start token. A card that resolves before the
-  token arrives leaves its row open flagged `pending_end`; the
-  `POST /v1/push/activity/token` route sends the deferred end the moment
-  the token lands (`delivery_wire.end_activity_if_card_closed`).
+## Decision trace and the tuning loop
 
-`content-state` (`live_activities.build_content_state`) field names are
-snake_case to match the Swift type's `CodingKeys` exactly: `level`,
-`mutation`, `glyph`, `primary`, `secondary`, `elapsed_seconds`,
-`deep_link_card_key`, `thumbnail_handle`, `thumbnail_revision`.
-`elapsed_seconds` is `int(now - card.state_since_at)`, the same clock the
-ordinary card payload's `state_since_ts` reports. `glyph`
-(`live_activities.glyph_for`) is a semantic SF-Symbol-or-documented-custom-
-name id; `resolve` always reports `checkmark.circle.fill` regardless of
-family, checked before any family-specific branch.
+`GET /v1/push/decisions` serves `push/decision_trace.py`: an in-memory ring
+buffer (500 entries, 200 served max) of routing decisions, one per event
+pre-fanout, newest first. Each entry: `id`, `ts`, `camera`, `label`,
+`subject`, `zones`, `place`, `level`, `reasons`, `event_id`. Append never
+raises and losing the buffer on restart is acceptable. This feeds the app's
+Recent Decisions screen — the tuning loop is: see a decision you disagree
+with, see which cell/override/reason produced it, change that cell, and the
+next evaluation uses the new policy. `POST /v1/push/feedback` logs a
+per-card verdict (tuning trace only; no routing changes yet).
 
-**Thumbnails reuse the existing handle/prewarm infrastructure unchanged**
-(`_media_for`, same section above): the bare handle minted for the ordinary
-card push's `media` field is threaded through as `thumbnail_handle` too,
-bumping `thumbnail_revision` whenever a fresh one is minted (never on
-`escalate`/`deescalate`/`resolve`, same `_MEDIA_MUTATIONS` gate). No second
-handle is minted for the same snapshot.
+## HTTP surface (`routes/push.py`)
 
-### Where the activity lives: `push_activities`, not a `push_cards` column
+All routes share the sidecar's Frigate-session auth (no second credential)
+except `GET /v1/push/thumbnail/{handle}`, protected by the handle itself
+being opaque, unguessable, and short-lived — the NSE holds no session.
 
-Reuses the *situations* Live Activity's own table and `store.py` helpers
-(`open_activity`/`find_activity`/`touch_activity`/`close_activity`/
-`record_activity_send`) rather than adding a column to `push_cards`.
-`situation_id` is just a text column, and a card's `card_key` fits it
-exactly as well as a situation id does. This is a deliberate departure from
-a `push_cards.la_activity_id` column: a Live Activity is one per
-**(device, card)**, and `push_cards` is one row per card -- a card with two
-push-to-start-registered devices runs two independent activities on two
-different tokens, which a single nullable column cannot represent, but
-`push_activities`, keyed on `(apns_token, situation_id, track_id)`, already
-does. The track id used for that key is parsed back out of `card_key`
-(its final `:`-separated component) rather than whatever camera's event
-triggered the current mutation -- stable across cross-camera dedup, so a
-card merged onto by a second camera keeps updating the same activity
-instead of forking a second one that would never get a token.
+- `PUT` / `DELETE /v1/push/devices/{apns_token}` — idempotent registration
+  keyed on the token; the response echoes the `schema_version` the sidecar
+  will evaluate under, `situations_accepted`, and Live Activity readiness.
+  Unknown body fields are accepted, dropped, and logged by name. Omitting
+  `snoozes` leaves existing ones alone; explicit `[]` clears them.
+- `POST /v1/push/devices/{apns_token}/test` — one fixed test push, bypassing
+  filters but not environment routing. 404 means "token not registered"
+  (reserved — the released client maps it to a specific message), 503
+  `push_disabled`, 502 `test_send_failed`. `{"sent": true}` means APNs
+  accepted; there is no delivery receipt.
+- `GET /v1/push/situations/library`, `GET /v1/push/sounds` — starters and
+  the sound catalog (keyed on `app_version`; the `.caf` assets ship in the
+  app bundle).
+- `POST /v1/push/snooze`, `DELETE /v1/push/snooze/{scope}` — **deprecated**,
+  superseded by `registration.snoozes` (full-state replace on every device
+  PUT); kept one release. Scopes: `global`, `situation:<id>`,
+  `camera:<name>` (per-device — snoozing the iPad must not quiet the
+  iPhone). Expiry is a timestamp, not a scheduled job.
+- `POST /v1/push/test/{situation_id}` — fire one real situation push at the
+  named device, running the whole real path; snooze and rate limits are
+  bypassed and the send isn't charged.
+- `POST /v1/push/activity/token`, `DELETE /v1/push/activity/token/{id}` —
+  Live Activity token upload / local-end teardown (see above).
+- `GET /v1/push/thumbnail/{handle}`, `GET /v1/push/handle/{handle}` —
+  pre-warmed snapshot bytes; handle → `{camera, event_id, snapshot_url}`.
+- `GET /v1/push/decisions`, `GET`/`PUT /v1/push/settings`,
+  `POST /v1/push/feedback` — see above.
 
-### What ends an activity
+## Privacy model and the relay
 
-`resolve` is the only path that ends a card-model activity -- there's no
-separate resolution sweep the way the situations Live Activity has one,
-because a card's own resolve signal (`delivery_wire.handle_delivery_resolve`,
-`frigate/events` object `end`) already is that authoritative "gone" signal.
-Cross-camera dedup's asymmetric resolve applies unchanged: a merged
-(non-owning) track resolving drops its alias and touches neither the card
-nor its activity; only the owning track's resolve ends both.
+The relay's inputs for v1 pushes are exactly `{device_token, environment,
+handle, server_id, severity}` — no camera name, label, or anything
+content-bearing reaches the transport layer. Camera/label/thumbnail are
+only available after the NSE redeems the handle from the user's own server;
+the handle→event mapping never appears in the APNs payload. Snapshots never
+transit the relay at all — the sidecar pre-warms a ~320px/q60 thumbnail
+under the handle for 24h and the NSE fetches it locally.
 
-### Tests
+The transport is an interface (`push/transport.py`): `LogTransport` (the
+default, `push.transport: mock`, what every test runs against) and
+`RelayTransport`, which posts to
+[elsinore-push-relay](https://github.com/helicopterrun/elsinore-push-relay)
+(a Cloudflare Worker holding the one team-bound APNs key). Four relay
+routes, because they differ in exactly the fields the relay controls:
 
-`tests/test_push_live_activities.py` covers the pure logic (family
-detection, glyph mapping, the three payload shapes) directly.
-`tests/test_push_live_activities_wire.py` runs full lifecycles through
-`handle_delivery_event`/`handle_delivery_resolve` against `LogTransport`:
-create → enrich → escalate → resolve with incrementing `elapsed_seconds`
-and the right event/mutation at each step, a non-qualifying card producing
-zero activity pushes, a device with no push-to-start token getting no
-activity while its ordinary card push is unaffected, a late per-activity
-token dropping (not buffering) the update it missed, a resolve landing
-before any per-activity token arriving falling back to the push-to-start
-token, and cross-camera dedup producing exactly one activity for the
-surviving card.
+- `/v1/relay/push` — v1-shape, relay templates the text by severity.
+- `/v1/relay/test` — fixed test text, no `handle`, no `mutable-content`.
+- `/v1/relay/situation` — sidecar-built full APNs body forwarded verbatim
+  (a situation's title is user-authored; a severity template can't produce
+  it). The relay signs the JWT, sets topic/push-type/priority, validates
+  `payload.aps`, and 422s anything over 4KB. Card payloads ride this route
+  too (`send_situation`). The relay forwards these bytes in flight without
+  persisting, logging, or inspecting them — "content-free *at rest*".
+- `/v1/relay/liveactivity` — `apns-push-type: liveactivity`, topic
+  `<APNS_TOPIC>.push-type.liveactivity`, `event: start|update|end` so the
+  relay can validate shape (a start must carry `attributes`). Delivery
+  hints ride as `apns_priority`/`apns_expiration` (underscores — the
+  relay's key spelling; hyphenated keys are ignored).
 
-## Attention ladder settings API (Elsinore Phase 4)
+**`prod` vs `production`.** This sidecar's API, its DB CHECK constraint,
+and the spec all spell it `prod`; the relay's wire API spells it
+`production` and 422s anything else. `RelayTransport` translates at that
+one boundary so `prod` stays the only spelling everywhere else here.
+Registration requires the app to state `environment` explicitly (read from
+its own `aps-environment` entitlement) — sandbox and production APNs are
+different endpoints and it is never inferred. The test-push route
+deliberately keeps environment routing so a black-holed mismatch fails
+visibly there.
 
-Phases 2/3 shipped the routing table, zone-place classification, and Live
-Activity family toggles as hardcoded data (`ladder_policy.TABLE`) or static
-YAML config (`push.delivery_zone_place_map`, `push.delivery_la_families`).
-Phase 4 makes all three user-editable from the app: a compact 4x5 routing
-grid, a zone-class assignment screen, and LA family toggles, all backed by
-one settings document and `GET`/`PUT /v1/push/settings`.
+**`apns-collapse-id` is capped at 64 bytes** (Apple, and the relay
+truncates rather than rejects). `build_collapse_id` trims from the head and
+keeps the track id whole, so two subjects 30s apart never share a collapse
+id.
 
-`push/policy_settings.py` owns the document's shape, defaults, validation,
-persistence (`config/push_settings.json`, JSON rather than YAML -- the app
-PUTs a JSON body and round-tripping it through YAML's type coercion on the
-way back out is a bug factory, not a feature), and *application*.
-"Applies immediately" is literal: `apply_settings` pushes the new routing
-table straight into `ladder_policy.set_table` (see below), and
-`zone_classes`/`live_activities` are read fresh from `get_active()` on
-every card event -- there is no cache to invalidate anywhere else.
+## Failure modes
 
-### The document
+- A `410`/`400` from the transport is a permanent dead token: the device
+  row is pruned immediately (`push/engine.py`), never retried. This is the
+  primary cleanup path — the app can't promise to DELETE before uninstall.
+- Any other transport/network error is logged and left for the next live
+  event — no retry queue; the system degrades to no notifications, not a
+  crash.
+- A missing/corrupt settings file falls back to defaults, never a failed
+  evaluation.
+- Every thumbnail failure path costs the notification its image, never its
+  existence; a thumbnail/handle miss is a 404 and the alert delivers
+  without an image.
+- MQTT outages reconnect with backoff and back-fill the missed window.
 
-```json
-{
-  "v": 1,
-  "routing_table": { "stranger": {...5 places...}, "known": {...}, "animal": {...}, "thing": {...} },
-  "zone_classes": { "front_entry_person": "doors", "driveway": "yard", ... },
-  "live_activities": { "package": true, "bins": true, "openings": true, "person": true,
-                        "opening_picks": ["front_gate", "garage"] }
-}
-```
+## Tests
 
-Defaults (`policy_settings.default_settings`) match the product brief's
-table exactly, so a fresh install behaves identically before the user ever
-opens settings. **This default table is a separate literal from
-`ladder_policy.TABLE`'s own built-in default** (`thing` no longer defaults
-to `quiet` at yard/doors/private) -- the two are allowed to diverge on
-purpose: one is "what the routing engine ships with if nothing ever
-touches it" (Phase 1's own tested baseline, `tests/test_push_ladder.py`),
-the other is "what a freshly onboarded settings file starts the user at".
-A real deployment always calls `policy_settings.startup` from `server.py`'s
-lifespan before any card can be evaluated, so in production this
-distinction is invisible -- it only matters to tests, which is exactly why
-`tests/conftest.py` carries an autouse fixture snapshotting and restoring
-`ladder_policy.TABLE` around every test.
+- `tests/test_push_ladder.py` + `fixtures/ladder/ladder_cases.json` — the
+  evaluator's golden suite (hand-authored precedence rows).
+- `fixtures/ladder/delivery_cases.json` + `tests/test_push_delivery.py` —
+  golden *sequences*: ordered snapshots against one card key with an
+  expected `(mutation, level, sound, push)` per step.
+- `tests/test_push_cards.py` / `test_push_card_store.py` /
+  `test_push_delivery_payload.py` — classifier, sound budget, persistence,
+  payload/orchestration against `LogTransport`.
+- `tests/test_push_live_activities.py` / `_wire.py` — family detection,
+  payload shapes, and full lifecycles including token-race and dedup cases.
+- `tests/test_push_policy_settings.py` / `test_push_settings_routes.py` /
+  `test_push_delivery_wire.py` — settings defaults, validation, the
+  zone-guessing heuristic, persistence, that `apply_settings` changes real
+  evaluation output, and the HTTP surface end to end.
 
-### Routing engine wiring
-
-`ladder_policy.set_table` rebinds the module-level `TABLE` dict.
-`ladder.py`'s own evaluation order otherwise didn't need to change to make
-the table live -- it already reads `policy.TABLE` as a bare module
-attribute at call time (not at import time), so simply rebinding it is
-enough for `evaluate_ladder` to pick up the new table on its very next
-call. The one addition to `ladder.py` itself is the per-zone override
-below, which needed a new `Snapshot.zone` field to have a zone name to key
-on at all.
-
-### Per-zone subject overrides (addendum)
-
-A zone can be assigned an area type (`zone_classes`, above) *and*
-separately override specific subjects within it to a different level --
-"front porch is Semi-private [doors], but Things [packages] there should
-always Banner [notify] with sound" without changing how every other doors
-zone, or every other subject in this one, routes.
-
-`settings.zone_overrides` (`{zone: {subject: level}}`) is checked by
-`ladder.evaluate_ladder` right after the dangerous-animal reclassification
-and before the base table lookup (`ladder_policy.ZONE_OVERRIDES`, the same
-rebind-a-module-global mechanism as `TABLE`). A hit returns that level
-directly -- it bypasses the base table *and* the nudge/floor/caps that
-would otherwise run on a table-derived result, because "always" is the
-whole point of an override; it does not stack with or modulate the base
-level, it replaces it outright. It's checked after mute/system-card/safety-
-exception handling, though, since those are hard invariants the override
-mechanism was never meant to relax.
-
-Validation is deliberately looser on the outer key than everywhere else in
-this document: a zone name in `zone_overrides` doesn't have to exist in
-`available_zones` (the user may configure an override before the matching
-camera/zone exists in Frigate), but the inner subject/level vocabulary is
-exactly as closed as the base table's. An override entry that ends up
-empty (explicitly saved empty, or emptied by validation dropping an
-invalid inner key) is removed on save rather than kept as a no-op entry.
-
-### Zone classification
-
-`delivery_wire.classify_place` now checks `settings.zone_classes` first,
-falling back to `policy_settings.guess_zone_class` (the same name-guessing
-heuristic `available_zones` exposes) for a zone nobody has explicitly
-classified yet -- a new zone (the user just added a camera) gets a
-reasonable class immediately instead of silently defaulting to a flat
-"yard" forever. The guess checks doors/off-limits/street/private/yard
-patterns in that order (most specific and most alarming first) against the
-zone's own name, then its camera's name if the zone name itself doesn't
-match anything -- resolving two real collisions: "front_entry_person"
-contains both a `yard` hint ("front") and a `doors` hint ("entry")
-(`doors` wins), and "sidewalk" (a literal `street` pattern) contains "side"
-(a `private` pattern) as a substring (`street` wins, checked first).
-`push.delivery_zone_place_map` (Phase 2) is no longer read.
-
-### Live Activity family gating
-
-`live_activities.should_start_activity` takes `families_enabled` (from
-`settings.live_activities`) and, for the `openings` family specifically,
-`opening_picks`/`opening_ids`: an empty or absent `opening_picks` is read
-permissively (nothing curated yet, every opening qualifies) rather than as
-"nothing qualifies" -- the family toggle is the full kill switch; an empty
-picks list is a not-yet-configured state, not a choice. `opening_ids` is
-checked against both the card's zone name and camera, so a pick can name
-either. `push.delivery_la_families` (Phase 3) is no longer read;
-`push.delivery_la_enabled` remains the separate, whole-feature kill switch
-above all of this.
-
-### `GET`/`PUT /v1/push/settings`
-
-`GET` returns the *live, applied* policy (`policy_settings.get_active()`),
-never an independent disk read -- they're identical once startup or a
-prior `PUT` has run, and this guarantees `GET` can never show something
-other than what the routing engine is actually evaluating against. A fresh
-install with no settings file gets one created (with defaults) on the very
-first `GET`, so `GET` and on-disk state can never quietly disagree before
-the first `PUT`. The response also carries `available_zones` (every zone
-across every camera in Frigate's config, via the existing `zones.py`
-reader, each with its `guessed_class`) and `available_openings`, so the
-app's zone-assignment and opening-picks screens don't need a second call.
-
-`PUT` validates (`policy_settings.validate_settings`) before persisting or
-applying anything: `routing_table` must cover exactly the four subjects x
-five places with a valid level in each cell; `zone_classes` values must be
-a valid place class; `live_activities` keys must be one of the four
-families (plus `opening_picks`) with boolean values. Unknown *top-level*
-fields are ignored (forward compat); an unknown subject/place/family key
-inside a known block is a `400` -- those vocabularies are closed, so a typo
-there is much more likely a client bug than a field this sidecar hasn't
-learned about yet. A syntactically valid but partial document (missing a
-newer field) is filled in from defaults (`policy_settings.normalize_settings`)
-rather than rejected, so an older-shaped file keeps working forever.
-
-### What did not change
-
-The routing evaluator's nudge/floor/cap logic (`ladder.py`) is unchanged in
-substance -- the one addition is the per-zone override check itself (the
-addendum above), which is a new, explicit, user-controlled bypass, not a
-change to how the existing exceptions/nudges/caps behave when no override
-applies. The card push delivery pipeline, the card identity key scheme, the
-APNs payload format, cross-camera dedup, and the LA push payload format are
-all unchanged -- only the base routing table, zone-class assignment,
-per-zone subject overrides, and LA family toggles became user-editable
-this phase. Wire-format vocabulary (`street`/`yard`/`doors`/`private`/
-`off_limits`, `log`/`quiet`/`notify`/`urgent`, `stranger`/`known`/`animal`/
-`thing`) is unchanged; any display-label renaming (e.g. "Street" →
-"Public") is the app's own presentation layer and never reaches the wire.
-
-### Tests
-
-`tests/test_push_policy_settings.py` covers defaults, validation, the
-zone-guessing heuristic (every pattern plus the default and collision
-cases), persistence (missing/corrupt/partial file), that `apply_settings`
-actually changes what `evaluate_ladder` returns, and the per-zone override
-addendum specifically: present bypasses the base table, absent falls
-through unchanged, a different zone or a different subject in the same
-overridden zone is unaffected, invalid inner subject/level values are
-rejected, and an empty (or emptied-by-filtering) override entry is dropped
-on normalize. `tests/test_push_settings_routes.py` covers the HTTP surface
-end to end (`GET` defaults and creates the file,
-`available_zones`/`available_openings` from a fake Frigate config, `PUT`
-persists/validates/applies immediately, including `zone_overrides`
-specifically).
-`tests/test_push_delivery_wire.py` carries integration tests confirming a
-`PUT`-equivalent `apply_settings` call changes real card evaluation output
-one layer below the route -- for the routing table, for zone classes, and
-for a zone override reaching a real card end to end.
-`tests/test_push_live_activities_wire.py` carries the same one layer below
-the HTTP route.
-
-## Live Activities (Phase 2)
-
-Present-tier situations stop being silent and start living in a Live Activity:
-the object enters the zone, the Dynamic Island grows a snapshot and a timer,
-and only if the situation crosses its own escalation bar does anything buzz.
-
-**Three tokens, three purposes.** The alert token (Phase 1, the URL path of the
-registration) still carries alerts. `push_to_start_token` — one per app
-install, on the registration record — creates activities. A *per-activity*
-token, uploaded by the app once iOS mints it, carries updates and the end.
-
-**The stage machine** (`stage` on the per-track store, mirrored on the
-`push_activities` row):
-
-| Transition | Push | Token |
-|---|---|---|
-| conditions first match → `arriving` | start | push-to-start |
-| still dwelling → `present` | update (silent) | per-activity |
-| escalation trigger → `escalated` | **update-shape LA push + `alert` + `sound`** | per-activity |
-| zone exit / object end / 30s quiet → `ending` | end + `dismissal-date` | per-activity |
-
-- **The activity starts before the loiter threshold.** Loiter decides the
-  *interrupt*, not the activity — plan §3 has the LA appear at "0:04" and
-  escalate at five seconds.
-- **Escalation is one live-activity push that also buzzes** — an `update`
-  shape carrying `alert` and `sound` at the `aps` level, which iOS 17.2+
-  delivers as a single event: ContentState advances, banner shows, sound
-  plays. It is *not* an alert push with a matching collapse id: that collapses
-  in Notification Center but cannot advance a Live Activity's ContentState, so
-  the banner and the activity would drift apart (plan amended, Elsinore
-  `98e447e`). The alert shape survives only as the fallback for a device with
-  no activity to advance — start failed, or the per-activity token hasn't been
-  uploaded yet. Buzzing without advancing beats not buzzing.
-- **Only Present-tier situations run activities.** Interrupt-tier ones are
-  Phase 1, unchanged. As of Phase 2 the `at-the-door` starter ships as Present
-  with `escalation: loiter_exceeds:5` — the LA experience's poster child, and
-  it cannot be that while authored at Interrupt, which fires once and is over.
-- **Fallback:** a device with situations but no `push_to_start_token` gets
-  Phase 1-shape alert pushes for its Present-tier situations. "The app works
-  without Phase 2."
-- **Budgets:** LA pushes are metered separately (`activity_updates_per_hour`,
-  60) from the alert ceiling (10), and updates are coalesced to one per
-  activity per `activity_update_min_interval_s` (3s). Updates fire on
-  `frigate/events` observations, never on a timer — the only clock-driven job
-  is the resolution sweeper, which exclusively *ends* activities.
-- **Early fire** (`detection_tier_early_fire`): the activity also starts on a
-  `detection`-severity review, ~500ms ahead of the `alert` promotion, and the
-  severity pre-filter is relaxed for exactly those situations. One that never
-  promotes ends with a 10s tail instead of 30s.
-
-### Loiter needs `frigate/events`, not `frigate/reviews`
-
-The plan derives dwell by holding a first-seen timestamp against subsequent
-`frigate/reviews` `type: update` messages. Measured against this deployment
-(19.6 min of live traffic, 2026-08-05) that topic published **4 messages**:
-two review items, each a `new` and an `end` ~30s apart, with no `update`
-between them. Frigate publishes a review update when the item's *data* changes
-— a new object, a new zone, a severity promotion — not on a clock, so a person
-standing still is exactly the case that generates no traffic. A loiter
-threshold fed only from there is never re-evaluated and never fires.
-
-`frigate/events` published 2031 messages over the same window (~0.2–0.5s per
-object) and carries `current_zones` — live occupancy, which *drops* a zone when
-the object leaves, unlike the review topic's cumulative `zones`. So dwell comes
-from there: entry timestamps that reset on a real exit, and a tick to
-re-evaluate against.
-
-`frigate/reviews` remains the sole authority on whether anything is
-push-worthy — a `frigate/events` message can only fire a situation for a track
-some review message already declared alert-worthy. Set
-`push.dwell_source: reviews` to restore the literal prescribed behaviour.
-
-## Decision override from the spec
-
-The spec's §4 leaves the relay-visible alert text as an open product
-question ("New alert on {camera}" vs. fully generic). **This implementation
-takes the generic option**: the relay's inputs are exactly
-`{device_token, environment, handle, server_id, severity}` — no camera name,
-label, or anything content-bearing ever reaches the transport layer, mock or
-relay. The specific camera/label/thumbnail are only available after the NSE
-redeems the handle from the user's own server.
-
-## Ambiguities resolved while building
-
-- **`review.id` vs. Frigate event id.** The spec's handle example maps to a
-  Frigate *event* id (`after.data.detections[...]`), which is distinct from
-  the *review* id (`after.id`) used for `apns-collapse-id`. Both are tracked
-  on `ReviewEvent` (`event_id` vs. `review_id`); the handle stores the event
-  id, the collapse id stays the review id. If a review item somehow arrives
-  with an empty `detections` list, `event_id` falls back to `review_id`
-  rather than erroring.
-- **Backfilled events have no `severity`.** `/api/events` (used for the
-  broker-blip back-fill) has no live review-item concept and no `severity`
-  field. Resolution: every back-filled event is treated as `severity="alert"`
-  — the conservative choice, since a missed alert during an outage is worse
-  than one extra low-priority push — with the event's own `label` used for
-  the label filter.
-- **`server_id`.** Left blank by default and derived from the running
-  process at startup (`f"s_{id(app):x}"`) rather than requiring an operator
-  to mint one, since the spec only requires it be *stable enough* to route a
-  multi-server device's NSE fetch, not globally unique.
+Note for tests: `ladder_policy.TABLE`'s built-in literal and
+`policy_settings.DEFAULT_ROUTING_TABLE` are deliberately separate
+baselines; a real deployment always runs `policy_settings.startup` from
+`server.py`'s lifespan, so the distinction is invisible in production.
+`tests/conftest.py` snapshots and restores `ladder_policy.TABLE` around
+every test.

@@ -10,10 +10,17 @@ payload (`push/payload.py`, `docs/push-notifications.md`'s "Situations"
 section) and from the Live Activity payloads (`push/activity.py`) -- a
 device can receive any mix of the three, distinguished by top-level shape
 (`situation_id` vs. `card_key` vs. `attributes-type`), not by a shared
-envelope.
+envelope. (The situations family is retired — its builder remains only for
+the wire-shape record.)
 
-Still Phase 2: this is an ordinary alert or silent push. Nothing here
-starts, updates, or ends a Live Activity (Phase 3).
+This payload family covers ordinary alert or silent pushes. Nothing here
+starts, updates, or ends a Live Activity (`push/activity.py`).
+
+**Vocabulary note:** the wire speaks the legacy *level* names — `log`,
+`quiet`, `notify`, `urgent`. The user-facing outcome ladder maps onto them
+before payload building (`glance→quiet`, `alarm→urgent`; `off` suppresses
+the event before any payload exists), so no payload ever carries an
+outcome name.
 
 ## Versioning
 

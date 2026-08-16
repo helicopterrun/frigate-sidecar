@@ -19,9 +19,13 @@ It adds:
   single base URL — everything the sidecar doesn't handle itself streams
   through to Frigate unchanged, with `Range` and auth cookies passed through.
 - **Push notifications** (`/v1/push`) — subscribes to Frigate's `frigate/reviews`
-  MQTT topic, matches new alerts against each registered device's
-  camera/label/severity filters, and publishes through a pluggable transport
-  (a log-only mock for development, or a minimal relay-client transport — see
+  MQTT topic and routes each event through the **attention ladder**: a per
+  subject×place outcomes table (`off/log/glance/notify/alarm`, synced from the
+  iOS app) plus zone overrides, snooze, quiet hours, and rate caps, decides
+  whether an event becomes an APNs card, a Live Activity, or just a logged
+  decision. Every decision is queryable at `GET /v1/push/decisions`. Delivery
+  goes through a pluggable transport (log-only mock for development, or a
+  minimal relay-client transport — see
   [`docs/push-notifications.md`](docs/push-notifications.md)). Off by default.
 
 Runs as a single Docker container next to Frigate, bind-mounting Frigate's
@@ -137,9 +141,17 @@ Full contract, error vocabulary, and rationale: [`docs/scrub-cache-and-proxy-spe
 | `GET` | `/v1/highlights/{camera}?before=&limit=&order=&cluster_s=` | Recent tracked-object events (`reason` is a Frigate label: person/car/package/…) for jump-to-highlight UI. **Raw events, newest first, by default** — see below. |
 | `*` | `/{path:path}` (catch-all) | Transparent reverse proxy to Frigate's authenticated origin (`frigate.proxy_base_url`) — `/api/*`, `/vod/*`, `/live/*`, `/preview/*`, everything else. Forwards `Range`/`Authorization`/`Cookie`/`Accept-Encoding`, streams the body **raw** so `content-encoding` and `content-length` stay consistent, relays `content-range`/`etag`/`location`/`www-authenticate` (incl. 401) unchanged, emits each `Set-Cookie` separately, and passes the HTTP method through (not GET-only). Registered last, so `/v1/*`, `/static`, and `/healthz` always win first. |
 | `WS` | `/{path:path}` (catch-all) | WebSocket relay to the same origin — Frigate's `/ws` state feed and go2rtc's WebRTC signalling, so live view works through the single base URL. |
-| `PUT` | `/v1/push/devices/{apns_token}` | Register (or idempotently re-register) a device for push, with per-device `cameras`/`labels`/`min_severity` filters. Auth'd the same as everything else. |
+| `PUT` | `/v1/push/devices/{apns_token}` | Register (or idempotently re-register) a device for push. Auth'd the same as everything else. |
 | `DELETE` | `/v1/push/devices/{apns_token}` | Unregister a device. Idempotent — always 200. |
+| `POST` | `/v1/push/devices/{apns_token}/test` | Send a test notification to one device; `404` iff the token has no device row. |
+| `GET` | `/v1/push/decisions` | The decision trace: recent events with the level each was decided at and the reasons — the app's "Recent decisions" tuning feed. |
+| `GET` / `PUT` | `/v1/push/settings` | The attention-settings document (outcomes table, zone overrides, quiet hours, Live Activity prefs). `outcomes` is authoritative; `routing_table_v2` is kept as a legacy projection. |
+| `POST` | `/v1/push/snooze` · `DELETE /v1/push/snooze/{scope}` | Set / clear a snooze scope (camera, subject, or global). |
+| `GET` | `/v1/push/sounds` | The custom-sound catalog the app offers. |
+| `POST` / `DELETE` | `/v1/push/activity/token` (`/{activity_id}`) | Register / drop a Live Activity push token. |
+| `GET` | `/v1/push/thumbnail/{handle}` | Thumbnail for a push handle (Live Activity images). |
 | `GET` | `/v1/push/handle/{handle}` | Resolve an opaque, short-lived push handle to `{camera, event_id, snapshot_url}` — called by the iOS Notification Service Extension, never by the relay. |
+| `POST` | `/v1/push/feedback` | Per-decision feedback from the app's tuning UI. |
 
 See [`docs/push-notifications.md`](docs/push-notifications.md) for the full
 design (event source, payload shape, privacy model, and failure modes).

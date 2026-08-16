@@ -222,7 +222,7 @@ def _glyph_for(subject_kind: str, label: str) -> str:
 
 #: Normalized-image-space displacement below which movement is jitter, not
 #: travel. q10 of real person path steps measured at 0.008, median 0.066
-#: (tools/verify_heading.py over config captures, 2026-08-15).
+#: (tools/verify_heading.py — since removed, git history — over config captures, 2026-08-15).
 _HEADING_MIN_DISPLACEMENT = 0.02
 
 
@@ -249,7 +249,7 @@ def _heading_label(
 ) -> str | None:
     """One of the §8 heading words, or None when unknown.
 
-    Measured 2026-08-15 (tools/verify_heading.py, 24,572 captured events):
+    Measured 2026-08-15 (tools/verify_heading.py, git history; 24,572 captured events):
     this install's Frigate reports velocity_angle=0 / speed=0 on every
     message (no zone distance calibration), so the old angle thresholds
     were reading a constant — every moving subject showed "leaving".

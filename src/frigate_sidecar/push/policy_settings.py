@@ -808,9 +808,13 @@ def apply_settings(settings: dict[str, Any]) -> None:
     (`zone_classes`/`live_activities`) is read through `get_active()` at
     call time by `delivery_wire.py`, so there's nothing further to push.
 
-    When `routing_table_v2` is present, it is the routing authority — the
-    ladder TABLE gets v2 subjects (person/vehicle/animal/thing). Otherwise
-    the legacy `routing_table` (stranger/known/animal/thing) is used."""
+    The user-facing authority is `outcomes` (merge_settings derives
+    `routing_table_v2` from it), so by the time we get here the two agree;
+    the evaluator consumes `routing_table_v2` when present — v2 subjects
+    (person/vehicle/animal/thing) — falling back to the legacy
+    `routing_table` (stranger/known/animal/thing) otherwise. `off` cells
+    exist only in `outcomes` and are applied as pre-evaluation suppression
+    via `set_off_cells`."""
     global _active
     table = settings.get("routing_table_v2") or settings["routing_table"]
     ladder_policy.set_table({s: dict(row) for s, row in table.items()})
