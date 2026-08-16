@@ -295,6 +295,8 @@ application. Top-level keys, per `default_settings()`:
 | `camera_headings` | camera → unit `{dx, dy}` "toward home" vector (LA heading chip) |
 | `camera_layout` | camera → `{x, y[, azimuth, fov]}` on the layout map |
 | `secure_area`, `map_scale_ft` | drawn secure rectangle and map scale (world projection) |
+| `camera_optics` | camera → `{hfov, mount_ft, tilt_deg[, vfov, faces, lens, note]}` rig facts — seeded once from `optics.DEPLOYMENT_SEED` at startup, edited via /cameras onboarding; feeds `ground.camera_ground` |
+| `floorplan` | `null` or `{ext, w, h, uploaded_at, calibration}` — the uploaded layout-map background (`POST/GET/DELETE /v1/push/floorplan`); `calibration` remembers the drawn scale-reference line, `map_scale_ft` stays the operative scale |
 
 `validate_settings` returns human-readable errors; unknown *top-level*
 fields are ignored (forward compat), but an unknown subject/place/family
@@ -321,9 +323,11 @@ no second call: `available_cameras`, `available_zones` (each with cameras,
 (`apply_settings` → `set_table` / `set_off_cells` / `set_zone_overrides`;
 everything else is read via `get_active()` per card event). Config-side
 keys the app has no UI for (`camera_neighbors`, `camera_headings`,
-`camera_layout`, `zone_names`) are sticky unless explicitly sent, as are
-`la_only` and `delivery`; `secure_area` / `map_scale_ft` distinguish absent
-(sticky) from explicit null (clear).
+`camera_layout`, `zone_names`, `camera_optics`) are sticky unless
+explicitly sent, as are `la_only` and `delivery`; `secure_area` /
+`map_scale_ft` / `floorplan` distinguish absent (sticky) from explicit
+null (clear). `placement_deployments` in the `GET` response is the
+settings-backed `camera_optics` table under its historical name.
 
 ## Decision trace and the tuning loop
 

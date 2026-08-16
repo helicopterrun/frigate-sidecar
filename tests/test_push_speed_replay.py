@@ -34,6 +34,9 @@ def _front_settings():
     settings["camera_headings"] = {
         "garden": {"dx": 0.0, "dy": -1.0}, "street": {"dx": 0.0, "dy": -1.0},
     }
+    # Ground projection reads the settings-backed camera_optics now; the
+    # capture is from the real fleet, so seed the real rig facts.
+    settings["camera_optics"] = policy_settings.seeded_camera_optics()
     policy_settings.apply_settings(settings)
     yield
     policy_settings.apply_settings(policy_settings.default_settings())

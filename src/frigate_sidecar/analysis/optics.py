@@ -268,14 +268,15 @@ _OBJECTS: list[dict[str, Any]] = [
     {"id": "cat", "label": "cat / raccoon", "width_ft": 1.3, "aspect": 0.55, "target_px": 35},
 ]
 
-# Deployed fleet. ``hfov`` is the *measured* value (from the spatial reference);
-# ``focal_mm`` is back-solved for varifocal cams so the zoom slider lands at the
-# right spot when a camera is picked. ``res`` selects the operative detect
-# stream. ``vfov`` is carried only where the vendor publishes it (UniFi); the
-# planner computes it from HFOV + frame aspect otherwise. ``tilt_deg`` (optical-
-# axis depression below horizontal) is a ROUGH ESTIMATE — we don't have measured
-# tilts — so treat it as a starting point and adjust the slider per scene.
-_CAMERAS: list[dict[str, Any]] = [
+# Deployed fleet at the time optics moved into settings — a ONE-TIME SEED for
+# the settings-backed `camera_optics` table (policy_settings.startup seeds it
+# when the key is absent), not consulted at runtime after seeding. The
+# /cameras page owns the live values now; edit there, not here. ``hfov`` is
+# the *measured* value (from the spatial reference). ``res`` selects the
+# operative detect stream. ``vfov`` is carried only where the vendor publishes
+# it (UniFi). ``tilt_deg`` (optical-axis depression below horizontal) was a
+# rough estimate.
+DEPLOYMENT_SEED: list[dict[str, Any]] = [
     {"id": "street", "lens": "dahua-t2431-fixed28", "hfov": 115, "res": "fhd-1080",
      "mount_ft": 35, "tilt_deg": 22, "faces": "S", "face_rec": False,
      "note": "high mount, steep angle"},
@@ -303,21 +304,6 @@ _CAMERAS: list[dict[str, Any]] = [
 ]
 
 
-def deployment_map() -> dict[str, dict[str, Any]]:
-    """Per-camera deployment facts for other pages (the /cameras
-    calibration UI pulls hfov/mount_ft/tilt_deg/faces from here so the
-    placement page stays the single source of optics truth)."""
-    return {
-        cam["id"]: {
-            "hfov": cam.get("hfov"),
-            "mount_ft": cam.get("mount_ft"),
-            "tilt_deg": cam.get("tilt_deg"),
-            "faces": cam.get("faces"),
-        }
-        for cam in _CAMERAS
-    }
-
-
 def _lens_with_fit(lens: dict[str, Any]) -> dict[str, Any]:
     """Attach fitted ``W``/``f0`` to a varifocal lens so JS can evaluate HFOV(f)."""
     out = dict(lens)
@@ -334,7 +320,7 @@ def presets_payload() -> dict[str, Any]:
         "lenses": [_lens_with_fit(lo) for lo in _LENSES],
         "resolutions": _RESOLUTIONS,
         "objects": _OBJECTS,
-        "cameras": _CAMERAS,
+        "cameras": DEPLOYMENT_SEED,
         "dori": DORI_PX_PER_M,
         "refs": {
             "face_min_area_px2": FACE_MIN_AREA_PX2,

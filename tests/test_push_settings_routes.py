@@ -339,3 +339,41 @@ def test_map_scale_ft_round_trips_and_clears(client: TestClient):
 
     doc["map_scale_ft"] = -5
     assert client.put("/v1/push/settings", json=doc).status_code == 400
+
+
+def test_camera_optics_sticky_across_app_shaped_put(client: TestClient):
+    optics_doc = {"street": {"hfov": 115.0, "mount_ft": 35.0, "tilt_deg": 22.0, "faces": "S"}}
+    resp = client.put("/v1/push/settings", json={"camera_optics": optics_doc})
+    assert resp.status_code == 200
+    # An iOS-shaped PUT (Codable drops keys it doesn't know) must not wipe it.
+    resp = client.put("/v1/push/settings", json={"mute_sounds": True})
+    assert resp.status_code == 200
+    body = client.get("/v1/push/settings").json()
+    assert body["settings"]["camera_optics"] == optics_doc
+    # And placement_deployments mirrors the settings-backed table.
+    assert body["placement_deployments"] == optics_doc
+    # An explicit dict replaces (including deleting a camera).
+    resp = client.put("/v1/push/settings", json={"camera_optics": {}})
+    assert resp.status_code == 200
+    assert client.get("/v1/push/settings").json()["settings"]["camera_optics"] == {}
+
+
+def test_floorplan_key_sticky_and_nullable(client: TestClient):
+    fp = {"ext": "png", "w": 800, "h": 600,
+          "calibration": {"x0": 0.1, "y0": 0.5, "x1": 0.9, "y1": 0.5, "length_ft": 40.0}}
+    assert client.put("/v1/push/settings", json={"floorplan": fp}).status_code == 200
+    # Absent key: sticky.
+    assert client.put("/v1/push/settings", json={"mute_sounds": False}).status_code == 200
+    got = client.get("/v1/push/settings").json()["settings"]["floorplan"]
+    assert got["ext"] == "png" and got["calibration"]["length_ft"] == 40.0
+    # Explicit null: clears.
+    assert client.put("/v1/push/settings", json={"floorplan": None}).status_code == 200
+    assert client.get("/v1/push/settings").json()["settings"]["floorplan"] is None
+
+
+def test_put_rejects_malformed_camera_optics(client: TestClient):
+    resp = client.put(
+        "/v1/push/settings",
+        json={"camera_optics": {"street": {"hfov": 400, "mount_ft": 35, "tilt_deg": 22}}},
+    )
+    assert resp.status_code == 400

@@ -1,7 +1,8 @@
 """Ground-plane projection: image coordinates -> real-world feet.
 
-Built entirely from the placement page's per-camera facts (measured HFOV,
-mount height, estimated tilt) — no zone dimension measurements required.
+Built entirely from the settings-backed per-camera rig facts (measured HFOV,
+mount height, tilt — `camera_optics`, onboarded/edited on the /cameras
+page) — no zone dimension measurements required.
 A first-order pinhole model over flat ground: accurate enough (±25%) to
 separate walking from running and to place tracks on the layout map, and
 honest about its limits — anything near the horizon or beyond
@@ -17,6 +18,7 @@ import math
 import statistics
 
 from frigate_sidecar.analysis import optics
+from frigate_sidecar.push import policy_settings
 
 #: Beyond this forward distance the depression angle is so shallow that a
 #: one-pixel error swings the estimate by tens of feet — refuse to guess.
@@ -33,19 +35,24 @@ _DETECT_ASPECT = (16, 9)
 
 
 def camera_ground(camera: str) -> dict[str, float] | None:
-    """Per-camera projection facts, or None when the camera isn't in the
-    placement fleet or lacks the needed numbers."""
-    facts = optics.deployment_map().get(camera)
+    """Per-camera projection facts from the settings-backed `camera_optics`
+    table (onboarded on /cameras), or None when the camera hasn't been
+    onboarded or lacks the needed numbers. Reads the live policy per call,
+    so an optics edit applies on the next event with no restart."""
+    facts = policy_settings.camera_optics(camera)
     if not facts:
         return None
     hfov, mount, tilt = facts.get("hfov"), facts.get("mount_ft"), facts.get("tilt_deg")
     if not hfov or not mount or tilt is None:
         return None
+    vfov = facts.get("vfov")
+    if not vfov:
+        vfov = optics.vfov_from_hfov(float(hfov), *_DETECT_ASPECT)
     return {
         "hfov": float(hfov),
         "mount_ft": float(mount),
         "tilt_deg": float(tilt),
-        "vfov": optics.vfov_from_hfov(float(hfov), *_DETECT_ASPECT),
+        "vfov": float(vfov),
     }
 
 
@@ -116,14 +123,20 @@ def world_position(
     camera: str,
     layout_entry: dict[str, float],
     scale_ft: float,
+    aspect_h_over_w: float = 1.0,
 ) -> tuple[float, float] | None:
     """Image point -> layout-map coordinates (0..1-ish space, may exceed
     the map edges). Requires the camera's map position + pie azimuth and
-    the map's real-world width (`map_scale_ft`)."""
+    the map's real-world width (`map_scale_ft`). `aspect_h_over_w` is the
+    map's height/width ratio (an uploaded floorplan is rarely square): the
+    map's real height is `scale_ft * aspect`, so normalized y-feet convert
+    at that rate."""
     facts = camera_ground(camera)
     azimuth = layout_entry.get("azimuth")
     if facts is None or azimuth is None or not scale_ft or scale_ft <= 0:
         return None
+    if not aspect_h_over_w or aspect_h_over_w <= 0:
+        aspect_h_over_w = 1.0
     g = project(x_norm, y_norm, facts)
     if g is None:
         return None
@@ -132,5 +145,14 @@ def world_position(
     # Map coords y-down, compass 0 = north = -y: view = (sin, -cos),
     # camera-right = (cos, sin).
     dx = (forward * math.sin(rad) + lateral * math.cos(rad)) / scale_ft
-    dy = (forward * -math.cos(rad) + lateral * math.sin(rad)) / scale_ft
+    dy = (forward * -math.cos(rad) + lateral * math.sin(rad)) / (scale_ft * aspect_h_over_w)
     return (layout_entry.get("x", 0.0) + dx, layout_entry.get("y", 0.0) + dy)
+
+
+def map_aspect(settings: dict) -> float:
+    """The layout map's height/width ratio: the uploaded floorplan's pixel
+    aspect when one is set, else 1.0 (the square default map)."""
+    fp = settings.get("floorplan")
+    if isinstance(fp, dict) and fp.get("w") and fp.get("h"):
+        return float(fp["h"]) / float(fp["w"])
+    return 1.0

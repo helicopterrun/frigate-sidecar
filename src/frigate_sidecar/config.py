@@ -520,6 +520,11 @@ class PushSection(BaseModel):
     # (`push/policy_settings.py`).
     push_settings_path: str = "config/push_settings.json"
 
+    # Where the uploaded floorplan/site image behind the /cameras layout map
+    # is stored (extension appended per upload type). Same runtime-data class
+    # as push_settings_path, so it lives next to it.
+    floorplan_path: str = "config/floorplan"
+
     @field_validator("dwell_source")
     @classmethod
     def _known_dwell_source(cls, v: str) -> str:

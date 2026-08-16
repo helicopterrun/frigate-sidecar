@@ -916,6 +916,7 @@ async def handle_delivery_event(
                 _wp = ground.world_position(
                     _pt[0], _pt[1], camera=event.camera,
                     layout_entry=_layout, scale_ft=_scale,
+                    aspect_h_over_w=ground.map_aspect(policy),
                 )
                 if _wp is not None:
                     logger.info(

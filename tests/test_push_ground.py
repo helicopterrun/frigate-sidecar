@@ -6,6 +6,7 @@ import math
 
 import pytest
 
+from frigate_sidecar.analysis import optics
 from frigate_sidecar.push import ground
 
 # A synthetic camera: 10ft mount, 12 deg down, 90 deg HFOV (matches the
@@ -96,3 +97,26 @@ def test_world_position_requires_scale_and_azimuth(monkeypatch):
         0.5, 0.5, camera="fake", layout_entry={"x": 0.5, "y": 0.5, "azimuth": 0.0},
         scale_ft=0,
     ) is None
+
+
+def test_camera_ground_reads_settings_backed_optics():
+    from frigate_sidecar.push import policy_settings
+
+    doc = policy_settings.default_settings()
+    doc["camera_optics"] = {
+        "computed": {"hfov": 100.0, "mount_ft": 12.0, "tilt_deg": 10.0},
+        "vendor": {"hfov": 138.0, "mount_ft": 3.0, "tilt_deg": 6.0, "vfov": 114.0},
+    }
+    policy_settings.apply_settings(doc)
+    try:
+        computed = ground.camera_ground("computed")
+        assert computed is not None
+        assert computed["vfov"] == pytest.approx(
+            optics.vfov_from_hfov(100.0, 16, 9), rel=1e-6
+        )
+        # Vendor-published vfov wins over the 16:9 derivation.
+        vendor = ground.camera_ground("vendor")
+        assert vendor is not None and vendor["vfov"] == 114.0
+        assert ground.camera_ground("never-onboarded") is None
+    finally:
+        policy_settings.reset_for_tests()

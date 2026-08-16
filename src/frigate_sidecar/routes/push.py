@@ -644,13 +644,17 @@ async def get_push_settings(request: Request) -> dict[str, Any]:
         if (vec := policy_settings.derived_camera_heading(cam, active)) is not None
     }
 
-    from frigate_sidecar.analysis import optics
-
     return {
         "settings": active,
         "available_cameras": available_cameras,
         "derived_headings": derived_headings,
-        "placement_deployments": optics.deployment_map(),
+        # Response key predates the settings-backed optics table; kept so
+        # existing consumers (cameras.js trails, the app) need no change.
+        "placement_deployments": {
+            cam: dict(entry)
+            for cam, entry in active.get("camera_optics", {}).items()
+            if isinstance(entry, dict)
+        },
         "available_zones": policy_settings.build_available_zones(settings.frigate.config_path),
         "available_openings": policy_settings.build_available_openings(
             settings.frigate.config_path
@@ -694,16 +698,154 @@ async def put_push_settings(request: Request) -> dict[str, Any]:
     # camera_neighbors / camera_headings / camera_layout are config-side only
     # (the app has no UI for them and its Codable round-trip drops the keys)
     # -- sticky unless explicitly sent.
-    for sticky_key in ("camera_neighbors", "camera_headings", "camera_layout", "zone_names"):
+    for sticky_key in (
+        "camera_neighbors", "camera_headings", "camera_layout", "zone_names", "camera_optics",
+    ):
         if not isinstance(body.get(sticky_key), dict):
             merged[sticky_key] = policy_settings.get_active().get(sticky_key, {})
-    # secure_area / map_scale_ft distinguish "absent" (sticky) from
-    # explicit null (clear).
-    for nullable_key in ("secure_area", "map_scale_ft"):
+    # secure_area / map_scale_ft / floorplan distinguish "absent" (sticky)
+    # from explicit null (clear).
+    for nullable_key in ("secure_area", "map_scale_ft", "floorplan"):
         if nullable_key not in body:
             merged[nullable_key] = policy_settings.get_active().get(nullable_key)
     policy_settings.save_settings(settings.push.push_settings_path, merged)
     policy_settings.apply_settings(merged)
+    return {"ok": True}
+
+
+_ERR_BAD_FLOORPLAN = "bad_floorplan"
+_ERR_FLOORPLAN_NOT_FOUND = "floorplan_not_found"
+_FLOORPLAN_MAX_BYTES = 10 * 1024 * 1024
+_FLOORPLAN_MEDIA_TYPES = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+
+
+def _sniff_image(data: bytes) -> tuple[str, int, int] | None:
+    """(ext, width, height) from the image's own header bytes — the upload
+    is trusted on its magic bytes, never its Content-Type. PNG/JPEG/WebP
+    only; a tiny hand parse so Pillow doesn't become a dependency for one
+    dimensions read."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
+        return ("png", int.from_bytes(data[16:20]), int.from_bytes(data[20:24]))
+    if data[:2] == b"\xff\xd8":
+        i = 2
+        while i + 9 < len(data):
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            length = int.from_bytes(data[i + 2:i + 4])
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                return (
+                    "jpg",
+                    int.from_bytes(data[i + 7:i + 9]),
+                    int.from_bytes(data[i + 5:i + 7]),
+                )
+            i += 2 + length
+        return None
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP" and len(data) >= 30:
+        fmt = data[12:16]
+        if fmt == b"VP8X":
+            w = int.from_bytes(data[24:27], "little") + 1
+            h = int.from_bytes(data[27:30], "little") + 1
+            return ("webp", w, h)
+        if fmt == b"VP8 ":
+            w = int.from_bytes(data[26:28], "little") & 0x3FFF
+            h = int.from_bytes(data[28:30], "little") & 0x3FFF
+            return ("webp", w, h)
+        if fmt == b"VP8L":
+            bits = int.from_bytes(data[21:25], "little")
+            return ("webp", (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+    return None
+
+
+def _floorplan_file(request: Request) -> pathlib.Path | None:
+    active = policy_settings.get_active()
+    fp = active.get("floorplan")
+    if not isinstance(fp, dict):
+        return None
+    base = pathlib.Path(request.app.state.settings.push.floorplan_path)
+    path = base.with_suffix("." + fp["ext"])
+    return path if path.exists() else None
+
+
+@router.post("/floorplan")
+async def upload_floorplan(request: Request) -> dict[str, Any]:
+    """Store the layout map's background image. Raw image bytes as the body
+    (no multipart -- the page POSTs the File object directly), identified by
+    magic bytes. Replaces any previous floorplan and resets the scale
+    calibration line -- a new image means the old line's coordinates are
+    meaningless."""
+    data = await request.body()
+    if len(data) > _FLOORPLAN_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={"error": _ERR_BAD_FLOORPLAN, "message": "image exceeds 10 MB"},
+        )
+    sniffed = _sniff_image(data)
+    if sniffed is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": _ERR_BAD_FLOORPLAN, "message": "not a PNG, JPEG, or WebP image"},
+        )
+    ext, w, h = sniffed
+    if not (0 < w <= 20000 and 0 < h <= 20000):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": _ERR_BAD_FLOORPLAN, "message": f"unreasonable dimensions {w}x{h}"},
+        )
+
+    settings = request.app.state.settings
+    base = pathlib.Path(settings.push.floorplan_path)
+    base.parent.mkdir(parents=True, exist_ok=True)
+    tmp = base.with_suffix(".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(base.with_suffix("." + ext))
+    for other in _FLOORPLAN_MEDIA_TYPES:
+        if other != ext:
+            base.with_suffix("." + other).unlink(missing_ok=True)
+
+    from datetime import datetime, timezone
+
+    fp = {
+        "ext": ext, "w": w, "h": h,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "calibration": None,
+    }
+    active = dict(policy_settings.get_active())
+    active["floorplan"] = fp
+    policy_settings.save_settings(settings.push.push_settings_path, active)
+    policy_settings.apply_settings(active)
+    return {"floorplan": fp}
+
+
+@router.get("/floorplan")
+async def get_floorplan(request: Request) -> Response:
+    path = _floorplan_file(request)
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_FLOORPLAN_NOT_FOUND, "message": "no floorplan uploaded"},
+        )
+    return Response(
+        content=path.read_bytes(),
+        media_type=_FLOORPLAN_MEDIA_TYPES[path.suffix.lstrip(".")],
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.delete("/floorplan")
+async def delete_floorplan(request: Request) -> dict[str, Any]:
+    settings = request.app.state.settings
+    base = pathlib.Path(settings.push.floorplan_path)
+    for ext in _FLOORPLAN_MEDIA_TYPES:
+        base.with_suffix("." + ext).unlink(missing_ok=True)
+    active = dict(policy_settings.get_active())
+    active["floorplan"] = None
+    policy_settings.save_settings(settings.push.push_settings_path, active)
+    policy_settings.apply_settings(active)
     return {"ok": True}
 
 

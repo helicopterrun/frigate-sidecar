@@ -130,6 +130,12 @@ _GUESS_ORDER: tuple[tuple[str, tuple[str, ...]], ...] = (
 #: even though it doesn't read as a "doors" *place class* on its own.
 _OPENING_NAME_HINTS = ("door", "gate", "garage", "entry", "entrance")
 
+#: 16-point compass rose for `camera_optics.faces`.
+COMPASS_POINTS = (
+    "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+    "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
+)
+
 
 def _valid_time(val: str) -> bool:
     try:
@@ -236,6 +242,16 @@ def default_settings() -> dict[str, Any]:
         # Real-world width of the layout map, in feet. Unlocks world-space
         # track projection (ground.world_position) and map trails.
         "map_scale_ft": None,
+        # camera -> physical rig facts {hfov, mount_ft, tilt_deg, vfov?,
+        # faces?, lens?, note?}. Seeded once from optics.DEPLOYMENT_SEED at
+        # startup; edited on /cameras (onboarding + detail panel). Feeds
+        # ground.camera_ground. Sticky across app PUTs.
+        "camera_optics": {},
+        # None, or {ext, w, h, uploaded_at, calibration}: the uploaded
+        # floorplan/site image behind the layout map. `calibration` remembers
+        # the drawn reference line ({x0,y0,x1,y1,length_ft}) so it can be
+        # redrawn/re-edited; map_scale_ft stays the operative scale value.
+        "floorplan": None,
     }
 
 
@@ -501,6 +517,65 @@ def validate_settings(data: Any) -> list[str]:
     ):
         errors.append("map_scale_ft must be null or a positive number of feet")
 
+    camera_optics_doc = data.get("camera_optics")
+    if camera_optics_doc is not None:
+        if not isinstance(camera_optics_doc, dict):
+            errors.append("camera_optics must be an object of camera -> rig facts")
+        else:
+            for cam, facts in camera_optics_doc.items():
+                if not isinstance(facts, dict):
+                    errors.append(f"camera_optics[{cam!r}] must be an object")
+                    continue
+                hfov = facts.get("hfov")
+                if not (isinstance(hfov, (int, float)) and 10.0 < hfov <= 360.0):
+                    errors.append(f"camera_optics[{cam!r}].hfov must be in (10, 360] degrees")
+                mount = facts.get("mount_ft")
+                if not (isinstance(mount, (int, float)) and 0.0 < mount <= 500.0):
+                    errors.append(f"camera_optics[{cam!r}].mount_ft must be in (0, 500] feet")
+                tilt = facts.get("tilt_deg")
+                if not (isinstance(tilt, (int, float)) and -90.0 <= tilt <= 90.0):
+                    errors.append(f"camera_optics[{cam!r}].tilt_deg must be in [-90, 90] degrees")
+                vfov = facts.get("vfov")
+                if vfov is not None and not (
+                    isinstance(vfov, (int, float)) and 5.0 < vfov <= 180.0
+                ):
+                    errors.append(f"camera_optics[{cam!r}].vfov must be in (5, 180] degrees")
+                faces = facts.get("faces")
+                if faces is not None and faces not in COMPASS_POINTS:
+                    errors.append(
+                        f"camera_optics[{cam!r}].faces must be a 16-point compass "
+                        f"direction, got {faces!r}"
+                    )
+                for text_key in ("lens", "note"):
+                    val = facts.get(text_key)
+                    if val is not None and not isinstance(val, str):
+                        errors.append(f"camera_optics[{cam!r}].{text_key} must be a string")
+
+    floorplan = data.get("floorplan")
+    if floorplan is not None:
+        if not isinstance(floorplan, dict):
+            errors.append("floorplan must be null or an object")
+        else:
+            if not (isinstance(floorplan.get("ext"), str) and floorplan["ext"]):
+                errors.append("floorplan.ext must be a non-empty string")
+            for dim in ("w", "h"):
+                v = floorplan.get(dim)
+                if not (isinstance(v, int) and 0 < v <= 20000):
+                    errors.append(f"floorplan.{dim} must be a positive pixel count")
+            cal = floorplan.get("calibration")
+            if cal is not None:
+                ok = isinstance(cal, dict) and all(
+                    isinstance(cal.get(k), (int, float)) and 0.0 <= cal[k] <= 1.0
+                    for k in ("x0", "y0", "x1", "y1")
+                ) and isinstance(cal.get("length_ft"), (int, float)) and (
+                    0 < cal.get("length_ft", 0) <= 100000
+                )
+                if not ok:
+                    errors.append(
+                        "floorplan.calibration must be null or {x0, y0, x1, y1} within "
+                        "0..1 plus a positive length_ft"
+                    )
+
     return errors
 
 
@@ -711,6 +786,65 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
     elif map_scale_ft is None and "map_scale_ft" in data:
         merged["map_scale_ft"] = None
 
+    camera_optics_doc = data.get("camera_optics")
+    if isinstance(camera_optics_doc, dict):
+        cleaned_optics: dict[str, dict[str, Any]] = {}
+        for cam, facts in camera_optics_doc.items():
+            if not isinstance(facts, dict):
+                continue
+            hfov, mount, tilt = facts.get("hfov"), facts.get("mount_ft"), facts.get("tilt_deg")
+            if not (
+                isinstance(hfov, (int, float)) and 10.0 < hfov <= 360.0
+                and isinstance(mount, (int, float)) and 0.0 < mount <= 500.0
+                and isinstance(tilt, (int, float)) and -90.0 <= tilt <= 90.0
+            ):
+                continue
+            entry: dict[str, Any] = {
+                "hfov": round(float(hfov), 1),
+                "mount_ft": round(float(mount), 1),
+                "tilt_deg": round(float(tilt), 1),
+            }
+            vfov = facts.get("vfov")
+            if isinstance(vfov, (int, float)) and 5.0 < vfov <= 180.0:
+                entry["vfov"] = round(float(vfov), 1)
+            if facts.get("faces") in COMPASS_POINTS:
+                entry["faces"] = facts["faces"]
+            for text_key in ("lens", "note"):
+                val = facts.get(text_key)
+                if isinstance(val, str) and val.strip():
+                    entry[text_key] = val.strip()
+            cleaned_optics[str(cam)] = entry
+        merged["camera_optics"] = cleaned_optics
+
+    floorplan = data.get("floorplan")
+    if isinstance(floorplan, dict):
+        ext = floorplan.get("ext")
+        w, h = floorplan.get("w"), floorplan.get("h")
+        if (
+            isinstance(ext, str) and ext
+            and isinstance(w, int) and 0 < w <= 20000
+            and isinstance(h, int) and 0 < h <= 20000
+        ):
+            fp: dict[str, Any] = {"ext": ext, "w": w, "h": h, "calibration": None}
+            uploaded_at = floorplan.get("uploaded_at")
+            if isinstance(uploaded_at, str) and uploaded_at:
+                fp["uploaded_at"] = uploaded_at
+            cal = floorplan.get("calibration")
+            if isinstance(cal, dict):
+                vals = {
+                    k: float(cal[k]) for k in ("x0", "y0", "x1", "y1")
+                    if isinstance(cal.get(k), (int, float)) and 0.0 <= cal[k] <= 1.0
+                }
+                length = cal.get("length_ft")
+                if len(vals) == 4 and isinstance(length, (int, float)) and 0 < length <= 100000:
+                    fp["calibration"] = {
+                        **{k: round(v, 4) for k, v in vals.items()},
+                        "length_ft": round(float(length), 1),
+                    }
+            merged["floorplan"] = fp
+    elif floorplan is None and "floorplan" in data:
+        merged["floorplan"] = None
+
     return merged
 
 
@@ -750,6 +884,31 @@ def derived_camera_heading(
     if norm < 1e-6:
         return None
     return {"dx": round(d_right / norm, 4), "dy": round(-d_along / norm, 4)}
+
+
+def seeded_camera_optics() -> dict[str, dict[str, Any]]:
+    """A fresh `camera_optics` table built from `optics.DEPLOYMENT_SEED` —
+    what `startup` writes into a settings file that predates the key."""
+    from frigate_sidecar.analysis import optics
+
+    return {
+        cam["id"]: {
+            k: cam[k]
+            for k in ("hfov", "vfov", "mount_ft", "tilt_deg", "faces", "lens", "note")
+            if k in cam
+        }
+        for cam in optics.DEPLOYMENT_SEED
+    }
+
+
+def camera_optics(camera: str, settings: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """The camera's physical rig facts (hfov/mount_ft/tilt_deg/...), or None
+    when the camera hasn't been onboarded. This is what `ground.camera_ground`
+    projects with — settings-backed, so an onboarding/edit on /cameras takes
+    effect on the next event with no restart."""
+    table = (settings if settings is not None else get_active()).get("camera_optics", {})
+    entry = table.get(camera) if isinstance(table, dict) else None
+    return dict(entry) if isinstance(entry, dict) else None
 
 
 def camera_neighbor_set(camera: str, settings: dict[str, Any] | None = None) -> frozenset[str]:
@@ -881,6 +1040,17 @@ def startup(path: str | Path) -> dict[str, Any]:
         settings["routing_table_v2"] = v2_table
         settings["recognition"] = recognition
         logging.getLogger(__name__).info(log_msg)
+        save_settings(path, settings)
+
+    # Seed camera_optics once from the deployed-fleet literals. Keyed on the
+    # raw file *lacking* the key entirely (not on emptiness), so a user who
+    # later edits — or deletes — cameras is never re-seeded over.
+    if "camera_optics" not in raw:
+        settings["camera_optics"] = seeded_camera_optics()
+        logging.getLogger(__name__).info(
+            "camera_optics seeded from DEPLOYMENT_SEED (%d cameras)",
+            len(settings["camera_optics"]),
+        )
         save_settings(path, settings)
 
     apply_settings(settings)

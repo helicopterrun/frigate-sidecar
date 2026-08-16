@@ -137,3 +137,12 @@ def test_presets_payload_shape() -> None:
     for cam in p["cameras"]:
         assert cam["lens"] in lens_ids
         assert cam["res"] in res_ids
+
+
+def test_deployment_seed_entries_are_complete_and_lenses_resolve():
+    """The seed feeds policy_settings.seeded_camera_optics — every entry
+    needs the projection trio, and named lenses must exist in the catalogue."""
+    lens_ids = {lens["id"] for lens in optics.presets_payload()["lenses"]}
+    for cam in optics.DEPLOYMENT_SEED:
+        assert {"id", "hfov", "mount_ft", "tilt_deg"} <= cam.keys(), cam.get("id")
+        assert cam["lens"] in lens_ids, cam["id"]

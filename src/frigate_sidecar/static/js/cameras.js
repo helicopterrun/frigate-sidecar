@@ -12,7 +12,14 @@
 
   var doc = null;
   var cameras = [];
-  var placements = {}; // camera -> {hfov, mount_ft, tilt_deg, faces} from the placement page
+  // camera -> {hfov, mount_ft, tilt_deg, vfov?, faces?, lens?}. Alias of
+  // doc.camera_optics (settings-backed since onboarding): edits here are
+  // edits to the document the Save button PUTs.
+  var placements = {};
+  var lensPresets = window.LENS_PRESETS || [];
+  var placeMode = null;      // camera waiting for a map click to be placed
+  var calibrateStart = null; // first click of the scale reference line
+  var calibrating = false;
 
   var CARDINAL_DEG = {
     N: 0, NNE: 22.5, NE: 45, ENE: 67.5, E: 90, ESE: 112.5, SE: 135, SSE: 157.5,
@@ -429,9 +436,12 @@
       }
     });
     drawTrails(svg);
+    drawCalibrationLine(svg);
     // Coverage view: darken the ground so unlit (unwatched) area reads as
     // the blind spots.
-    mapEl.style.background = (coverageToggle && coverageToggle.checked)
+    // backgroundColor, not the background shorthand — the shorthand would
+    // wipe the floorplan's backgroundImage.
+    mapEl.style.backgroundColor = (coverageToggle && coverageToggle.checked)
       ? "var(--deep, #0a0e14)" : "var(--surface)";
     mapEl.appendChild(svg);
     refreshAllCards(); // pie/secure edits change the derived arrows live
@@ -529,15 +539,25 @@
   });
   coverageToggle.addEventListener("change", renderMap);
 
+  // The map's height/width ratio: the floorplan's pixel aspect when one is
+  // uploaded, 1 for the square default map. Mirror of ground.map_aspect.
+  function mapAspect() {
+    var fp = doc && doc.floorplan;
+    return fp && fp.w && fp.h ? fp.h / fp.w : 1;
+  }
+
   // Mirror of ground.world_position: image point -> map coords, using the
-  // camera's placement facts (hfov/mount/tilt), pie azimuth, and map scale.
+  // camera's rig facts (hfov/mount/tilt), pie azimuth, and map scale.
   function worldPosition(camera, xNorm, yNorm) {
     var entry = (doc.camera_layout || {})[camera];
     var p = placements[camera];
     var scale = doc.map_scale_ft;
     if (!entry || entry.azimuth === undefined || !p || !p.hfov || !p.mount_ft ||
         p.tilt_deg === undefined || !scale) return null;
-    var vfov = p.hfov ? (2 * Math.atan((9 / 16) * Math.tan((p.hfov * Math.PI) / 360)) * 180) / Math.PI : 0;
+    // Vendor-published vfov wins over the 16:9 derivation (mirror of
+    // ground.camera_ground).
+    var vfov = p.vfov ||
+      (2 * Math.atan((9 / 16) * Math.tan((p.hfov * Math.PI) / 360)) * 180) / Math.PI;
     var dep = p.tilt_deg + (yNorm - 0.5) * vfov;
     if (dep < 1) return null;
     var forward = p.mount_ft / Math.tan((dep * Math.PI) / 180);
@@ -546,7 +566,7 @@
     var rad = (entry.azimuth * Math.PI) / 180;
     return {
       x: entry.x + (forward * Math.sin(rad) + lateral * Math.cos(rad)) / scale,
-      y: entry.y + (forward * -Math.cos(rad) + lateral * Math.sin(rad)) / scale,
+      y: entry.y + (forward * -Math.cos(rad) + lateral * Math.sin(rad)) / (scale * mapAspect()),
     };
   }
 
@@ -604,9 +624,312 @@
       (skipped.length ? " — no projection for: " + skipped.join(", ") : "");
   }
 
+  // ---- Floorplan + scale calibration ---------------------------------
+
+  var floorplanFile = document.getElementById("floorplan-file");
+  var floorplanRemove = document.getElementById("floorplan-remove");
+  var floorplanNote = document.getElementById("floorplan-note");
+  var calibrateBtn = document.getElementById("calibrate-btn");
+
+  function applyFloorplan() {
+    var fp = doc.floorplan;
+    if (fp && fp.ext) {
+      mapEl.style.backgroundImage = "url(/v1/push/floorplan?ts=" +
+        encodeURIComponent(fp.uploaded_at || "") + ")";
+      mapEl.style.backgroundSize = "100% 100%";
+      mapEl.style.aspectRatio = fp.w + " / " + fp.h;
+      floorplanRemove.style.display = "inline-block";
+      calibrateBtn.style.display = "inline-block";
+    } else {
+      mapEl.style.backgroundImage = "";
+      mapEl.style.aspectRatio = "";
+      floorplanRemove.style.display = "none";
+      calibrateBtn.style.display = "none";
+    }
+  }
+
+  floorplanFile.addEventListener("change", async function () {
+    var file = floorplanFile.files && floorplanFile.files[0];
+    if (!file) return;
+    floorplanNote.textContent = "uploading...";
+    try {
+      // Raw bytes, no multipart — the server identifies the image by its
+      // own magic bytes and persists doc.floorplan itself.
+      var data = await fetchJson("/v1/push/floorplan", { method: "POST", body: file });
+      doc.floorplan = data.floorplan;
+      floorplanNote.textContent =
+        "uploaded — draw the map scale with Calibrate scale.";
+      applyFloorplan();
+      renderMap();
+    } catch (err) {
+      floorplanNote.textContent = "error: " + err.message;
+    }
+    floorplanFile.value = "";
+  });
+
+  floorplanRemove.addEventListener("click", async function () {
+    try {
+      await fetchJson("/v1/push/floorplan", { method: "DELETE" });
+      doc.floorplan = null;
+      calibrating = false;
+      calibrateStart = null;
+      floorplanNote.textContent = "floorplan removed.";
+      applyFloorplan();
+      renderMap();
+    } catch (err) {
+      floorplanNote.textContent = "error: " + err.message;
+    }
+  });
+
+  calibrateBtn.addEventListener("click", function () {
+    calibrating = !calibrating;
+    calibrateStart = null;
+    calibrateBtn.textContent = calibrating ? "Cancel calibration" : "Calibrate scale";
+    floorplanNote.textContent = calibrating
+      ? "click both ends of a feature whose real length you know (fence, driveway...)"
+      : "";
+    mapEl.style.cursor = calibrating ? "crosshair" : "";
+  });
+
+  function handleCalibrateClick(p) {
+    if (!calibrateStart) {
+      calibrateStart = p;
+      floorplanNote.textContent = "now click the other end of the feature";
+      return;
+    }
+    var a = calibrateStart, b = p;
+    calibrateStart = null;
+    calibrating = false;
+    calibrateBtn.textContent = "Calibrate scale";
+    mapEl.style.cursor = "";
+    // Line length in width-normalized units (y stretched by the map's
+    // aspect), so length_ft / that = the map's real-world width.
+    var norm = Math.hypot(b.x - a.x, (b.y - a.y) * mapAspect());
+    if (norm < 0.01) {
+      floorplanNote.textContent = "line too short — try again.";
+      return;
+    }
+    var answer = window.prompt("Real length of the drawn line, in feet:");
+    var lengthFt = parseFloat(answer);
+    if (!(lengthFt > 0)) {
+      floorplanNote.textContent = "calibration cancelled.";
+      renderMap();
+      return;
+    }
+    doc.map_scale_ft = +(lengthFt / norm).toFixed(1);
+    if (doc.floorplan) {
+      doc.floorplan.calibration = {
+        x0: +a.x.toFixed(4), y0: +a.y.toFixed(4),
+        x1: +b.x.toFixed(4), y1: +b.y.toFixed(4),
+        length_ft: +lengthFt.toFixed(1),
+      };
+    }
+    mapScaleInput.value = doc.map_scale_ft;
+    floorplanNote.textContent =
+      "map width = " + doc.map_scale_ft + " ft — remember to Save.";
+    markDirty();
+    renderMap();
+  }
+
+  function drawCalibrationLine(svg) {
+    var cal = doc.floorplan && doc.floorplan.calibration;
+    if (!cal) return;
+    svgLine(svg, cal.x0, cal.y0, cal.x1, cal.y1, {
+      stroke: "var(--ok, #4caf82)", "stroke-width": "0.004",
+      "stroke-dasharray": "0.008 0.008", "stroke-opacity": "0.7",
+    });
+    var label = document.createElementNS(SVG_NS, "text");
+    label.setAttribute("x", (cal.x0 + cal.x1) / 2);
+    label.setAttribute("y", (cal.y0 + cal.y1) / 2 - 0.012);
+    label.setAttribute("text-anchor", "middle");
+    label.setAttribute("font-size", "0.024");
+    label.setAttribute("fill", "var(--ok, #4caf82)");
+    label.textContent = cal.length_ft + " ft";
+    svg.appendChild(label);
+  }
+
+  // ---- Onboarding ----------------------------------------------------
+
+  var onboardSection = document.getElementById("onboard-section");
+  var onboardCards = document.getElementById("onboard-cards");
+
+  function lensById(id) {
+    for (var i = 0; i < lensPresets.length; i++) {
+      if (lensPresets[i].id === id) return lensPresets[i];
+    }
+    return null;
+  }
+
+  function hfovFromFocal(lens, focalMm) {
+    return (2 * Math.atan(lens.sensor_width_mm /
+      (2 * (focalMm + lens.focal_offset_mm))) * 180) / Math.PI;
+  }
+
+  function renderOnboarding() {
+    var pending = cameras.filter(function (c) { return !placements[c]; });
+    onboardSection.style.display = pending.length ? "block" : "none";
+    onboardCards.textContent = "";
+    pending.forEach(function (camera) {
+      var card = document.createElement("div");
+      card.className = "stat-card";
+      card.style.minWidth = "300px";
+
+      var label = document.createElement("div");
+      label.className = "stat-label";
+      label.textContent = camera;
+      card.appendChild(label);
+
+      var img = document.createElement("img");
+      img.src = "/api/" + encodeURIComponent(camera) + "/latest.jpg?h=180";
+      img.alt = camera;
+      img.style.cssText = "display:block;width:100%;border-radius:4px;margin-top:0.4em";
+      card.appendChild(img);
+
+      function row(labelText, input, suffix) {
+        var l = document.createElement("label");
+        l.className = "help";
+        l.style.cssText = "display:block;margin-top:0.4em";
+        l.appendChild(document.createTextNode(labelText + " "));
+        l.appendChild(input);
+        if (suffix) l.appendChild(document.createTextNode(" " + suffix));
+        card.appendChild(l);
+        return l;
+      }
+
+      var lensSel = document.createElement("select");
+      lensPresets.forEach(function (lens) {
+        var opt = document.createElement("option");
+        opt.value = lens.id;
+        opt.textContent = lens.label;
+        lensSel.appendChild(opt);
+      });
+      lensSel.value = "custom";
+      row("lens", lensSel);
+
+      var focal = document.createElement("input");
+      focal.type = "range";
+      focal.step = "0.1";
+      var focalRow = row("zoom", focal);
+      var focalLabel = document.createElement("span");
+      focalRow.appendChild(focalLabel);
+
+      var hfov = document.createElement("input");
+      hfov.type = "number";
+      hfov.min = "11"; hfov.max = "360"; hfov.step = "1";
+      hfov.className = "num-4e";
+      hfov.value = "90";
+      row("field of view", hfov, "°");
+
+      function syncLens() {
+        var lens = lensById(lensSel.value);
+        var isVari = lens && lens.type === "varifocal";
+        focalRow.style.display = isVari ? "block" : "none";
+        if (isVari) {
+          focal.min = lens.focal_min; focal.max = lens.focal_max;
+          focal.value = lens.focal_min;
+          hfov.value = Math.round(hfovFromFocal(lens, lens.focal_min));
+          focalLabel.textContent = " " + lens.focal_min + " mm";
+        } else if (lens && lens.type === "fixed") {
+          hfov.value = lens.hfov;
+        }
+      }
+      lensSel.addEventListener("change", syncLens);
+      focal.addEventListener("input", function () {
+        var lens = lensById(lensSel.value);
+        if (lens && lens.type === "varifocal") {
+          hfov.value = Math.round(hfovFromFocal(lens, parseFloat(focal.value)));
+          focalLabel.textContent = " " + focal.value + " mm";
+        }
+      });
+      syncLens();
+
+      var mount = document.createElement("input");
+      mount.type = "number";
+      mount.min = "1"; mount.max = "500"; mount.step = "0.5";
+      mount.className = "num-4e";
+      mount.value = "10";
+      row("mounting height", mount, "ft");
+
+      var tilt = document.createElement("input");
+      tilt.type = "number";
+      tilt.min = "-90"; tilt.max = "90"; tilt.step = "1";
+      tilt.className = "num-4e";
+      tilt.value = "12";
+      row("tilt (down-angle)", tilt, "°");
+
+      var faces = document.createElement("select");
+      CARDINALS.forEach(function (c) {
+        var opt = document.createElement("option");
+        opt.value = c;
+        opt.textContent = c;
+        faces.appendChild(opt);
+      });
+      row("faces", faces);
+
+      var btn = document.createElement("button");
+      btn.textContent = "Onboard → place on map";
+      btn.className = "btn-primary";
+      btn.style.marginTop = "0.5em";
+      btn.addEventListener("click", function () {
+        var h = parseFloat(hfov.value), m = parseFloat(mount.value),
+            t = parseFloat(tilt.value);
+        if (!(h > 10 && h <= 360) || !(m > 0 && m <= 500) || !(t >= -90 && t <= 90)) {
+          showBanner("onboard " + camera + ": HFOV 10–360°, mount 0–500 ft, tilt -90–90°.", true);
+          return;
+        }
+        if (!doc.camera_optics) doc.camera_optics = {};
+        var entry = { hfov: h, mount_ft: m, tilt_deg: t, faces: faces.value };
+        if (lensSel.value !== "custom") entry.lens = lensSel.value;
+        doc.camera_optics[camera] = entry;
+        placements = doc.camera_optics;
+        if (!doc.camera_layout) doc.camera_layout = {};
+        doc.camera_layout[camera] = doc.camera_layout[camera] || {
+          x: 0.5, y: 0.5,
+          azimuth: CARDINAL_DEG[faces.value],
+          fov: +h.toFixed(1),
+        };
+        placeMode = camera;
+        showBanner("Click the map where " + camera + " is mounted.", false);
+        markDirty();
+        renderOnboarding();
+        renderMap();
+      });
+      card.appendChild(btn);
+      onboardCards.appendChild(card);
+    });
+  }
+
+  function mapUnit(ev) {
+    var rect = mapEl.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height)),
+    };
+  }
+
   // Drawing the secure area: a drag that STARTS on empty map background
   // (not a dot, wedge, or arrow) sketches the rectangle corner-to-corner.
+  // Place mode (onboarding) and scale calibration claim the click first.
   mapEl.addEventListener("pointerdown", function (ev) {
+    if (placeMode) {
+      var cam = placeMode;
+      placeMode = null;
+      var p = mapUnit(ev);
+      if (!doc.camera_layout) doc.camera_layout = {};
+      var entry = doc.camera_layout[cam] || {};
+      entry.x = +p.x.toFixed(4);
+      entry.y = +p.y.toFixed(4);
+      doc.camera_layout[cam] = entry;
+      selectedCamera = cam;
+      showBanner(cam + " placed — drag its arrow to aim, then Save.", false);
+      markDirty();
+      renderMap();
+      return;
+    }
+    if (calibrating) {
+      handleCalibrateClick(mapUnit(ev));
+      return;
+    }
     if (ev.target !== mapEl) return;
     var rect = mapEl.getBoundingClientRect();
     function unit(e) {
@@ -667,11 +990,49 @@
     document.getElementById("detail-cardinal").textContent =
       entry && entry.azimuth !== undefined ? cardinalOf(entry.azimuth) : "";
     var p = placements[selectedCamera];
+    detailHfov.value = p && p.hfov !== undefined ? p.hfov : "";
+    detailMount.value = p && p.mount_ft !== undefined ? p.mount_ft : "";
+    detailTilt.value = p && p.tilt_deg !== undefined ? p.tilt_deg : "";
     document.getElementById("detail-placement").textContent = p
-      ? "placement: " + p.hfov + "° HFOV · " + p.mount_ft + "ft mount · "
-        + p.tilt_deg + "° down · faces " + p.faces
-      : "";
+      ? (p.faces ? "faces " + p.faces : "")
+      : "not onboarded — no rig facts";
   }
+
+  var detailHfov = document.getElementById("detail-hfov");
+  var detailMount = document.getElementById("detail-mount");
+  var detailTilt = document.getElementById("detail-tilt");
+
+  function opticsEntry() {
+    if (!selectedCamera) return null;
+    if (!doc.camera_optics) doc.camera_optics = {};
+    if (!doc.camera_optics[selectedCamera]) {
+      doc.camera_optics[selectedCamera] = { hfov: 90, mount_ft: 10, tilt_deg: 12 };
+    }
+    placements = doc.camera_optics;
+    return doc.camera_optics[selectedCamera];
+  }
+
+  detailHfov.addEventListener("change", function () {
+    var e = opticsEntry();
+    if (!e) return;
+    e.hfov = Math.min(360, Math.max(10.5, parseFloat(detailHfov.value) || 90));
+    markDirty();
+    renderMap();
+  });
+  detailMount.addEventListener("change", function () {
+    var e = opticsEntry();
+    if (!e) return;
+    e.mount_ft = Math.min(500, Math.max(0.5, parseFloat(detailMount.value) || 10));
+    markDirty();
+    renderMap();
+  });
+  detailTilt.addEventListener("change", function () {
+    var e = opticsEntry();
+    if (!e) return;
+    e.tilt_deg = Math.min(90, Math.max(-90, parseFloat(detailTilt.value) || 0));
+    markDirty();
+    renderMap();
+  });
 
   detailAzimuth.addEventListener("change", function () {
     if (!selectedCamera) return;
@@ -791,11 +1152,12 @@
     saveBtn.disabled = true;
     saveState.textContent = "saving...";
     try {
-      // All three camera maps are sticky server-side when absent — always
-      // send them explicitly so this page can also clear entries.
+      // The camera maps are sticky server-side when absent — always send
+      // them explicitly so this page can also clear entries.
       doc.camera_headings = doc.camera_headings || {};
       doc.camera_layout = doc.camera_layout || {};
       doc.camera_neighbors = doc.camera_neighbors || {};
+      doc.camera_optics = doc.camera_optics || {};
       await fetchJson("/v1/push/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -813,12 +1175,15 @@
       var data = await fetchJson("/v1/push/settings");
       doc = data.settings;
       cameras = data.available_cameras || [];
-      placements = data.placement_deployments || {};
+      doc.camera_optics = doc.camera_optics || data.placement_deployments || {};
+      placements = doc.camera_optics;
       mapScaleInput.value = doc.map_scale_ft || "";
       cardsEl.textContent = "";
       cameras.forEach(function (camera) {
         cardsEl.appendChild(renderCard(camera));
       });
+      applyFloorplan();
+      renderOnboarding();
       renderMap();
       if (!cameras.length) showBanner("No cameras found in the Frigate config.", false);
     } catch (err) {

@@ -5,6 +5,7 @@ that applies a settings document to the live routing engine.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from frigate_sidecar.push import ladder_policy, policy_settings
@@ -323,3 +324,69 @@ def test_zone_override_does_not_affect_other_zones_in_the_same_place_class():
     assert evaluate_ladder(
         Snapshot(subject="animal", place="yard", zone="parking_spot")
     ) == settings["routing_table"]["animal"]["yard"]
+
+
+def test_validate_rejects_bad_camera_optics():
+    base = policy_settings.default_settings()
+    base["camera_optics"] = {"cam": {"hfov": 5, "mount_ft": -1, "tilt_deg": 100, "faces": "Q"}}
+    errors = policy_settings.validate_settings(base)
+    assert any("hfov" in e for e in errors)
+    assert any("mount_ft" in e for e in errors)
+    assert any("tilt_deg" in e for e in errors)
+    assert any("faces" in e for e in errors)
+
+
+def test_normalize_camera_optics_rounds_and_drops_incomplete():
+    doc = policy_settings.default_settings()
+    doc["camera_optics"] = {
+        "good": {"hfov": 114.96, "mount_ft": 10.04, "tilt_deg": 12, "vfov": 79.44,
+                 "faces": "SE", "lens": " dahua-5442-vf ", "junk": "x"},
+        "incomplete": {"hfov": 90},
+    }
+    merged = policy_settings.normalize_settings(doc)
+    assert merged["camera_optics"] == {
+        "good": {"hfov": 115.0, "mount_ft": 10.0, "tilt_deg": 12.0, "vfov": 79.4,
+                 "faces": "SE", "lens": "dahua-5442-vf"},
+    }
+
+
+def test_normalize_floorplan_round_trips_and_clears():
+    doc = policy_settings.default_settings()
+    doc["floorplan"] = {
+        "ext": "png", "w": 1600, "h": 1200, "uploaded_at": "2026-08-16T00:00:00Z",
+        "calibration": {"x0": 0.1, "y0": 0.2, "x1": 0.9, "y1": 0.2, "length_ft": 42.04},
+    }
+    merged = policy_settings.normalize_settings(doc)
+    assert merged["floorplan"]["ext"] == "png"
+    assert merged["floorplan"]["calibration"]["length_ft"] == 42.0
+    cleared = policy_settings.normalize_settings({**doc, "floorplan": None})
+    assert cleared["floorplan"] is None
+
+
+def test_startup_seeds_camera_optics_when_key_absent(tmp_path: Path):
+    path = tmp_path / "push_settings.json"
+    settings = policy_settings.startup(path)
+    seeded = settings["camera_optics"]
+    assert seeded == policy_settings.seeded_camera_optics()
+    assert seeded["street"]["mount_ft"] == 35
+    # Persisted, so the next startup sees the key and does not re-seed.
+    on_disk = json.loads(path.read_text())
+    assert on_disk["camera_optics"] == seeded
+    policy_settings.reset_for_tests()
+
+
+def test_startup_never_reseeds_over_user_edits(tmp_path: Path):
+    path = tmp_path / "push_settings.json"
+    policy_settings.startup(path)
+    doc = json.loads(path.read_text())
+    doc["camera_optics"] = {"street": {"hfov": 100.0, "mount_ft": 20.0, "tilt_deg": 15.0}}
+    path.write_text(json.dumps(doc))
+    settings = policy_settings.startup(path)
+    assert settings["camera_optics"] == {
+        "street": {"hfov": 100.0, "mount_ft": 20.0, "tilt_deg": 15.0},
+    }
+    # Even an emptied table (every camera deleted) stays empty.
+    doc["camera_optics"] = {}
+    path.write_text(json.dumps(doc))
+    assert policy_settings.startup(path)["camera_optics"] == {}
+    policy_settings.reset_for_tests()

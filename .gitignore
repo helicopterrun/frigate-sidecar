@@ -44,6 +44,9 @@ config/sidecar.yml
 # written by PUT /v1/push/settings, not code.
 config/push_settings.json
 
+# Uploaded floorplan image behind the /cameras layout map (runtime data)
+config/floorplan.*
+
 # Logs
 *.log
 
