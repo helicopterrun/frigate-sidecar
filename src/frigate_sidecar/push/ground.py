@@ -1,0 +1,136 @@
+"""Ground-plane projection: image coordinates -> real-world feet.
+
+Built entirely from the placement page's per-camera facts (measured HFOV,
+mount height, estimated tilt) — no zone dimension measurements required.
+A first-order pinhole model over flat ground: accurate enough (±25%) to
+separate walking from running and to place tracks on the layout map, and
+honest about its limits — anything near the horizon or beyond
+_MAX_FORWARD_FT projects to None instead of a wild number.
+
+Frigate's built-in speed estimation (zone `distances`) stays the upgrade
+path if zones ever get measured; this module exists so speed works today.
+"""
+
+from __future__ import annotations
+
+import math
+import statistics
+
+from frigate_sidecar.analysis import optics
+
+#: Beyond this forward distance the depression angle is so shallow that a
+#: one-pixel error swings the estimate by tens of feet — refuse to guess.
+_MAX_FORWARD_FT = 150.0
+#: Minimum depression angle (degrees) for a usable projection.
+_MIN_DEPRESSION_DEG = 1.0
+#: Speed bins (ft/s). Brisk walk ~4.4 ft/s, slow jog ~7.5 ft/s.
+RUNNING_FT_S = 7.0
+WALKING_FT_S = 1.5
+#: Segments must span at least this much time for a stable estimate.
+_MIN_SEGMENT_DT_S = 0.4
+
+_DETECT_ASPECT = (16, 9)
+
+
+def camera_ground(camera: str) -> dict[str, float] | None:
+    """Per-camera projection facts, or None when the camera isn't in the
+    placement fleet or lacks the needed numbers."""
+    facts = optics.deployment_map().get(camera)
+    if not facts:
+        return None
+    hfov, mount, tilt = facts.get("hfov"), facts.get("mount_ft"), facts.get("tilt_deg")
+    if not hfov or not mount or tilt is None:
+        return None
+    return {
+        "hfov": float(hfov),
+        "mount_ft": float(mount),
+        "tilt_deg": float(tilt),
+        "vfov": optics.vfov_from_hfov(float(hfov), *_DETECT_ASPECT),
+    }
+
+
+def project(
+    x_norm: float, y_norm: float, facts: dict[str, float],
+) -> tuple[float, float] | None:
+    """Image point -> (forward_ft, lateral_ft) in the camera's ground frame.
+    Forward is along the optical axis' ground projection; lateral is
+    camera-right. None when the point sits at/above the effective horizon
+    or projects past _MAX_FORWARD_FT."""
+    depression = facts["tilt_deg"] + (y_norm - 0.5) * facts["vfov"]
+    if depression < _MIN_DEPRESSION_DEG:
+        return None
+    forward = facts["mount_ft"] / math.tan(math.radians(depression))
+    if forward > _MAX_FORWARD_FT or forward < 0:
+        return None
+    lateral = (x_norm - 0.5) * 2.0 * forward * math.tan(math.radians(facts["hfov"] / 2))
+    return (forward, lateral)
+
+
+def speed_ft_s(
+    path_data: list[tuple[float, float, float]] | tuple, camera: str,
+) -> float | None:
+    """Median ground speed over the trail's recent usable segments. None
+    when the camera lacks projection facts, points lack timestamps, or no
+    segment spans enough time with both endpoints projectable."""
+    facts = camera_ground(camera)
+    if facts is None or not path_data or len(path_data) < 2:
+        return None
+    pts = [p for p in path_data if len(p) >= 3 and p[2] > 0]
+    if len(pts) < 2:
+        return None
+    speeds: list[float] = []
+    # Walk backward pairing each point with the nearest earlier point that
+    # gives a >= _MIN_SEGMENT_DT_S span; up to 3 segments, newest first.
+    i = len(pts) - 1
+    while i > 0 and len(speeds) < 3:
+        j = i - 1
+        while j >= 0 and pts[i][2] - pts[j][2] < _MIN_SEGMENT_DT_S:
+            j -= 1
+        if j < 0:
+            break
+        a, b = pts[j], pts[i]
+        ga, gb = project(a[0], a[1], facts), project(b[0], b[1], facts)
+        dt = b[2] - a[2]
+        if ga is not None and gb is not None and dt > 0:
+            dist = math.hypot(gb[0] - ga[0], gb[1] - ga[1])
+            speeds.append(dist / dt)
+        i = j
+    if not speeds:
+        return None
+    return statistics.median(speeds)
+
+
+def speed_label(ft_s: float | None) -> str | None:
+    """Honest bins only — no numeric mph from a ±25% model."""
+    if ft_s is None:
+        return None
+    if ft_s >= RUNNING_FT_S:
+        return "running"
+    if ft_s >= WALKING_FT_S:
+        return "walking"
+    return None
+
+
+def world_position(
+    x_norm: float, y_norm: float, *,
+    camera: str,
+    layout_entry: dict[str, float],
+    scale_ft: float,
+) -> tuple[float, float] | None:
+    """Image point -> layout-map coordinates (0..1-ish space, may exceed
+    the map edges). Requires the camera's map position + pie azimuth and
+    the map's real-world width (`map_scale_ft`)."""
+    facts = camera_ground(camera)
+    azimuth = layout_entry.get("azimuth")
+    if facts is None or azimuth is None or not scale_ft or scale_ft <= 0:
+        return None
+    g = project(x_norm, y_norm, facts)
+    if g is None:
+        return None
+    forward, lateral = g
+    rad = math.radians(azimuth)
+    # Map coords y-down, compass 0 = north = -y: view = (sin, -cos),
+    # camera-right = (cos, sin).
+    dx = (forward * math.sin(rad) + lateral * math.cos(rad)) / scale_ft
+    dy = (forward * -math.cos(rad) + lateral * math.sin(rad)) / scale_ft
+    return (layout_entry.get("x", 0.0) + dx, layout_entry.get("y", 0.0) + dy)

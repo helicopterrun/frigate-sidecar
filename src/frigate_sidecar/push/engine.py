@@ -960,6 +960,11 @@ class PushEngine:
             activity_payload.UNPROMOTED_DISMISSAL_TAIL_S if unpromoted
             else self.activity_dismissal_tail_s
         )
+        # A story that ended while its subject was walking AWAY reads as
+        # already-over — let the LA leave the lock screen faster.
+        from frigate_sidecar.push import delivery_wire as _dw
+        if _dw.last_heading(camera, track_id) == "leaving":
+            tail = min(tail, 10.0)
 
         sent = 0
         if row["token"]:

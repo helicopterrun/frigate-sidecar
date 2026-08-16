@@ -120,23 +120,28 @@ def _opt_float(value: Any) -> float | None:
         return None
 
 
-def _parse_path_xy(raw: Any) -> tuple[tuple[float, float], ...]:
-    """Extract (x, y) pairs from Frigate's path_data.
-    Frigate sends [[x, y, t], ...] or [[[x, y], t], ...]."""
+def _parse_path_xy(raw: Any) -> tuple[tuple[float, float, float], ...]:
+    """Extract (x, y, t) triples from Frigate's path_data.
+    Frigate sends [[x, y, t], ...] or [[[x, y], t], ...]. Timestamps are
+    load-bearing since 2026-08-15 (ground-plane speed needs dt); a point
+    without one gets t=0.0 rather than being dropped."""
     if not isinstance(raw, (list, tuple)) or not raw:
         return ()
-    result: list[tuple[float, float]] = []
+    result: list[tuple[float, float, float]] = []
     for entry in raw:
         if not entry:
             continue
+        t: Any = 0.0
         if len(entry) == 2 and isinstance(entry[0], (list, tuple)) and len(entry[0]) == 2:
-            (x, y), _t = entry
-        elif len(entry) >= 2:
+            (x, y), t = entry
+        elif len(entry) >= 3:
+            x, y, t = entry[0], entry[1], entry[2]
+        elif len(entry) == 2:
             x, y = entry[0], entry[1]
         else:
             continue
         try:
-            result.append((float(x), float(y)))
+            result.append((float(x), float(y), float(t)))
         except (TypeError, ValueError):
             continue
     return tuple(result)

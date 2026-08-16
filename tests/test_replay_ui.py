@@ -142,3 +142,48 @@ def test_stacked_dry_run(client: TestClient) -> None:
     assert run["state"] == "done"
     assert len(run["scenarios"]) == 2
     assert len(run["decisions"]) > 3
+
+
+def test_capture_window_endpoint_shapes_tracks(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path
+):
+    import json
+    import time
+
+    settings = _settings(frigate_db_path, sidecar_db_path)
+    capture_path = tmp_path / "mqtt-capture.jsonl"
+    settings.push.capture_path = str(capture_path)
+
+    now = time.time()
+    lines = []
+    for i in range(3):
+        lines.append({
+            "ts": now - 10 + i,
+            "topic": "frigate/events",
+            "payload": {"after": {
+                "id": "trk1", "camera": "garden", "label": "person",
+                "path_data": [[[0.1 + 0.1 * i, 0.5], now - 10 + i]],
+            }},
+        })
+    # A single-point track is dropped; a reviews line is ignored.
+    lines.append({
+        "ts": now - 5, "topic": "frigate/events",
+        "payload": {"after": {"id": "trk2", "camera": "street", "label": "car",
+                              "path_data": [[[0.5, 0.5], now - 5]]}},
+    })
+    lines.append({"ts": now - 4, "topic": "frigate/reviews", "payload": {}})
+    capture_path.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+
+    client = TestClient(create_app(settings))
+    resp = client.get("/replay/capture-window?minutes=15")
+    assert resp.status_code == 200
+    tracks = resp.json()["tracks"]
+    assert len(tracks) == 1
+    t = tracks[0]
+    assert t["camera"] == "garden" and t["label"] == "person"
+    assert len(t["points"]) == 3
+    assert t["points"][0][0] == pytest.approx(0.1)
+
+    # Camera filter.
+    resp = client.get("/replay/capture-window?minutes=15&camera=street")
+    assert resp.json()["tracks"] == []

@@ -76,7 +76,7 @@ class TrackedObject:
     stationary: bool = False  # Phase 5's `require_stationary`
     sub_label: str = ""  # Phase 5's sub_label allow/deny
     #: §8 instrument fields — may be absent depending on Frigate version.
-    path_data: tuple[tuple[float, float], ...] = field(default_factory=tuple)
+    path_data: tuple[tuple[float, float, float], ...] = field(default_factory=tuple)
     velocity_angle: float | None = None
     average_estimated_speed: float | None = None
 

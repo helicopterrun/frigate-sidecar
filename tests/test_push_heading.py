@@ -135,3 +135,45 @@ def test_heading_label_falls_back_to_derived_when_no_manual_arrow():
     settings["camera_headings"] = {"garden": {"dx": 0.0, "dy": 1.0}}
     policy_settings.apply_settings(settings)
     assert _heading_label([(0.5, 0.9), (0.5, 0.4)], False, "garden") == "leaving"
+
+
+# ---- Direction/speed as ladder modifiers --------------------------------
+
+
+def test_ladder_reasons_include_direction_and_speed():
+    from frigate_sidecar.push import ladder_policy
+    from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+
+    assert "approaching_secure" in ladder_policy.WORRY_REASONS
+    assert "moving_fast" in ladder_policy.WORRY_REASONS
+    assert "leaving_scene" in ladder_policy.CALM_REASONS
+
+    base = evaluate_ladder(Snapshot(subject="person", place="yard"))
+    bumped = evaluate_ladder(
+        Snapshot(subject="person", place="yard", approaching_secure=True)
+    )
+    calmed = evaluate_ladder(
+        Snapshot(subject="person", place="doors", leaving_scene=True)
+    )
+    levels = ladder_policy.LEVELS
+    assert levels.index(bumped) == levels.index(base) + 1
+    doors_base = evaluate_ladder(Snapshot(subject="person", place="doors"))
+    assert levels.index(calmed) == levels.index(doors_base) - 1
+
+
+def test_heading_streak_counts_and_resets():
+    from frigate_sidecar.push.delivery_wire import (
+        _heading_streaks,
+        _update_heading_streak,
+        last_heading,
+    )
+
+    _heading_streaks.clear()
+    assert _update_heading_streak("cam", "t1", "approaching") == 1
+    assert _update_heading_streak("cam", "t1", "approaching") == 2
+    assert last_heading("cam", "t1") == "approaching"
+    # Direction change resets the streak.
+    assert _update_heading_streak("cam", "t1", "leaving") == 1
+    # None (unknown) zeroes it.
+    assert _update_heading_streak("cam", "t1", None) == 0
+    _heading_streaks.clear()

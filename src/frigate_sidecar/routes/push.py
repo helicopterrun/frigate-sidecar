@@ -693,9 +693,11 @@ async def put_push_settings(request: Request) -> dict[str, Any]:
     for sticky_key in ("camera_neighbors", "camera_headings", "camera_layout"):
         if not isinstance(body.get(sticky_key), dict):
             merged[sticky_key] = policy_settings.get_active().get(sticky_key, {})
-    # secure_area distinguishes "absent" (sticky) from explicit null (clear).
-    if "secure_area" not in body:
-        merged["secure_area"] = policy_settings.get_active().get("secure_area")
+    # secure_area / map_scale_ft distinguish "absent" (sticky) from
+    # explicit null (clear).
+    for nullable_key in ("secure_area", "map_scale_ft"):
+        if nullable_key not in body:
+            merged[nullable_key] = policy_settings.get_active().get(nullable_key)
     policy_settings.save_settings(settings.push.push_settings_path, merged)
     policy_settings.apply_settings(merged)
     return {"ok": True}

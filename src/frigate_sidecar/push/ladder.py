@@ -69,6 +69,12 @@ class Snapshot:
     night: bool = False
     dwell_exceeded: bool = False
     seen_before_still_unrecognized: bool = False
+    #: Direction/speed modifiers (2026-08-15): sustained movement toward the
+    #: secure area, sustained movement away, and running-pace speed — all
+    #: derived from ground-plane calibration in delivery_wire/ground.py.
+    approaching_secure: bool = False
+    leaving_scene: bool = False
+    moving_fast: bool = False
     known_role: bool = False
     low_confidence: bool = False
     no_recognition_capability: bool = False

@@ -306,7 +306,7 @@ class TrackState:
     #: each device runs its own activity for the same real-world moment.
     stages: dict[tuple[str, str], str] = field(default_factory=dict)
     #: §8 instrument fields, updated from frigate/events.
-    path_data: list[tuple[float, float]] = field(default_factory=list)
+    path_data: list[tuple[float, float, float]] = field(default_factory=list)
     velocity_angle: float | None = None
     average_estimated_speed: float | None = None
     stationary: bool = False
@@ -374,7 +374,7 @@ class TrackStore:
         current_zones: tuple[str, ...],
         *,
         now: float,
-        path_data: tuple[tuple[float, float], ...] = (),
+        path_data: tuple[tuple[float, float, float], ...] = (),
         velocity_angle: float | None = None,
         average_estimated_speed: float | None = None,
         stationary: bool = False,

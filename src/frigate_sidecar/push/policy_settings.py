@@ -206,6 +206,9 @@ def default_settings() -> dict[str, Any]:
         # "secure area" rectangle (home + protected ground). Declarative
         # for now — display and future direction semantics.
         "secure_area": None,
+        # Real-world width of the layout map, in feet. Unlocks world-space
+        # track projection (ground.world_position) and map trails.
+        "map_scale_ft": None,
     }
 
 
@@ -430,6 +433,12 @@ def validate_settings(data: Any) -> list[str]:
         if not ok:
             errors.append("secure_area must be null or {x0, y0, x1, y1} within 0..1")
 
+    map_scale_ft = data.get("map_scale_ft")
+    if map_scale_ft is not None and not (
+        isinstance(map_scale_ft, (int, float)) and 0 < map_scale_ft <= 100000
+    ):
+        errors.append("map_scale_ft must be null or a positive number of feet")
+
     return errors
 
 
@@ -593,6 +602,12 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
             }
     elif secure_area is None and "secure_area" in data:
         merged["secure_area"] = None
+
+    map_scale_ft = data.get("map_scale_ft")
+    if isinstance(map_scale_ft, (int, float)) and 0 < map_scale_ft <= 100000:
+        merged["map_scale_ft"] = round(float(map_scale_ft), 1)
+    elif map_scale_ft is None and "map_scale_ft" in data:
+        merged["map_scale_ft"] = None
 
     return merged
 

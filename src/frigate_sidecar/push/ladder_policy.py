@@ -46,10 +46,11 @@ DANGEROUS_ANIMAL_LABELS = frozenset({"bear", "skunk", "raccoon"})
 #: -- `ladder.py` reads them by `getattr`.
 WORRY_REASONS = (
     "nobody_home", "night", "dwell_exceeded", "seen_before_still_unrecognized",
+    "approaching_secure", "moving_fast",
 )
 
 #: Reasons that pull the result one level down. Must be `Snapshot` field names.
-CALM_REASONS = ("known_role", "low_confidence", "no_recognition_capability")
+CALM_REASONS = ("known_role", "low_confidence", "no_recognition_capability", "leaving_scene")
 
 #: Fixed level for `source == "system"` cards (camera offline, disk full,
 #: etc.) -- these have no subject or place, so they never touch the table,

@@ -28,9 +28,17 @@ import logging
 import math
 import secrets
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from frigate_sidecar.push import card_store, decision_trace, live_activities, policy_settings, store
+from frigate_sidecar.push import (
+    card_store,
+    decision_trace,
+    ground,
+    live_activities,
+    policy_settings,
+    store,
+)
 from frigate_sidecar.push.cards import CREATE, DEESCALATE, ENRICH, ESCALATE, RESOLVE, Card
 from frigate_sidecar.push.delivery import (
     _device_eligible,
@@ -257,11 +265,33 @@ def _heading_label(
 
 def _build_motion(
     path_data: list[tuple[float, float]] | None, stationary: bool, camera: str,
+    speed_label: str | None = None,
 ) -> dict[str, str] | None:
     heading = _heading_label(path_data, stationary, camera)
     if heading is None:
         return None
-    return {"heading": heading}
+    motion: dict[str, str] = {"heading": heading}
+    if speed_label and heading not in ("stationary",):
+        motion["speed_label"] = speed_label
+    return motion
+
+
+#: Per-(camera, track) consecutive-heading counter for sustained-direction
+#: routing. In-memory like `_la_prev_state`; a restart just resets streaks.
+_heading_streaks: dict[tuple[str, str], tuple[str | None, int]] = {}
+
+
+def _update_heading_streak(camera: str, track_id: str, heading: str | None) -> int:
+    prev, count = _heading_streaks.get((camera, track_id), (None, 0))
+    count = count + 1 if (heading is not None and heading == prev) else (1 if heading else 0)
+    _heading_streaks[(camera, track_id)] = (heading, count)
+    return count
+
+
+def last_heading(camera: str, track_id: str) -> str | None:
+    """The most recent heading observed for this track (engine reads this
+    to shorten the LA dismissal tail on 'leaving')."""
+    return _heading_streaks.get((camera, track_id), (None, 0))[0]
 
 
 def _build_zones_ladder(
@@ -287,11 +317,15 @@ def _build_zones_ladder(
     return {"ladder": ladder, "current_index": current_index}
 
 
-def _build_la_path(path_data: list[tuple[float, float]]) -> dict[str, Any] | None:
+def _build_la_path(
+    path_data: list[tuple[float, float, float]],
+) -> dict[str, Any] | None:
     if not path_data:
         return None
+    # Wire contract stays [x, y] pairs (4KB ContentState budget) — the
+    # per-point timestamp is server-side fuel (speed), never shipped.
     points = live_activities.downsample_path(
-        [list(pt) for pt in path_data],
+        [[pt[0], pt[1]] for pt in path_data],
     )
     if not points:
         return None
@@ -826,9 +860,57 @@ async def handle_delivery_event(
 
     muted = bool(policy.get("mute_sounds"))
 
+    # Motion BEFORE routing (2026-08-15): heading streaks and ground speed
+    # are ladder modifiers now, not just LA decoration. Computed once per
+    # track here, reused for the LA content build below.
+    approaching_secure = False
+    leaving_scene = False
+    moving_fast = False
+    track_motion: dict[str, dict[str, str] | None] = {}
+    if engine is not None:
+        for _tid in (event.track_ids or (event.event_id,)):
+            _ts = engine.tracks.get(event.camera, _tid)
+            if _ts is None:
+                continue
+            _heading = _heading_label(_ts.path_data, _ts.stationary, event.camera)
+            _speed = ground.speed_label(ground.speed_ft_s(_ts.path_data, event.camera))
+            _streak = _update_heading_streak(event.camera, _tid, _heading)
+            if _heading == "approaching" and _streak >= 2:
+                approaching_secure = True
+            if _heading == "leaving" and _streak >= 2:
+                leaving_scene = True
+            if _speed == "running":
+                moving_fast = True
+            track_motion[_tid] = _build_motion(
+                _ts.path_data, _ts.stationary, event.camera, speed_label=_speed,
+            )
+            # World-projection validation (log-only this round): with the
+            # map scaled and this camera aimed, place the track on the map.
+            # Two cameras seeing one walk should log nearby positions —
+            # the evidence for future geometric dedup.
+            _layout = policy.get("camera_layout", {}).get(event.camera)
+            _scale = policy.get("map_scale_ft")
+            if _layout and _scale and _ts.path_data:
+                _pt = _ts.path_data[-1]
+                _wp = ground.world_position(
+                    _pt[0], _pt[1], camera=event.camera,
+                    layout_entry=_layout, scale_ft=_scale,
+                )
+                if _wp is not None:
+                    logger.info(
+                        "push: world pos camera=%s track=%s map=(%.3f, %.3f)",
+                        event.camera, _tid, _wp[0], _wp[1],
+                    )
+    # A track approaching outranks another leaving in the same event.
+    leaving_scene = leaving_scene and not approaching_secure
+
     snapshot, subject_kind, place_class = snapshot_from_review(
         event, zone_classes=policy["zone_classes"],
         nobody_home=nobody_home, night=night, dwell_exceeded=dwell_exceeded,
+    )
+    snapshot = replace(
+        snapshot, approaching_secure=approaching_secure,
+        leaving_scene=leaving_scene, moving_fast=moving_fast,
     )
     level = evaluate_ladder(snapshot)
 
@@ -858,6 +940,12 @@ async def handle_delivery_event(
         trace_reasons.append("routing_table")
     if qh_capped:
         trace_reasons.append("quiet_hours_cap")
+    if approaching_secure:
+        trace_reasons.append("approaching")
+    if leaving_scene:
+        trace_reasons.append("leaving")
+    if moving_fast:
+        trace_reasons.append("running")
 
     mutated = 0
     for track_id in track_ids:
@@ -959,9 +1047,7 @@ async def handle_delivery_event(
         if engine is not None:
             track_state = engine.tracks.get(event.camera, track_id)
             if track_state is not None:
-                la_motion = _build_motion(
-                    track_state.path_data, track_state.stationary, event.camera,
-                )
+                la_motion = track_motion.get(track_id)
                 live_zones = tuple(
                     z for z in track_state.first_seen_in_zone if z
                 )
@@ -1091,6 +1177,7 @@ async def handle_delivery_resolve(
     # closing on its own path, and this track will get a fresh card of its
     # own if it's still detected afterward -- it will have moved zones by
     # then in the walk-through case that motivated dedup in the first place).
+    _heading_streaks.pop((camera, track_id), None)
     if card_store.get_track_alias(conn, camera, track_id) is not None:
         card_store.delete_track_alias(conn, camera, track_id)
         return 0

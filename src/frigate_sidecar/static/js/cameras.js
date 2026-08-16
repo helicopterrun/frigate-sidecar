@@ -352,10 +352,13 @@
       var selected = camera === selectedCamera;
 
       if (hasAim) {
+        var coverage = coverageToggle && coverageToggle.checked;
         var path = document.createElementNS(SVG_NS, "path");
         path.setAttribute("d", wedgePath(entry, az, fov, r));
         path.setAttribute("fill", "var(--accent, #ffb454)");
-        path.setAttribute("fill-opacity", selected ? "0.28" : "0.14");
+        path.setAttribute(
+          "fill-opacity", coverage ? "0.38" : (selected ? "0.28" : "0.14")
+        );
         path.setAttribute("stroke", "none");
         // The whole pie is a rotation surface: drag anywhere inside it to
         // swing the aim — the biggest possible target.
@@ -425,6 +428,11 @@
         svg.appendChild(text);
       }
     });
+    drawTrails(svg);
+    // Coverage view: darken the ground so unlit (unwatched) area reads as
+    // the blind spots.
+    mapEl.style.background = (coverageToggle && coverageToggle.checked)
+      ? "var(--deep, #0a0e14)" : "var(--surface)";
     mapEl.appendChild(svg);
     refreshAllCards(); // pie/secure edits change the derived arrows live
 
@@ -503,6 +511,97 @@
       selectedCamera = camera;
       renderMap();
     }
+  }
+
+  // ---- Map scale, coverage view, walk trails --------------------------
+
+  var mapScaleInput = document.getElementById("map-scale");
+  var coverageToggle = document.getElementById("coverage-toggle");
+  var trailsSelect = document.getElementById("trails-window");
+  var trailsNote = document.getElementById("trails-note");
+  var trailTracks = []; // fetched capture tracks for the current window
+
+  mapScaleInput.addEventListener("change", function () {
+    var v = parseFloat(mapScaleInput.value);
+    doc.map_scale_ft = v > 0 ? v : null;
+    markDirty();
+    renderMap();
+  });
+  coverageToggle.addEventListener("change", renderMap);
+
+  // Mirror of ground.world_position: image point -> map coords, using the
+  // camera's placement facts (hfov/mount/tilt), pie azimuth, and map scale.
+  function worldPosition(camera, xNorm, yNorm) {
+    var entry = (doc.camera_layout || {})[camera];
+    var p = placements[camera];
+    var scale = doc.map_scale_ft;
+    if (!entry || entry.azimuth === undefined || !p || !p.hfov || !p.mount_ft ||
+        p.tilt_deg === undefined || !scale) return null;
+    var vfov = p.hfov ? (2 * Math.atan((9 / 16) * Math.tan((p.hfov * Math.PI) / 360)) * 180) / Math.PI : 0;
+    var dep = p.tilt_deg + (yNorm - 0.5) * vfov;
+    if (dep < 1) return null;
+    var forward = p.mount_ft / Math.tan((dep * Math.PI) / 180);
+    if (forward > 150 || forward < 0) return null;
+    var lateral = (xNorm - 0.5) * 2 * forward * Math.tan((p.hfov * Math.PI) / 360);
+    var rad = (entry.azimuth * Math.PI) / 180;
+    return {
+      x: entry.x + (forward * Math.sin(rad) + lateral * Math.cos(rad)) / scale,
+      y: entry.y + (forward * -Math.cos(rad) + lateral * Math.sin(rad)) / scale,
+    };
+  }
+
+  trailsSelect.addEventListener("change", async function () {
+    trailTracks = [];
+    trailsNote.textContent = "";
+    if (!trailsSelect.value) { renderMap(); return; }
+    if (!doc.map_scale_ft) {
+      trailsNote.textContent = "set map width first";
+      trailsSelect.value = "";
+      return;
+    }
+    trailsNote.textContent = "loading...";
+    try {
+      var data = await fetchJson("/replay/capture-window?minutes=" + trailsSelect.value);
+      trailTracks = data.tracks || [];
+      renderMap();
+    } catch (err) {
+      trailsNote.textContent = "error: " + err.message;
+    }
+  });
+
+  var TRAIL_COLORS = ["#ffb454", "#4caf82", "#6aa5ff", "#e86a6a", "#c98add",
+                      "#57c7c7", "#d8c25a", "#f08cba", "#9dbf60", "#8f9fb8"];
+
+  function drawTrails(svg) {
+    if (!trailTracks.length) return;
+    var drawn = 0, skippedCams = {};
+    trailTracks.forEach(function (track) {
+      var pts = [];
+      (track.points || []).forEach(function (p) {
+        var w = worldPosition(track.camera, p[0], p[1]);
+        if (w) pts.push(w);
+      });
+      if (pts.length < 2) {
+        skippedCams[track.camera] = true;
+        return;
+      }
+      var poly = document.createElementNS(SVG_NS, "polyline");
+      poly.setAttribute(
+        "points",
+        pts.map(function (w) { return w.x.toFixed(4) + "," + w.y.toFixed(4); }).join(" ")
+      );
+      poly.setAttribute("fill", "none");
+      var color = TRAIL_COLORS[cameras.indexOf(track.camera) % TRAIL_COLORS.length];
+      poly.setAttribute("stroke", color);
+      poly.setAttribute("stroke-width", track.label === "person" ? "0.006" : "0.003");
+      poly.setAttribute("stroke-opacity", track.label === "person" ? "0.9" : "0.35");
+      poly.setAttribute("stroke-linejoin", "round");
+      svg.appendChild(poly);
+      drawn++;
+    });
+    var skipped = Object.keys(skippedCams);
+    trailsNote.textContent = drawn + " trail(s)" +
+      (skipped.length ? " — no projection for: " + skipped.join(", ") : "");
   }
 
   // Drawing the secure area: a drag that STARTS on empty map background
@@ -715,6 +814,7 @@
       doc = data.settings;
       cameras = data.available_cameras || [];
       placements = data.placement_deployments || {};
+      mapScaleInput.value = doc.map_scale_ft || "";
       cardsEl.textContent = "";
       cameras.forEach(function (camera) {
         cardsEl.appendChild(renderCard(camera));

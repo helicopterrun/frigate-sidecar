@@ -313,3 +313,21 @@ def test_secure_area_round_trips_and_clears(client: TestClient):
     # Malformed rejects.
     doc["secure_area"] = {"x0": 0.2, "y0": 0.1, "x1": 1.4, "y1": 0.6}
     assert client.put("/v1/push/settings", json=doc).status_code == 400
+
+
+def test_map_scale_ft_round_trips_and_clears(client: TestClient):
+    doc = client.get("/v1/push/settings").json()["settings"]
+    doc["map_scale_ft"] = 120.0
+    assert client.put("/v1/push/settings", json=doc).status_code == 200
+    assert client.get("/v1/push/settings").json()["settings"]["map_scale_ft"] == 120.0
+
+    app_doc = {k: v for k, v in doc.items() if k != "map_scale_ft"}
+    assert client.put("/v1/push/settings", json=app_doc).status_code == 200
+    assert client.get("/v1/push/settings").json()["settings"]["map_scale_ft"] == 120.0
+
+    doc["map_scale_ft"] = None
+    assert client.put("/v1/push/settings", json=doc).status_code == 200
+    assert client.get("/v1/push/settings").json()["settings"]["map_scale_ft"] is None
+
+    doc["map_scale_ft"] = -5
+    assert client.put("/v1/push/settings", json=doc).status_code == 400

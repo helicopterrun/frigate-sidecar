@@ -43,6 +43,23 @@
     <button id="clear-secure" class="test-push" style="display:none">Clear secure area</button>
   </div>
 
+  <div style="margin-top:0.5em" class="help">
+    <label>Map width
+      <input id="map-scale" type="number" min="10" max="100000" step="5" style="width:5.5em"> ft
+      <span class="help">(real-world width of the square above — unlocks world trails &amp; speed cross-checks)</span>
+    </label>
+    <label style="margin-left:1em"><input type="checkbox" id="coverage-toggle"> Coverage view</label>
+    <label style="margin-left:1em">Walks
+      <select id="trails-window">
+        <option value="">off</option>
+        <option value="15">last 15 min</option>
+        <option value="60">last hour</option>
+        <option value="360">last 6 h</option>
+      </select>
+    </label>
+    <span id="trails-note" class="help" style="margin-left:0.6em"></span>
+  </div>
+
   <div style="margin-top:0.75em">
     <label class="help">View reach
       <input id="suggest-radius" type="range" min="0.1" max="0.5" step="0.05" value="0.25"

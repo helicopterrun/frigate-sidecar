@@ -1,0 +1,98 @@
+"""Ground-plane projection and speed (`push/ground.py`)."""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from frigate_sidecar.push import ground
+
+# A synthetic camera: 10ft mount, 12 deg down, 90 deg HFOV (matches the
+# stairway cameras). vfov ~ 58.7 deg at 16:9.
+FACTS = {
+    "hfov": 90.0, "mount_ft": 10.0, "tilt_deg": 12.0,
+    "vfov": 2 * math.degrees(math.atan((9 / 16) * math.tan(math.radians(45)))),
+}
+
+
+def test_project_center_of_frame():
+    fwd, lat = ground.project(0.5, 0.5, FACTS)
+    # Depression = tilt = 12 deg -> forward = 10 / tan(12) ~ 47 ft.
+    assert fwd == pytest.approx(10 / math.tan(math.radians(12)), rel=1e-6)
+    assert lat == pytest.approx(0.0, abs=1e-9)
+
+
+def test_project_lower_in_frame_is_closer():
+    near = ground.project(0.5, 0.9, FACTS)
+    far = ground.project(0.5, 0.4, FACTS)
+    assert near is not None and far is not None
+    assert near[0] < far[0]
+
+
+def test_project_above_horizon_is_none():
+    # Top of frame: depression = 12 - vfov/2 ~ -17 deg -> sky.
+    assert ground.project(0.5, 0.0, FACTS) is None
+
+
+def test_project_right_of_frame_is_positive_lateral():
+    fwd, lat = ground.project(1.0, 0.5, FACTS)
+    assert lat > 0
+    # At 90 deg HFOV the half-width equals the forward distance.
+    assert lat == pytest.approx(fwd, rel=1e-6)
+
+
+def test_speed_of_a_known_walk(monkeypatch):
+    monkeypatch.setattr(ground, "camera_ground", lambda cam: dict(FACTS))
+    # Walk straight down the frame center: y from 0.5 to 0.7 over 4s.
+    # Distances: y=0.5 -> 47.0ft, y=0.7 -> 10/tan(12+0.2*vfov) ...
+    path = []
+    for i in range(5):
+        y = 0.5 + 0.05 * i
+        path.append((0.5, y, 100.0 + i))
+    v = ground.speed_ft_s(path, "fake")
+    d_start = ground.project(0.5, 0.5, FACTS)[0]
+    d_end = ground.project(0.5, 0.7, FACTS)[0]
+    expected = (d_start - d_end) / 4.0
+    # Median of per-segment speeds on a curved projection differs a bit
+    # from the end-to-end average — generous tolerance.
+    assert v == pytest.approx(expected, rel=0.5)
+    assert v > 0
+
+
+def test_speed_requires_timestamps(monkeypatch):
+    monkeypatch.setattr(ground, "camera_ground", lambda cam: dict(FACTS))
+    assert ground.speed_ft_s([(0.5, 0.5, 0.0), (0.5, 0.7, 0.0)], "fake") is None
+
+
+def test_speed_none_for_unknown_camera():
+    assert ground.speed_ft_s([(0.5, 0.5, 1.0), (0.5, 0.7, 2.0)], "nope") is None
+
+
+def test_speed_labels():
+    assert ground.speed_label(None) is None
+    assert ground.speed_label(0.5) is None
+    assert ground.speed_label(4.0) == "walking"
+    assert ground.speed_label(9.0) == "running"
+
+
+def test_world_position_camera_facing_east(monkeypatch):
+    monkeypatch.setattr(ground, "camera_ground", lambda cam: dict(FACTS))
+    layout = {"x": 0.5, "y": 0.5, "azimuth": 90.0}
+    pos = ground.world_position(0.5, 0.5, camera="fake", layout_entry=layout, scale_ft=100.0)
+    assert pos is not None
+    fwd = ground.project(0.5, 0.5, FACTS)[0]
+    # Facing east: forward maps to +x on the map, no y change.
+    assert pos[0] == pytest.approx(0.5 + fwd / 100.0, rel=1e-6)
+    assert pos[1] == pytest.approx(0.5, abs=1e-9)
+
+
+def test_world_position_requires_scale_and_azimuth(monkeypatch):
+    monkeypatch.setattr(ground, "camera_ground", lambda cam: dict(FACTS))
+    assert ground.world_position(
+        0.5, 0.5, camera="fake", layout_entry={"x": 0.5, "y": 0.5}, scale_ft=100.0,
+    ) is None
+    assert ground.world_position(
+        0.5, 0.5, camera="fake", layout_entry={"x": 0.5, "y": 0.5, "azimuth": 0.0},
+        scale_ft=0,
+    ) is None

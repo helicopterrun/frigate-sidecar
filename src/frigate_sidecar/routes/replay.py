@@ -37,6 +37,63 @@ def replay_scenarios() -> JSONResponse:
     return JSONResponse({"scenarios": replay.list_scenarios()})
 
 
+@router.get("/replay/capture-window")
+def replay_capture_window(
+    request: Request, minutes: float = 15.0, camera: str | None = None,
+) -> JSONResponse:
+    """Recent tracks from the MQTT flight recorder, shaped for map trails:
+    per (camera, track_id) -> label + (x, y, t) path points, newest tracks
+    first, capped so a busy ring can't flood the browser."""
+    import time as _time
+    from pathlib import Path
+
+    from frigate_sidecar.push import capture
+
+    settings = request.app.state.settings
+    capture_path = settings.push.capture_path or str(
+        Path(settings.push.push_settings_path).parent / "mqtt-capture.jsonl"
+    )
+    paths = [Path(capture_path + ".1"), Path(capture_path)]
+    start_ts = _time.time() - max(1.0, min(minutes, 24 * 60)) * 60.0
+    rows = capture.read_window(paths, start_ts=start_ts, camera=camera)
+
+    tracks: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        if not str(row.get("topic", "")).endswith("events"):
+            continue
+        after = (row.get("payload") or {}).get("after") or {}
+        cam, tid = after.get("camera"), after.get("id")
+        if not cam or not tid:
+            continue
+        entry = tracks.setdefault(
+            (cam, tid),
+            {"camera": cam, "track_id": tid, "label": after.get("label") or "", "points": {}},
+        )
+        for p in after.get("path_data") or []:
+            try:
+                if len(p) == 2 and isinstance(p[0], (list, tuple)):
+                    (x, y), t = p
+                else:
+                    x, y, t = p[0], p[1], p[2]
+                entry["points"][round(float(t), 3)] = [
+                    round(float(x), 4), round(float(y), 4), round(float(t), 3),
+                ]
+            except (TypeError, ValueError, IndexError):
+                continue
+
+    out = []
+    for entry in tracks.values():
+        points = [entry["points"][t] for t in sorted(entry["points"])]
+        if len(points) < 2:
+            continue
+        out.append({
+            "camera": entry["camera"], "track_id": entry["track_id"],
+            "label": entry["label"], "points": points[:400],
+        })
+    out.sort(key=lambda e: e["points"][-1][2], reverse=True)
+    return JSONResponse({"tracks": out[:500]})
+
+
 @router.post("/replay/run")
 async def replay_run(body: RunRequest, request: Request) -> JSONResponse:
     for name in body.scenarios:
