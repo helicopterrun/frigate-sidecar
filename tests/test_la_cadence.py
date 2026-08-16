@@ -110,14 +110,17 @@ def test_create_secondary_omits_elapsed_zero():
     # Secondary carries what the title doesn't: the camera, never a repeat
     # of the place ("Person at Front Garden / Front Garden", 2026-08-14).
     primary, secondary = _copy("stranger", "person", "doorbell", "front_garden", 0.0)
-    assert primary == "Person at Front Garden"
-    assert secondary == "Doorbell"
+    assert primary == "Person in Front Garden"
+    assert secondary == "Doorbell camera"
     assert "0s" not in secondary
 
 
 def test_enrich_secondary_includes_elapsed():
+    # Friendly elapsed: sub-minute reads "just now", minutes read "N min".
     _, secondary = _copy("stranger", "person", "doorbell", "front_garden", 45.0)
-    assert secondary == "Doorbell · 45s"
+    assert secondary == "Doorbell camera · just now"
+    _, secondary = _copy("stranger", "person", "doorbell", "front_garden", 190.0)
+    assert secondary == "Doorbell camera · 3 min"
 
 
 def test_copy_prefers_frigate_friendly_name():
@@ -127,15 +130,43 @@ def test_copy_prefers_frigate_friendly_name():
     policy_settings._zone_display_names = {"front_entry_person": "Front Walk"}
     try:
         primary, _ = _copy("stranger", "person", "garden", "front_entry_person", 0.0)
-        assert primary == "Person at Front Walk"
+        assert primary == "Person in Front Walk"
     finally:
         policy_settings._zone_display_names = {}
 
 
+def test_copy_prefers_sidecar_zone_name_over_friendly_name():
+    # The /zones-page display name (settings zone_names) outranks Frigate's
+    # friendly_name — it's the user's own phrasing for notification copy.
+    from frigate_sidecar.push import policy_settings
+    policy_settings._zone_display_names = {"front_entry_person": "Front Walk"}
+    saved = policy_settings._active
+    try:
+        doc = policy_settings.default_settings()
+        doc["zone_names"] = {"front_entry_person": "the front path"}
+        policy_settings._active = doc
+        primary, _ = _copy("stranger", "person", "garden", "front_entry_person", 0.0)
+        assert primary == "Person in the front path"
+    finally:
+        policy_settings._active = saved
+        policy_settings._zone_display_names = {}
+
+
 def test_secondary_empty_when_title_already_used_camera():
-    # No zone: the title falls back to the camera, so a camera-only
-    # secondary would echo it — stay empty on create, elapsed-only later.
-    _, secondary = _copy("stranger", "person", "doorbell", "", 0.0)
+    # No zone: the title names the camera as a camera ("Person · Doorbell
+    # camera"), so the secondary stays empty on create, elapsed-only later.
+    primary, secondary = _copy("stranger", "person", "doorbell", "", 0.0)
+    assert primary == "Person · Doorbell camera"
     assert secondary == ""
     _, secondary = _copy("stranger", "person", "doorbell", "", 30.0)
-    assert secondary == "30s"
+    assert secondary == "just now"
+
+
+def test_story_leads_the_secondary():
+    # Notable verbs only: when a story phrase is passed it leads the body.
+    _, secondary = _copy(
+        "person", "", "gate", "back_walkway", 200.0, story="still there"
+    )
+    assert secondary == "still there · Gate camera · 3 min"
+    _, secondary = _copy("person", "", "gate", "", 0.0, story="left after 2 min")
+    assert secondary == "left after 2 min"

@@ -6,9 +6,9 @@
 <main>
   <p class="help page-intro">
     Place classes and per-zone overrides drive push routing; camera neighbors
-    merge one walk seen by adjacent cameras into a single story. Friendly
-    names are read-only here — set them in Frigate's config
-    (<code>friendly_name:</code> under each camera's zone).
+    merge one walk seen by adjacent cameras into a single story. The Name
+    field sets how a zone reads in notifications ("Person in {name}") — it
+    wins over Frigate's <code>friendly_name</code>.
   </p>
 
   <div id="zones-banner" class="help page-intro" style="display:none"></div> {# JS-toggled #}

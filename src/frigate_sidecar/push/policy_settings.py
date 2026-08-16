@@ -178,6 +178,10 @@ def default_settings() -> dict[str, Any]:
         },
         "recognition": dict(DEFAULT_RECOGNITION),
         "zone_classes": {},
+        # zone key -> human display name for notification copy ("back_critter"
+        # -> "the back walkway"). Wins over Frigate's friendly_name. Edited on
+        # the /zones page; empty string clears.
+        "zone_names": {},
         "zone_overrides": {},
         "live_activities": {family: True for family in FAMILIES} | {
             "opening_picks": [],
@@ -290,6 +294,15 @@ def validate_settings(data: Any) -> list[str]:
                     errors.append(
                         f"recognition.{key} must be one of {RECOGNITION_MODES}, got {val!r}"
                     )
+
+    zone_names = data.get("zone_names")
+    if zone_names is not None:
+        if not isinstance(zone_names, dict):
+            errors.append("zone_names must be an object")
+        else:
+            for zone, name in zone_names.items():
+                if not isinstance(name, str):
+                    errors.append(f"zone_names.{zone} must be a string")
 
     zone_classes = data.get("zone_classes")
     if zone_classes is not None:
@@ -478,6 +491,13 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
             val = recognition.get(key)
             if val in RECOGNITION_MODES:
                 merged["recognition"][key] = val
+
+    zone_names = data.get("zone_names")
+    if isinstance(zone_names, dict):
+        merged["zone_names"] = {
+            str(zone): str(name) for zone, name in zone_names.items()
+            if isinstance(name, str) and name.strip()
+        }
 
     zone_classes = data.get("zone_classes")
     if isinstance(zone_classes, dict):
@@ -892,6 +912,11 @@ def load_zone_display_names(config_path: str | Path) -> None:
 
 
 def zone_display_name(zone: str) -> str | None:
+    """Sidecar-edited display name (settings `zone_names`, /zones page) wins;
+    Frigate's `friendly_name` is the fallback."""
+    configured = get_active().get("zone_names", {})
+    if isinstance(configured, dict) and configured.get(zone):
+        return str(configured[zone])
     return _zone_display_names.get(zone)
 
 

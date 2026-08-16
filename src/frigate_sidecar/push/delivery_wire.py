@@ -171,30 +171,47 @@ def snapshot_from_review(
     return snapshot, subject_kind, place_class
 
 
+def _fmt_elapsed(elapsed_s: float) -> str:
+    """Human elapsed for notification copy: "just now" under a minute, then
+    minutes, then h/m — raw "137s" read like debug output."""
+    s = int(elapsed_s)
+    if s < 60:
+        return "just now"
+    if s < 3600:
+        return f"{s // 60} min"
+    return f"{s // 3600} hr {(s % 3600) // 60} min"
+
+
 def _copy(
     subject_kind: str, label: str, camera: str, zone_name: str, elapsed_s: float,
     identity: str = "",
+    story: str = "",
 ) -> tuple[str, str]:
+    """Title + body (content design 2026-08-15).
+
+    Title: "{Who} in {zone display name}" when the event has a zone —
+    the sidecar-edited `zone_names` map (or Frigate `friendly_name`) supplies
+    a real place phrase; a bare rule key is humanized as a last resort. With
+    no zone the camera never masquerades as a place: "{Who} · {Camera} camera".
+
+    Body ("notable verbs only"): when `story` is set (approaching / running /
+    still there / left after …) it leads; otherwise camera (when the title
+    used a zone) + friendly elapsed. A line with nothing new stays empty.
+    """
     subject_text = _SUBJECT_COPY.get(subject_kind) or pretty_label(label) or "Motion"
-    place_text = zone_name or camera
-    # Frigate `friendly_name` wins over humanizing the rule-shaped key
-    # ("front_entry_person" is a rule, not a place).
-    friendly = policy_settings.zone_display_name(zone_name) if zone_name else None
-    place_pretty = friendly or place_text.replace("_", " ").title()
-    primary = f"{identity} · at {place_pretty}" if identity else f"{subject_text} at {place_pretty}"
-    # The secondary line carries what the title doesn't: the camera (when
-    # the title used a zone) and the elapsed time. Repeating the place made
-    # a lock-screen row read "Person at Front Entry Person / Front Entry
-    # Person" (observed 2026-08-14); a line with nothing new stays empty
-    # rather than echoing.
-    detail = camera.replace("_", " ").title() if zone_name else ""
-    if elapsed_s > 0 and detail:
-        secondary = f"{detail} · {int(elapsed_s)}s"
-    elif elapsed_s > 0:
-        secondary = f"{int(elapsed_s)}s"
+    who = identity or subject_text
+    camera_pretty = camera.replace("_", " ").title()
+    if zone_name:
+        friendly = policy_settings.zone_display_name(zone_name)
+        place = friendly or zone_name.replace("_", " ").title()
+        primary = f"{who} in {place}"
+        detail = f"{camera_pretty} camera" if camera else ""
     else:
-        secondary = detail
-    return primary, secondary
+        primary = f"{who} · {camera_pretty} camera" if camera else who
+        detail = ""
+
+    parts = [p for p in (story, detail, _fmt_elapsed(elapsed_s) if elapsed_s > 0 else "") if p]
+    return primary, " · ".join(parts)
 
 
 def _glyph_for(subject_kind: str, label: str) -> str:
@@ -796,7 +813,10 @@ async def end_activity_if_card_closed(
     # after the story closed), so the clock stops at the card's resolve
     # write (`updated_at`), never at push time.
     elapsed = max(0.0, card.updated_at - card.created_at)
-    primary, secondary = _copy(kind, "", ctx.get("camera", ""), ctx.get("zone_name", ""), elapsed)
+    primary, secondary = _copy(
+        kind, "", ctx.get("camera", ""), ctx.get("zone_name", ""), 0.0,
+        story=f"left after {_fmt_elapsed(elapsed)}",
+    )
     content_state = live_activities.build_content_state(
         level=card.level, mutation=RESOLVE,
         glyph=live_activities.glyph_for("", subject_kind=kind, label="", mutation=RESOLVE),
@@ -977,9 +997,24 @@ async def handle_delivery_event(
             identity = getattr(engine, "_sub_labels", {}).get(
                 (event.camera, track_id), ""
             )
+        # Notable verbs only (content design 2026-08-15): one story phrase
+        # when something is actually happening, silence otherwise.
+        if mutation == RESOLVE:
+            story = f"left after {_fmt_elapsed(elapsed)}"
+        elif approaching_secure:
+            story = "approaching the house"
+        elif moving_fast:
+            story = "moving fast"
+        elif dwell_exceeded:
+            story = "still there"
+        elif leaving_scene:
+            story = "leaving"
+        else:
+            story = ""
         primary, secondary = _copy(
-            subject_kind, snapshot.label, owning_camera, zone_name, elapsed,
-            identity=identity,
+            subject_kind, snapshot.label, owning_camera, zone_name,
+            0.0 if mutation == RESOLVE else elapsed,
+            identity=identity, story=story,
         )
         if owning_camera != event.camera:
             # A second camera is now contributing to a card it didn't
@@ -1134,6 +1169,7 @@ def resound_payload_for(card, context: dict[str, str]) -> dict:
     subject_kind = context.get("subject_kind") or ""
     primary, secondary = _copy(
         subject_kind, "", context.get("camera", ""), context.get("zone_name", ""), elapsed,
+        story="still there",
     )
     active = policy_settings.get_active()
     la_only = bool(active.get("live_activities", {}).get("la_only", False))
@@ -1200,7 +1236,11 @@ async def handle_delivery_resolve(
         elapsed = max(
             0.0, now - (card.created_at if mutation == RESOLVE else card.state_since_at)
         )
-        primary, secondary = _copy(kind, "", camera, zone_name, elapsed)
+        story = f"left after {_fmt_elapsed(elapsed)}" if mutation == RESOLVE else ""
+        primary, secondary = _copy(
+            kind, "", camera, zone_name, 0.0 if mutation == RESOLVE else elapsed,
+            story=story,
+        )
         # End the LA first; if the end landed on a confirmed activity, the
         # resolve card push goes out quiet (NC text only, no banner).
         la_covered = await _deliver_live_activities(

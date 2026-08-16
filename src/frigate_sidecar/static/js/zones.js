@@ -67,15 +67,11 @@
   function renderZone(zone) {
     var card = el("div", { class: "stat-card", style: "min-width:280px" });
     var title = el("div", { class: "stat-label" });
-    title.appendChild(el("strong", { text: zone.friendly_name || zone.zone }));
-    if (zone.friendly_name) {
+    var configured = (doc.zone_names || {})[zone.zone] || "";
+    title.appendChild(el("strong", { text: configured || zone.friendly_name || zone.zone }));
+    if (configured || zone.friendly_name) {
       title.appendChild(el("span", {
         class: "help", text: "  (" + zone.zone + ")", style: "margin-left:0.4em",
-      }));
-    } else {
-      title.appendChild(el("span", {
-        class: "help", text: "  no friendly_name — set in Frigate config",
-        style: "margin-left:0.4em",
       }));
     }
     card.appendChild(title);
@@ -83,6 +79,25 @@
       class: "help", text: "cameras: " + zone.cameras.join(", "),
       style: "margin:0.25em 0 0.5em",
     }));
+
+    // Display name for notification copy ("Person in {name}"). Sidecar-side
+    // (settings.zone_names); wins over Frigate's friendly_name.
+    var nameRow = el("div", { style: "margin:0.25em 0" });
+    nameRow.appendChild(el("span", { text: "Name: ", class: "help" }));
+    var nameInput = el("input", {
+      type: "text", placeholder: zone.friendly_name || "e.g. the back walkway",
+      style: "width:180px",
+    });
+    nameInput.value = configured;
+    nameInput.addEventListener("input", function () {
+      if (!doc.zone_names) doc.zone_names = {};
+      var v = nameInput.value.trim();
+      if (v) doc.zone_names[zone.zone] = v;
+      else delete doc.zone_names[zone.zone];
+      markDirty();
+    });
+    nameRow.appendChild(nameInput);
+    card.appendChild(nameRow);
 
     // Place class picker.
     var classRow = el("div", { style: "margin:0.25em 0" });

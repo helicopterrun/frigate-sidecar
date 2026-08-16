@@ -694,7 +694,7 @@ async def put_push_settings(request: Request) -> dict[str, Any]:
     # camera_neighbors / camera_headings / camera_layout are config-side only
     # (the app has no UI for them and its Codable round-trip drops the keys)
     # -- sticky unless explicitly sent.
-    for sticky_key in ("camera_neighbors", "camera_headings", "camera_layout"):
+    for sticky_key in ("camera_neighbors", "camera_headings", "camera_layout", "zone_names"):
         if not isinstance(body.get(sticky_key), dict):
             merged[sticky_key] = policy_settings.get_active().get(sticky_key, {})
     # secure_area / map_scale_ft distinguish "absent" (sticky) from
