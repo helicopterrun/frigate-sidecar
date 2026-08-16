@@ -33,10 +33,11 @@ from __future__ import annotations
 import hashlib
 import time
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import httpx
 from fastapi import HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.routing import Match
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -50,8 +51,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 ERR_UNAUTHORIZED = "unauthorized"
 ERR_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
 
-# Reachability probes a client may need before it holds a Frigate session.
-EXEMPT_PATHS = frozenset({"/healthz", "/version", "/v1/capabilities"})
+# Reachability probes a client may need before it holds a Frigate session
+# (and the login page itself, which exists to acquire one).
+EXEMPT_PATHS = frozenset({"/healthz", "/version", "/v1/capabilities", "/login"})
 # Trailing slash on the push-thumbnail prefix on purpose: exempts only
 # `/v1/push/thumbnail/{handle}` fetches, not `/v1/push/thumbnail` itself or
 # any other `/v1/push/...` route (device registration, handle redemption,
@@ -180,6 +182,24 @@ class FrigateAuthMiddleware:
                 # violation", which is what a client sees for an auth failure.
                 await send({"type": "websocket.close", "code": 1008})
                 return
+            # A browser navigating to a page gets sent to /login instead of a
+            # bare JSON 401; API clients (the iOS app, curl) keep the JSON —
+            # distinguished by the request Accept-ing text/html on a GET.
+            if exc.status_code == 401 and scope.get("method") == "GET":
+                accept = ""
+                for name, value in scope.get("headers", []):
+                    if name == b"accept":
+                        accept = value.decode("latin-1")
+                        break
+                if "text/html" in accept:
+                    next_path = path
+                    if scope.get("query_string"):
+                        next_path += "?" + scope["query_string"].decode("latin-1")
+                    response: Any = RedirectResponse(
+                        "/login?next=" + quote(next_path, safe=""), status_code=302,
+                    )
+                    await response(scope, receive, send)
+                    return
             body = {
                 "error": ERR_UNAUTHORIZED if exc.status_code == 401 else ERR_UPSTREAM_UNAVAILABLE,
                 "message": str(exc.detail),

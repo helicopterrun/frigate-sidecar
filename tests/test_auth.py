@@ -221,3 +221,42 @@ def test_capabilities_always_carries_version(
     body = client.get("/v1/capabilities").json()
     assert isinstance(body.get("version"), str) and body["version"]
     assert "scrub_cache" in body and "proxy" in body
+
+
+def test_browser_page_request_redirects_to_login(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+    upstream_calls: list[httpx.Request],
+) -> None:
+    client = _build(frigate_db_path, sidecar_db_path, tmp_path, _ok_handler(upstream_calls))
+    r = client.get(
+        "/cameras?tab=map",
+        headers={"accept": "text/html,application/xhtml+xml"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login?next=%2Fcameras%3Ftab%3Dmap"
+
+
+def test_api_clients_keep_the_json_401(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+    upstream_calls: list[httpx.Request],
+) -> None:
+    client = _build(frigate_db_path, sidecar_db_path, tmp_path, _ok_handler(upstream_calls))
+    # No text/html in Accept (the iOS app, curl): JSON as before.
+    r = client.get("/v1/push/decisions", headers={"accept": "application/json"})
+    assert r.status_code == 401
+    assert r.json()["error"] == "unauthorized"
+    # Same for a browser-shaped POST — only GET navigations redirect.
+    r = client.post("/label", json={}, headers={"accept": "text/html"})
+    assert r.status_code == 401
+
+
+def test_login_page_is_exempt_and_renders(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+    upstream_calls: list[httpx.Request],
+) -> None:
+    client = _build(frigate_db_path, sidecar_db_path, tmp_path, _ok_handler(upstream_calls))
+    r = client.get("/login", headers={"accept": "text/html"})
+    assert r.status_code == 200
+    assert "/api/login" in r.text  # the form posts to Frigate via the proxy
+    assert not upstream_calls
