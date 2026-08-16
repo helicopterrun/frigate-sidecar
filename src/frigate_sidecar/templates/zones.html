@@ -30,6 +30,20 @@
     <button id="save-btn" class="test-push">Save</button>
     <span id="save-state" style="margin-left:1em"></span>
   </div>
+
+  <h3 style="margin:1.5em 0 0.5em">Sync between instances</h3>
+  <p class="help" style="margin:0 0 0.75em">
+    Export downloads this instance's full policy (routing, zones, camera
+    calibration, secure area — no device registrations). Import applies an
+    exported file to <em>this</em> instance immediately. To copy dev →
+    production: export here, open production's /zones, import there.
+  </p>
+  <button id="export-btn" class="test-push">Export settings</button>
+  <label class="test-push" style="margin-left:0.75em;display:inline-block;cursor:pointer">
+    Import settings…
+    <input id="import-file" type="file" accept=".json,application/json" style="display:none">
+  </label>
+  <span id="sync-state" class="help" style="margin-left:1em"></span>
 </main>
 {% endblock %}
 

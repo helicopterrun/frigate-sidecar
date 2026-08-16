@@ -212,6 +212,51 @@
     saveBtn.disabled = false;
   });
 
+  // ---- Export / import (instance-to-instance sync via the browser) ----
+
+  var syncState = document.getElementById("sync-state");
+
+  document.getElementById("export-btn").addEventListener("click", async function () {
+    try {
+      // Fresh GET: export what the engine is actually running, not the
+      // page's possibly-unsaved draft.
+      var data = await fetchJson("/v1/push/settings");
+      var blob = new Blob(
+        [JSON.stringify(data.settings, null, 2)], { type: "application/json" }
+      );
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "push-settings-" + location.hostname + ".json";
+      a.click();
+      URL.revokeObjectURL(a.href);
+      syncState.textContent = "exported";
+    } catch (err) {
+      syncState.textContent = "export error: " + err.message;
+    }
+  });
+
+  document.getElementById("import-file").addEventListener("change", async function (ev) {
+    var file = ev.target.files && ev.target.files[0];
+    ev.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+    syncState.textContent = "importing...";
+    try {
+      var imported = JSON.parse(await file.text());
+      if (typeof imported !== "object" || !imported || Array.isArray(imported)) {
+        throw new Error("not a settings document");
+      }
+      await fetchJson("/v1/push/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(imported),
+      });
+      syncState.textContent = "imported ✓ — reloading";
+      location.reload();
+    } catch (err) {
+      syncState.textContent = "import error: " + err.message;
+    }
+  });
+
   (async function init() {
     try {
       var data = await fetchJson("/v1/push/settings");
