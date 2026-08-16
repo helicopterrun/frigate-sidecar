@@ -11,15 +11,13 @@ Covers:
 """
 from __future__ import annotations
 
-import copy
 from pathlib import Path
 
 import pytest
 
 from frigate_sidecar import db
-from frigate_sidecar.push import card_store, ladder_policy, policy_settings
-from frigate_sidecar.push.cards import Card
 from frigate_sidecar.config import PushSection
+from frigate_sidecar.push import card_store, ladder_policy, policy_settings
 from frigate_sidecar.push.delivery_wire import (
     classify_subject,
     handle_delivery_event,
@@ -223,10 +221,14 @@ async def test_recognition_off_is_noop(sidecar_db_path: Path):
 
 def test_migrate_v1_to_v2_person_inherits_stranger():
     v1 = {
-        "stranger": {"street": "log", "yard": "quiet", "doors": "notify", "private": "notify", "off_limits": "urgent"},
-        "known": {"street": "log", "yard": "log", "doors": "quiet", "private": "log", "off_limits": "quiet"},
-        "animal": {"street": "log", "yard": "log", "doors": "log", "private": "log", "off_limits": "log"},
-        "thing": {"street": "log", "yard": "log", "doors": "log", "private": "log", "off_limits": "quiet"},
+        "stranger": {"street": "log", "yard": "quiet", "doors": "notify",
+         "private": "notify", "off_limits": "urgent"},
+        "known": {"street": "log", "yard": "log", "doors": "quiet",
+         "private": "log", "off_limits": "quiet"},
+        "animal": {"street": "log", "yard": "log", "doors": "log",
+         "private": "log", "off_limits": "log"},
+        "thing": {"street": "log", "yard": "log", "doors": "log",
+         "private": "log", "off_limits": "quiet"},
     }
     v2, recognition, _msg = policy_settings.migrate_v1_to_v2(v1)
     assert v2["person"] == v1["stranger"]
@@ -236,10 +238,14 @@ def test_migrate_v1_to_v2_person_inherits_stranger():
 
 def test_migrate_v1_to_v2_vehicle_gets_thing_bumped_at_doors():
     v1 = {
-        "stranger": {"street": "log", "yard": "quiet", "doors": "notify", "private": "notify", "off_limits": "urgent"},
-        "known": {"street": "log", "yard": "log", "doors": "quiet", "private": "log", "off_limits": "quiet"},
-        "animal": {"street": "log", "yard": "log", "doors": "log", "private": "log", "off_limits": "log"},
-        "thing": {"street": "log", "yard": "log", "doors": "log", "private": "log", "off_limits": "quiet"},
+        "stranger": {"street": "log", "yard": "quiet", "doors": "notify",
+         "private": "notify", "off_limits": "urgent"},
+        "known": {"street": "log", "yard": "log", "doors": "quiet",
+         "private": "log", "off_limits": "quiet"},
+        "animal": {"street": "log", "yard": "log", "doors": "log",
+         "private": "log", "off_limits": "log"},
+        "thing": {"street": "log", "yard": "log", "doors": "log",
+         "private": "log", "off_limits": "quiet"},
     }
     v2, _recognition, _msg = policy_settings.migrate_v1_to_v2(v1)
     levels = ladder_policy.LEVELS
@@ -251,10 +257,14 @@ def test_migrate_v1_to_v2_vehicle_gets_thing_bumped_at_doors():
 
 def test_migrate_v1_to_v2_recognition_mode():
     v1 = {
-        "stranger": {"street": "log", "yard": "quiet", "doors": "notify", "private": "notify", "off_limits": "urgent"},
-        "known": {"street": "log", "yard": "log", "doors": "quiet", "private": "log", "off_limits": "quiet"},
-        "animal": {"street": "log", "yard": "log", "doors": "log", "private": "log", "off_limits": "log"},
-        "thing": {"street": "log", "yard": "log", "doors": "log", "private": "log", "off_limits": "quiet"},
+        "stranger": {"street": "log", "yard": "quiet", "doors": "notify",
+         "private": "notify", "off_limits": "urgent"},
+        "known": {"street": "log", "yard": "log", "doors": "quiet",
+         "private": "log", "off_limits": "quiet"},
+        "animal": {"street": "log", "yard": "log", "doors": "log",
+         "private": "log", "off_limits": "log"},
+        "thing": {"street": "log", "yard": "log", "doors": "log",
+         "private": "log", "off_limits": "quiet"},
     }
     _v2, recognition, _msg = policy_settings.migrate_v1_to_v2(v1)
     assert recognition["known_person"] in ("relax_one", "relax_to_quiet")

@@ -67,6 +67,12 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+# Retired suites: a module-level `pytestmark = skip` deliberately precedes the
+# imports so the skip applies before anything heavy loads.
+"tests/test_push_live_activities.py" = ["E402"]
+"tests/test_push_situation_engine.py" = ["E402"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

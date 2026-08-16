@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from frigate_sidecar import db
-from frigate_sidecar.push import store
 from frigate_sidecar.config import PushSection
+from frigate_sidecar.push import store
 from frigate_sidecar.push.engine import PushEngine
 from frigate_sidecar.push.models import ReviewEvent
-from frigate_sidecar.push.transport import LogTransport, TransportResult
+from frigate_sidecar.push.transport import LogTransport
 
 
 def _make_engine(db_path: Path, transport=None) -> PushEngine:
@@ -57,7 +57,7 @@ def test_handle_event_no_match_sends_nothing(tmp_path: Path) -> None:
     event = ReviewEvent(review_id="r1", camera="doorbell", severity="alert")
     import asyncio
 
-    sent = asyncio.run(engine.handle_event(event))
+    asyncio.run(engine.handle_event(event))
     # Card is still mutated (card_key created), but no push sent to devices
     # whose camera filter doesn't match.
     assert transport.sent == []

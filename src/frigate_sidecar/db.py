@@ -373,11 +373,17 @@ def _apply_added_columns(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
+class FrigateDBMissingError(FileNotFoundError):
+    """Frigate's SQLite file isn't on this host — a dev instance running away
+    from the deployment box. Routes that need it degrade (server.py handler)
+    instead of 500ing."""
+
+
 def open_frigate_ro(path: str | Path) -> sqlite3.Connection:
-    """Open Frigate's DB read-only. Raises FileNotFoundError if missing."""
+    """Open Frigate's DB read-only. Raises FrigateDBMissingError if missing."""
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(f"Frigate DB not found: {p}")
+        raise FrigateDBMissingError(f"Frigate DB not found: {p}")
     # `mode=ro` on the URI already enforces read-only for main; do NOT set
     # PRAGMA query_only here because it's a connection-level flag and would
     # also block writes against any DB ATTACHed later (e.g. the sidecar).

@@ -14,15 +14,12 @@ import pytest
 
 from frigate_sidecar import db
 from frigate_sidecar.config import PushSection
-from frigate_sidecar.push import card_store, policy_settings, store
-from frigate_sidecar.push.cards import Card
-from frigate_sidecar.push.delivery import build_card_payload, sound_name_for_card
+from frigate_sidecar.push import policy_settings, store
 from frigate_sidecar.push.delivery_wire import (
+    _relaxed_level,
     classify_subject,
     handle_delivery_event,
-    handle_delivery_resolve,
     handle_recognition_event,
-    _relaxed_level,
 )
 from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
 from frigate_sidecar.push.models import Device, ReviewEvent

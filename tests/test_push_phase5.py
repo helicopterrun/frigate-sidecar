@@ -23,12 +23,10 @@ import pytest
 from frigate_sidecar import db
 from frigate_sidecar.config import PushSection
 from frigate_sidecar.push import card_store, policy_settings, store
-from frigate_sidecar.push.cards import _level_index
 from frigate_sidecar.push.delivery import (
     _device_eligible,
     build_card_payload,
     send_card_mutation,
-    should_push,
     sound_name_for_card,
 )
 from frigate_sidecar.push.delivery_wire import (
@@ -37,7 +35,6 @@ from frigate_sidecar.push.delivery_wire import (
 )
 from frigate_sidecar.push.models import Device, ReviewEvent
 from frigate_sidecar.push.transport import LogTransport
-
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -387,10 +384,13 @@ def test_routing_table_defaults_agree():
 
 @pytest.mark.asyncio
 async def test_backfill_staleness_filters_old_events():
+    import tempfile
+    import time
+
     import httpx
+
     from frigate_sidecar.push.engine import PushEngine
     from frigate_sidecar.push.mqtt import backfill_since
-    import tempfile, time
 
     with tempfile.TemporaryDirectory() as tmp:
         db_path = Path(tmp) / "sidecar.db"

@@ -264,9 +264,15 @@ Two settings sections back the new features:
 
 ## Status
 
-Early. The triage UI and analysis tools were originally a set of ad-hoc scripts
-shipped alongside one specific Frigate deployment; this repo promotes them to a
-reusable service. Expect rough edges.
+Actively developed and running in production alongside one Frigate 0.17
+deployment (with the Elsinore iOS app as its main client). What ships today:
+the push notification pipeline (MQTT → attention ladder → APNs cards and Live
+Activities, with replay tooling), camera calibration and zone-handling settings
+pages (heading vectors, top-down layout map, world tracks, settings sync
+between instances), the scrub sprite-sheet cache and reel API, the triage and
+analysis UI, and a themed web interface matching the app's design language.
+Still a single-deployment project at heart — portability rough edges remain
+(see the deployment docs before pointing it at your own Frigate).
 
 ## License
 

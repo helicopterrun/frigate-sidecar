@@ -86,7 +86,8 @@ async def test_media_present_on_create_and_points_at_external_base(sidecar_db_pa
     config = PushSection(delivery_enabled=True, external_base_url=EXTERNAL_BASE_URL)
     event = ReviewEvent(
         review_id="r1", camera="front", severity="alert", labels=("person",),
-        track_ids=("trk1",), zones=("front_door",),  # doors -> notify: quiet no longer pushes (2026-08-14)
+        # doors -> notify: quiet no longer pushes (2026-08-14)
+        track_ids=("trk1",), zones=("front_door",),
     )
 
     await handle_delivery_event(

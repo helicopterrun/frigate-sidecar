@@ -8,7 +8,7 @@ from frigate_sidecar.push.capture import MqttCapture, read_window
 
 
 def _line(path: Path, index: int) -> list[dict]:
-    return [json.loads(l) for l in path.read_text().splitlines()]
+    return [json.loads(line) for line in path.read_text().splitlines()]
 
 
 def test_append_writes_jsonl_and_skips_malformed(tmp_path: Path):
@@ -46,7 +46,7 @@ def test_read_window_filters_time_and_camera_across_rotation(tmp_path: Path):
         {"ts": 30.0, "topic": "frigate/events", "payload": {"after": {"camera": "gate"}}},
         {"ts": 40.0, "topic": "frigate/events", "payload": {"after": {"camera": "garden"}}},
     ]
-    path.write_text("".join(json.dumps(l) + "\n" for l in lines) + "torn-final-line{{{\n")
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines) + "torn-final-line{{{\n")
 
     rows = read_window([rotated, path], start_ts=15.0, end_ts=35.0)
     assert [r["ts"] for r in rows] == [20.0, 30.0]

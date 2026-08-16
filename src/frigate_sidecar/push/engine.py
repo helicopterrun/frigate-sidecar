@@ -259,7 +259,11 @@ class PushEngine:
         if obj.sub_label:
             old_sub = self._sub_labels.get(key)
             self._sub_labels[key] = obj.sub_label
-            if obj.sub_label != old_sub and self.push_config is not None and self.push_config.delivery_enabled:
+            if (
+                obj.sub_label != old_sub
+                and self.push_config is not None
+                and self.push_config.delivery_enabled
+            ):
                 conn = self._conn()
                 try:
                     devices = store.list_devices(conn)

@@ -206,7 +206,11 @@ async def register_device(
     # choice (v1 camera/label/severity dispatch), but nothing recorded *that*
     # a device landed there until this line existed.
     uses_situations = bool(parsed)
-    dispatch = "situation matching (_dispatch_situations)" if uses_situations else "v1 camera/label/severity (_dispatch_v1)"
+    dispatch = (
+        "situation matching (_dispatch_situations)"
+        if uses_situations
+        else "v1 camera/label/severity (_dispatch_v1)"
+    )
     logger.info(
         "push: registration apns_token=%s schema_version=%s uses_situations=%s dispatch=%s",
         apns_token[:8], schema_version, uses_situations, dispatch,

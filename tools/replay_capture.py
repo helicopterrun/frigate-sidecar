@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from frigate_sidecar.push.capture import read_window, _camera_of  # noqa: E402
+from frigate_sidecar.push.capture import _camera_of, read_window  # noqa: E402
 
 
 def parse_ts(value: str) -> float:

@@ -103,3 +103,34 @@ def test_triage_moved_to_slash_triage(client: TestClient) -> None:
     r = client.get("/triage")
     assert r.status_code == 200
     assert "filters" in r.text
+
+
+# ---- Frigate DB missing on this instance (dev host without the SQLite file) ----
+
+
+@pytest.fixture
+def db_less_client(tmp_path: Path, sidecar_db_path: Path) -> TestClient:
+    settings = Settings(
+        frigate=FrigateSection(
+            base_url="http://127.0.0.1:1",
+            db_path=tmp_path / "nope" / "frigate.db",  # deliberately absent
+        ),
+        sidecar=SidecarSection(
+            db_path=sidecar_db_path, bind_port=5001, require_frigate_auth=False
+        ),
+    )
+    return TestClient(create_app(settings))
+
+
+def test_triage_degrades_without_frigate_db(db_less_client: TestClient) -> None:
+    r = db_less_client.get("/triage", headers={"accept": "text/html"})
+    assert r.status_code == 200
+    assert "database isn't available on this instance" in r.text
+    # The shared nav still renders, so the page is a dead end, not a trap.
+    assert 'class="page-link active"' in r.text
+
+
+def test_analysis_api_degrades_without_frigate_db(db_less_client: TestClient) -> None:
+    r = db_less_client.get("/analysis/zone-hits", params={"days": 7})
+    assert r.status_code == 503
+    assert "Frigate DB not found" in r.json()["detail"]

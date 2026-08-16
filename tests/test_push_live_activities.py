@@ -12,6 +12,7 @@ card-model LA tests live in `test_push_card_live_activities.py`.
 from __future__ import annotations
 
 import pytest
+
 pytestmark = pytest.mark.skip(reason="situations pipeline retired in Phase 5 §1")
 
 import asyncio

@@ -491,7 +491,11 @@ async def sweep_urgent_resound(
         card = apply_urgent_resound(card, now=now)
         payload = payload_for_resound(card, context)
         await send_card_mutation(
-            conn, transport, devices, card, ESCALATE, payload, now=now, **context,
+            conn, transport, devices, card, ESCALATE, payload, now=now,
+            subject_kind=context.get("subject_kind", ""),
+            place_class=context.get("place_class", ""),
+            camera=context.get("camera", ""),
+            zone_name=context.get("zone_name", ""),
         )
         resounded += 1
     return resounded

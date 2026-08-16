@@ -28,8 +28,9 @@ import logging
 import math
 import secrets
 import time
+from collections.abc import Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from frigate_sidecar.push import (
     card_store,
@@ -180,10 +181,7 @@ def _copy(
     # ("front_entry_person" is a rule, not a place).
     friendly = policy_settings.zone_display_name(zone_name) if zone_name else None
     place_pretty = friendly or place_text.replace("_", " ").title()
-    if identity:
-        primary = f"{identity} · at {place_pretty}"
-    else:
-        primary = f"{subject_text} at {place_pretty}"
+    primary = f"{identity} · at {place_pretty}" if identity else f"{subject_text} at {place_pretty}"
     # The secondary line carries what the title doesn't: the camera (when
     # the title used a zone) and the elapsed time. Repeating the place made
     # a lock-screen row read "Person at Front Entry Person / Front Entry
@@ -212,7 +210,7 @@ _HEADING_MIN_DISPLACEMENT = 0.02
 
 
 def _movement_vector(
-    path_data: list[tuple[float, float]] | None,
+    path_data: Sequence[tuple[float, ...]] | None,
 ) -> tuple[float, float] | None:
     """Recent direction of travel as a unit vector in normalized image
     space (y down), from the track's path trail: walk back from the newest
@@ -230,7 +228,7 @@ def _movement_vector(
 
 
 def _heading_label(
-    path_data: list[tuple[float, float]] | None, stationary: bool, camera: str,
+    path_data: Sequence[tuple[float, ...]] | None, stationary: bool, camera: str,
 ) -> str | None:
     """One of the §8 heading words, or None when unknown.
 
@@ -264,7 +262,7 @@ def _heading_label(
 
 
 def _build_motion(
-    path_data: list[tuple[float, float]] | None, stationary: bool, camera: str,
+    path_data: Sequence[tuple[float, ...]] | None, stationary: bool, camera: str,
     speed_label: str | None = None,
 ) -> dict[str, str] | None:
     heading = _heading_label(path_data, stationary, camera)
@@ -613,8 +611,10 @@ async def _deliver_live_activities(
             # the escalation alert itself.
             if mutation not in (CREATE, ESCALATE) or family is None or not device.can_live_activity:
                 logger.info(
-                    "push: LA skip device=%s reason=no_row mutation=%s family=%s la_capable=%s pts=%s",
-                    device.device_id, mutation, family, device.la_capable, bool(device.push_to_start_token),
+                    "push: LA skip device=%s reason=no_row mutation=%s family=%s"
+                    " la_capable=%s pts=%s",
+                    device.device_id, mutation, family, device.la_capable,
+                    bool(device.push_to_start_token),
                 )
                 continue
             if not _device_eligible(device, camera=camera, labels=(label,), card_level=card.level):

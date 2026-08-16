@@ -100,7 +100,9 @@ async def replay_run(body: RunRequest, request: Request) -> JSONResponse:
         try:
             replay.resolve_scenario_path(name)
         except FileNotFoundError:
-            raise HTTPException(status_code=400, detail=f"unknown scenario: {name}")
+            raise HTTPException(
+                status_code=400, detail=f"unknown scenario: {name}"
+            ) from None
 
     if not body.dry_run and not request.app.state.settings.push.enabled:
         raise HTTPException(status_code=503, detail="push is not enabled (live run requires MQTT)")
@@ -116,7 +118,7 @@ async def replay_run(body: RunRequest, request: Request) -> JSONResponse:
             stagger=body.stagger,
         )
     except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 — the UI needs JSON, not an HTML 500
@@ -124,7 +126,7 @@ async def replay_run(body: RunRequest, request: Request) -> JSONResponse:
         # bad credentials) used to escape as an unhandled 500 whose HTML error
         # page broke the replay page's JSON parse ("Unexpected token '<'",
         # observed 2026-08-14). Surface the real cause as JSON instead.
-        raise HTTPException(status_code=502, detail=f"replay failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"replay failed: {exc}") from exc
 
     return JSONResponse(run.to_dict())
 

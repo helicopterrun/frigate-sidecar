@@ -139,7 +139,7 @@ class MqttReviewSubscriber:
         # Flight recorder (capture.py): every consumed reviews/events message,
         # so real situations replay exactly. Never on the failure path — a
         # capture error logs once and the pipeline continues.
-        self._capture: "MqttCapture | None" = None
+        self._capture: MqttCapture | None = None
         if settings.capture_enabled:
             from frigate_sidecar.push.capture import MqttCapture
             capture_path = settings.capture_path or ""
@@ -173,7 +173,7 @@ class MqttReviewSubscriber:
         )
 
     def _log_task_exception(
-        self, topic: str, future: "concurrent.futures.Future[int]"
+        self, topic: str, future: concurrent.futures.Future[int]
     ) -> None:
         if future.cancelled():
             return

@@ -11,13 +11,15 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from frigate_sidecar import __version__
 from frigate_sidecar.auth import FrigateAuthMiddleware
 from frigate_sidecar.config import Settings, load_settings
+from frigate_sidecar.db import FrigateDBMissingError
 from frigate_sidecar.frigate_api import FrigateClient
 from frigate_sidecar.push import delivery, delivery_wire
 from frigate_sidecar.push import store as push_store
@@ -25,6 +27,7 @@ from frigate_sidecar.push.engine import PushEngine
 from frigate_sidecar.push.mqtt import MqttReviewSubscriber, compute_backoff
 from frigate_sidecar.push.transport import LogTransport, RelayTransport
 from frigate_sidecar.routes import analysis as analysis_routes
+from frigate_sidecar.routes import cameras_page as cameras_page_routes
 from frigate_sidecar.routes import debug as debug_routes
 from frigate_sidecar.routes import devices as devices_routes
 from frigate_sidecar.routes import faces as faces_routes
@@ -42,7 +45,6 @@ from frigate_sidecar.routes import status as status_routes
 from frigate_sidecar.routes import toybox as toybox_routes
 from frigate_sidecar.routes import triage as triage_routes
 from frigate_sidecar.routes import zone_hits as zone_hits_routes
-from frigate_sidecar.routes import cameras_page as cameras_page_routes
 from frigate_sidecar.routes import zones_page as zones_page_routes
 
 _PACKAGE_ROOT = Path(__file__).parent
@@ -360,6 +362,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
     app.state.plus_enabled = False
+
+    @app.exception_handler(FrigateDBMissingError)
+    async def _frigate_db_missing(request: Request, exc: FrigateDBMissingError) -> object:
+        # A dev instance without Frigate's SQLite (this Mac): the triage and
+        # analysis surfaces can't work, but they should say so instead of
+        # 500ing. Pages get a friendly empty state; API callers get 503 JSON.
+        # Never reached for /v1 or the proxy — those don't open the DB.
+        wants_html = "text/html" in request.headers.get("accept", "")
+        if request.method == "GET" and wants_html:
+            page = "triage" if request.url.path.startswith(("/triage", "/event/")) else ""
+            return app.state.templates.TemplateResponse(
+                request,
+                "frigate_db_missing.html",
+                {"page": page, "db_path": settings.frigate.db_path},
+            )
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
 
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     app.include_router(health_routes.router)

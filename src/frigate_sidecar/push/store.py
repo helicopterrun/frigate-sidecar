@@ -79,7 +79,9 @@ def _row_to_device(row: sqlite3.Row) -> Device:
         situations=situations,
         live_activity_token=str(_col(row, "live_activity_token", "") or ""),
         push_to_start_token=str(_col(row, "push_to_start_token", "") or ""),
-        la_capable=bool(int(_col(row, "la_capable", 1) if _col(row, "la_capable", 1) is not None else 1)),
+        la_capable=bool(
+            int(_col(row, "la_capable", 1) if _col(row, "la_capable", 1) is not None else 1)
+        ),
     )
 
 

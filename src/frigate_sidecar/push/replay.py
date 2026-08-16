@@ -15,7 +15,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from frigate_sidecar.config import PushSection
@@ -269,7 +269,9 @@ async def dry_run_scenario(
             else:
                 await engine.handle_review_payload(payload)
 
-            new_sends = transport.sent[sent_before:]
+            # LogTransport.sent is list[dict[str, object]]; everything below
+            # reads nested JSON-ish structure, so widen once here.
+            new_sends = cast("list[dict[str, Any]]", transport.sent[sent_before:])
             card_sends = [s for s in new_sends if "payload" in s and not s.get("live_activity")]
             la_sends = [s for s in new_sends if s.get("live_activity")]
 
@@ -435,7 +437,7 @@ async def _execute_run(
                 run.messages_total += len(msgs)
 
             if dry_run:
-                for i, (name, msgs) in enumerate(all_messages):
+                for i, (_name, msgs) in enumerate(all_messages):
                     if i > 0:
                         await asyncio.sleep(stagger / speed)
                     decisions = await dry_run_scenario(msgs, speed=speed)
@@ -452,7 +454,7 @@ async def _execute_run(
                     password=push_settings.mqtt_password,
                 )
                 try:
-                    for i, (name, msgs) in enumerate(all_messages):
+                    for i, (_name, msgs) in enumerate(all_messages):
                         if i > 0:
                             await asyncio.sleep(stagger / speed)
                         start_time = time.time()

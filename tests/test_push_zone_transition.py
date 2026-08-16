@@ -148,7 +148,8 @@ async def test_captured_charger_loiter_escalates(tmp_path, sidecar_db_path: Path
         s for s in starts
         if s["payload"]["aps"]["attributes"]["family"] == "person_restricted"
     ]
-    assert restricted, f"no person_restricted LA start; starts={[s['payload']['aps']['attributes'] for s in starts]}"
+    attrs = [s["payload"]["aps"]["attributes"] for s in starts]
+    assert restricted, f"no person_restricted LA start; starts={attrs}"
     # The urgent escalation's surface is the LA start alert with sound —
     # card pushes are suppressed while the LA covers (la_first).
     assert restricted[-1]["payload"]["aps"]["alert"]["sound"] == "urgent.caf"

@@ -127,7 +127,7 @@ async def run_stack(
         *(_run_child(name, proc, now=now) for name, proc in procs)
     )
 
-    failed = [name for (name, _), rc in zip(procs, returncodes) if rc != 0]
+    failed = [name for (name, _), rc in zip(procs, returncodes, strict=False) if rc != 0]
     if failed:
         print(f"error: scenario(s) failed: {', '.join(failed)}", file=sys.stderr)
         return 1

@@ -173,7 +173,9 @@ def default_settings() -> dict[str, Any]:
     return {
         "v": SETTINGS_VERSION,
         "routing_table": {subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE.items()},
-        "routing_table_v2": {subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE_V2.items()},
+        "routing_table_v2": {
+            subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE_V2.items()
+        },
         "recognition": dict(DEFAULT_RECOGNITION),
         "zone_classes": {},
         "zone_overrides": {},
@@ -245,7 +247,8 @@ def validate_settings(data: Any) -> list[str]:
                     level = row.get(place)
                     if level not in LEVELS:
                         errors.append(
-                            f"routing_table.{subject}.{place} must be one of {LEVELS}, got {level!r}"
+                            f"routing_table.{subject}.{place} must be one of {LEVELS},"
+                            f" got {level!r}"
                         )
 
     routing_table_v2 = data.get("routing_table_v2")
@@ -255,7 +258,9 @@ def validate_settings(data: Any) -> list[str]:
         else:
             unknown_subjects = set(routing_table_v2) - set(SUBJECTS_V2)
             if unknown_subjects:
-                errors.append(f"routing_table_v2 has unknown subject(s): {sorted(unknown_subjects)}")
+                errors.append(
+                    f"routing_table_v2 has unknown subject(s): {sorted(unknown_subjects)}"
+                )
             for subject in SUBJECTS_V2:
                 row = routing_table_v2.get(subject)
                 if not isinstance(row, dict):

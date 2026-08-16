@@ -811,7 +811,7 @@ async def test_mute_sounds_strips_la_update_sound(sidecar_db_path: Path):
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:person:trk1"
+    _card_key = "doorbell:person:trk1"
 
     # Custom table: person+doors=quiet so create doesn't spend sound budget.
     unmuted = policy_settings.default_settings()
@@ -880,7 +880,7 @@ async def test_muted_urgent_escalation_la_carries_alert_without_sound(sidecar_db
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:person:trk1"
+    _card_key = "doorbell:person:trk1"
 
     # Custom table: person+doors=quiet so create doesn't spend sound budget.
     settings = policy_settings.default_settings()

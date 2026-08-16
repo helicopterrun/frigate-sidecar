@@ -3,15 +3,11 @@ delivery setting stickiness, and feedback endpoint."""
 
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from frigate_sidecar.push import live_activities as la
 from frigate_sidecar.push import policy_settings
-
 
 # -- Settings: delivery + person_restricted ----------------------------------
 
@@ -166,7 +162,7 @@ def test_person_restricted_glyph():
 # -- Category audit ----------------------------------------------------------
 
 def test_card_push_includes_category():
-    from frigate_sidecar.push.cards import Card, CREATE
+    from frigate_sidecar.push.cards import CREATE, Card
     from frigate_sidecar.push.delivery import build_card_payload
 
     card = Card(card_key="test:stranger:t1", level="notify", created_at=1000.0, updated_at=1000.0)
@@ -180,7 +176,7 @@ def test_card_push_includes_category():
 
 
 def test_card_push_category_matches_level():
-    from frigate_sidecar.push.cards import Card, ESCALATE
+    from frigate_sidecar.push.cards import ESCALATE, Card
     from frigate_sidecar.push.delivery import build_card_payload
 
     card = Card(card_key="test:stranger:t1", level="urgent", created_at=1000.0, updated_at=1000.0)
@@ -215,7 +211,7 @@ def test_escalation_sound_non_urgent_unaffected():
 
 
 def test_escalation_sound_in_card_payload():
-    from frigate_sidecar.push.cards import Card, ESCALATE
+    from frigate_sidecar.push.cards import ESCALATE, Card
     from frigate_sidecar.push.delivery import build_card_payload
 
     card = Card(card_key="test:stranger:t1", level="urgent", created_at=1000.0, updated_at=1000.0)
@@ -246,7 +242,7 @@ def test_escalation_sound_settings_absent_keeps_default():
 # -- Interruption-level mapping (pin all four) --------------------------------
 
 def _payload_for_level(level):
-    from frigate_sidecar.push.cards import Card, CREATE
+    from frigate_sidecar.push.cards import CREATE, Card
     from frigate_sidecar.push.delivery import build_card_payload
     card = Card(card_key="test:stranger:t1", level=level, created_at=1000.0, updated_at=1000.0)
     return build_card_payload(

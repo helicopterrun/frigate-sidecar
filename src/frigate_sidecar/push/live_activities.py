@@ -176,8 +176,11 @@ def should_start_activity(
         if families_enabled is not None and families_enabled.get(family) is False:
             family = None
         else:
-            picks_active = family == OPENINGS and opening_picks
-            if picks_active and not any(oid in opening_picks for oid in opening_ids):
+            if (
+                family == OPENINGS
+                and opening_picks
+                and not any(oid in opening_picks for oid in opening_ids)
+            ):
                 family = None
 
     if family is None and catch_all:
