@@ -62,26 +62,29 @@ async def test_zone_transition_escalates_and_late_starts_la(sidecar_db_path: Pat
     device = make_device()
     config = PushSection(delivery_enabled=True)
 
-    # Story exists at quiet: person in the driveway (yard).
+    # Story exists at quiet: person in the driveway (yard). The merged
+    # ladder's glance outcome (2026-08-16) starts a catch-all activity
+    # right here -- the quiet story is on the lock screen from the start.
     await handle_delivery_event(
         review("stairway-tight", "trk1", ("driveway",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
-    assert la_sends(transport) == []
+    creates = [s for s in la_sends(transport) if s["event"] == "start"]
+    assert creates and creates[0]["payload"]["aps"]["attributes"]["family"] == "activity"
 
-    # Event stream: drifted into the charger (off_limits) — escalate.
+    # Event stream: drifted into the charger (off_limits) — escalate. The
+    # glance activity's per-activity token was never confirmed in this
+    # environment, so the LA cannot demonstrably cover the escalation and
+    # the card banner fallback fires instead (the designed safety: an LA
+    # that failed anywhere leaves the normal banner intact).
     sent = await handle_zone_transition(
         "stairway-tight", "trk1", ("charger", "driveway"), label="person",
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
     )
     assert sent >= 1
-    start = [s for s in la_sends(transport) if s["event"] == "start"][-1]
-    assert start["payload"]["aps"]["attributes"]["family"] == "person_restricted"
-    assert start["payload"]["aps"]["alert"]["sound"] == "urgent.caf"
-    # la_first suppresses card pushes while the LA covers — the escalation's
-    # only surface is the LA start alert above.
     esc_cards = [c for c in card_sends(transport) if c["payload"]["mutation"] == "escalate"]
-    assert esc_cards == []
+    assert esc_cards, "escalation must surface as a card push when the LA can't cover"
+    assert esc_cards[-1]["payload"]["level"] == "urgent"
 
 
 @pytest.mark.asyncio
@@ -143,14 +146,19 @@ async def test_captured_charger_loiter_escalates(tmp_path, sidecar_db_path: Path
         else:
             await engine.handle_object_payload(row["payload"])
 
-    starts = [s for s in la_sends(transport) if s["event"] == "start"]
-    restricted = [
-        s for s in starts
-        if s["payload"]["aps"]["attributes"]["family"] == "person_restricted"
+    # The merged ladder's glance outcome (2026-08-16) starts the story's
+    # activity back at quiet, so the charger drift escalates an EXISTING
+    # activity instead of late-starting a person_restricted one (LA
+    # attributes are start-only; rebranding on escalation is the app-phase
+    # follow-up). The urgent surface is still guaranteed: the unconfirmed
+    # activity can't cover, so the escalation lands as an urgent card push
+    # with the urgent sound.
+    esc_cards = [
+        c for c in card_sends(transport)
+        if c["payload"]["mutation"] == "escalate" and c["payload"]["level"] == "urgent"
     ]
-    attrs = [s["payload"]["aps"]["attributes"] for s in starts]
-    assert restricted, f"no person_restricted LA start; starts={attrs}"
-    # The urgent escalation's surface is the LA start alert with sound —
-    # card pushes are suppressed while the LA covers (la_first).
-    assert restricted[-1]["payload"]["aps"]["alert"]["sound"] == "urgent.caf"
-    assert restricted[-1]["payload"]["aps"]["content-state"]["level"] == "urgent"
+    assert esc_cards, "urgent escalation must surface"
+    assert esc_cards[-1]["payload"]["aps"]["sound"] == "urgent.caf"
+    # And the story was already on the lock screen before it got hot.
+    starts = [s for s in la_sends(transport) if s["event"] == "start"]
+    assert starts, "glance outcome should have started an activity at quiet"

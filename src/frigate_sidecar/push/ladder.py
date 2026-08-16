@@ -102,6 +102,9 @@ def evaluate_ladder(snapshot: Snapshot) -> str:
     if override is not None:
         return override
 
+    if (subject, snapshot.place) in policy.OFF_CELLS:
+        return SUPPRESSED
+
     levels = policy.LEVELS
     if subject in policy.TABLE:
         table_subject = subject

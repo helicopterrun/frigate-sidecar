@@ -46,6 +46,23 @@ PLACES = ("street", "yard", "doors", "private", "off_limits")
 LEVELS = ladder_policy.LEVELS
 RECOGNITION_MODES = ("off", "relax_one", "relax_to_quiet")
 
+#: The merged outcome ladder (content design 2026-08-16): one dial per
+#: subject x place answering "what happens?", folding the old level +
+#: LA-family choice together. Ordinal, low -> high.
+#:   off    -- suppressed entirely
+#:   log    -- recorded, visible in the app, no delivery
+#:   glance -- Live Activity only, never a banner or sound
+#:   notify -- banner + Live Activity
+#:   alarm  -- urgent: sound, re-sounds, time-sensitive
+OUTCOMES = ("off", "log", "glance", "notify", "alarm")
+
+#: Bijection with the routing levels the evaluator consumes ("off" has no
+#: level -- it is enforced as suppression before evaluation).
+LEVEL_TO_OUTCOME = {"log": "log", "quiet": "glance", "notify": "notify", "urgent": "alarm"}
+OUTCOME_TO_LEVEL = {
+    "off": "log", "log": "log", "glance": "quiet", "notify": "notify", "alarm": "urgent",
+}
+
 #: The routing table a freshly onboarded settings file starts the user at
 #: (design doc §1, "match the v3 brief's §1.4 table exactly").
 DEFAULT_ROUTING_TABLE: dict[str, dict[str, str]] = {
@@ -177,6 +194,10 @@ def default_settings() -> dict[str, Any]:
             subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE_V2.items()
         },
         "recognition": dict(DEFAULT_RECOGNITION),
+        "outcomes": {
+            subject: {place: LEVEL_TO_OUTCOME[level] for place, level in row.items()}
+            for subject, row in DEFAULT_ROUTING_TABLE_V2.items()
+        },
         "zone_classes": {},
         # zone key -> human display name for notification copy ("back_critter"
         # -> "the back walkway"). Wins over Frigate's friendly_name. Edited on
@@ -294,6 +315,29 @@ def validate_settings(data: Any) -> list[str]:
                     errors.append(
                         f"recognition.{key} must be one of {RECOGNITION_MODES}, got {val!r}"
                     )
+
+    outcomes = data.get("outcomes")
+    if outcomes is not None:
+        if not isinstance(outcomes, dict):
+            errors.append("outcomes must be an object")
+        else:
+            unknown = set(outcomes) - set(SUBJECTS_V2)
+            if unknown:
+                errors.append(f"outcomes has unknown subject(s): {sorted(unknown)}")
+            for subject in SUBJECTS_V2:
+                row = outcomes.get(subject)
+                if row is None:
+                    continue
+                if not isinstance(row, dict):
+                    errors.append(f"outcomes.{subject} must be an object")
+                    continue
+                for place, outcome in row.items():
+                    if place not in PLACES:
+                        errors.append(f"outcomes.{subject} has unknown place {place!r}")
+                    elif outcome not in OUTCOMES:
+                        errors.append(
+                            f"outcomes.{subject}.{place} must be one of {OUTCOMES}, got {outcome!r}"
+                        )
 
     zone_names = data.get("zone_names")
     if zone_names is not None:
@@ -491,6 +535,39 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
             val = recognition.get(key)
             if val in RECOGNITION_MODES:
                 merged["recognition"][key] = val
+
+    outcomes = data.get("outcomes")
+    if isinstance(outcomes, dict):
+        # Outcomes are the authority: copy valid cells over the defaults,
+        # then derive the legacy routing levels from them so the evaluator
+        # (and an older app build reading routing_table_v2) stays in step.
+        for subject in SUBJECTS_V2:
+            row = outcomes.get(subject)
+            if isinstance(row, dict):
+                for place in PLACES:
+                    if row.get(place) in OUTCOMES:
+                        merged["outcomes"][subject][place] = row[place]
+        for subject in SUBJECTS_V2:
+            for place in PLACES:
+                merged["routing_table_v2"][subject][place] = OUTCOME_TO_LEVEL[
+                    merged["outcomes"][subject][place]
+                ]
+    else:
+        # Legacy body (an older app build): derive outcomes from its levels.
+        # "off" survives a legacy round trip: the legacy shape renders an
+        # off cell as "log", so a stored off + incoming log stays off.
+        stored = (_active or {}).get("outcomes", {}) if isinstance(_active, dict) else {}
+        for subject in SUBJECTS_V2:
+            for place in PLACES:
+                level = merged["routing_table_v2"][subject][place]
+                derived = LEVEL_TO_OUTCOME[level]
+                was_off = (
+                    isinstance(stored.get(subject), dict)
+                    and stored[subject].get(place) == "off"
+                )
+                merged["outcomes"][subject][place] = (
+                    "off" if derived == "log" and was_off else derived
+                )
 
     zone_names = data.get("zone_names")
     if isinstance(zone_names, dict):
@@ -737,6 +814,12 @@ def apply_settings(settings: dict[str, Any]) -> None:
     global _active
     table = settings.get("routing_table_v2") or settings["routing_table"]
     ladder_policy.set_table({s: dict(row) for s, row in table.items()})
+    outcomes = settings.get("outcomes", {})
+    ladder_policy.set_off_cells({
+        (subject, place)
+        for subject, row in outcomes.items() if isinstance(row, dict)
+        for place, outcome in row.items() if outcome == "off"
+    })
     ladder_policy.set_zone_overrides(
         {zone: dict(row) for zone, row in settings.get("zone_overrides", {}).items()}
     )
@@ -957,3 +1040,16 @@ def build_available_openings(config_path: str | Path) -> list[str]:
             if _looks_like_opening(zone["name"]):
                 names.add(zone["name"])
     return sorted(names)
+
+
+def outcome_for(subject: str, place: str) -> str:
+    """The merged-ladder outcome for a subject x place cell, for delivery
+    surface decisions (delivery_wire's glance gating). Falls back to the
+    level-derived outcome when the active doc predates the outcomes table."""
+    outcomes = get_active().get("outcomes", {})
+    row = outcomes.get(subject)
+    if isinstance(row, dict) and row.get(place) in OUTCOMES:
+        return str(row[place])
+    table = get_active().get("routing_table_v2") or get_active().get("routing_table", {})
+    level = table.get(subject, {}).get(place, "log")
+    return LEVEL_TO_OUTCOME.get(level, "log")

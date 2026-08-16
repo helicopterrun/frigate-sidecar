@@ -1048,7 +1048,21 @@ async def handle_delivery_event(
         la_only = bool(policy["live_activities"].get("la_only", False))
         # la_only's catch-all is quiet+ by its own contract -- decoupled from
         # should_push, which no longer includes quiet (2026-08-14).
-        la_catch_all = la_only and card.level in ("quiet", "notify", "urgent")
+        # A "glance" outcome cell is la_only applied per-cell: the merged
+        # ladder promises a Live Activity with no banner, so the catch-all
+        # guarantees an activity for *uncurated* content (a quiet person in
+        # the yard matches no family today). Content a curated family
+        # claims (openings, package, bins...) stays governed by that
+        # family's toggle and picks -- those are the user's own curation.
+        cell_glance = policy_settings.outcome_for(subject_kind, place_class) == "glance"
+        if cell_glance and not la_only:
+            native = live_activities.classify_family(
+                subject_kind=subject_kind, label=snapshot.label,
+                place_class=place_class, level=card.level,
+            )
+            if native is not None:
+                cell_glance = False
+        la_catch_all = (la_only or cell_glance) and card.level in ("quiet", "notify", "urgent")
         family = live_activities.should_start_activity(
             subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
             level=card.level,

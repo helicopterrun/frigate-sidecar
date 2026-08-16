@@ -74,6 +74,18 @@ def set_zone_overrides(overrides: dict[str, dict[str, str]]) -> None:
     ZONE_OVERRIDES = overrides
 
 
+#: Subject x place cells the merged outcome ladder marks "off": the
+#: evaluator answers SUPPRESSED for them before nudges can raise anything.
+#: Zone overrides still outrank this -- an explicit per-zone rule is the
+#: user's most specific statement.
+OFF_CELLS: set[tuple[str, str]] = set()
+
+
+def set_off_cells(cells: set[tuple[str, str]]) -> None:
+    global OFF_CELLS
+    OFF_CELLS = set(cells)
+
+
 def set_table(table: dict[str, dict[str, str]]) -> None:
     """Replace the base subject x place table (Elsinore Phase 4: user-
     editable routing). `ladder.py` reads `policy.TABLE` as a module

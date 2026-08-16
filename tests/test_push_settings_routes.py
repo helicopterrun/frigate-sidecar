@@ -150,11 +150,19 @@ def test_put_cleans_up_empty_zone_override_entries(client: TestClient):
 def test_put_applies_immediately_to_the_routing_engine(client: TestClient):
     from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
 
+    # The outcomes table is the authority when present (merged ladder,
+    # 2026-08-16) -- a new client edits it; the legacy levels are derived.
     new_settings = policy_settings.default_settings()
-    table_key = "routing_table_v2" if "routing_table_v2" in new_settings else "routing_table"
-    new_settings[table_key]["thing"]["yard"] = "urgent"
+    new_settings["outcomes"]["thing"]["yard"] = "alarm"
     client.put("/v1/push/settings", json=new_settings)
 
+    assert evaluate_ladder(Snapshot(subject="thing", place="yard")) == "urgent"
+
+    # An old client body (no outcomes key) still applies via derivation.
+    legacy = policy_settings.default_settings()
+    del legacy["outcomes"]
+    legacy["routing_table_v2"]["thing"]["yard"] = "urgent"
+    client.put("/v1/push/settings", json=legacy)
     assert evaluate_ladder(Snapshot(subject="thing", place="yard")) == "urgent"
 
 

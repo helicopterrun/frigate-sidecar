@@ -135,11 +135,23 @@ async def test_non_qualifying_card_gets_no_live_activity(sidecar_db_path: Path):
     device = make_device()
     config = PushSection(delivery_enabled=True)
 
+    # A log-outcome cell mints nothing. (A quiet/glance cell now DOES mint a
+    # catch-all activity -- the merged outcome ladder's "glance" promise,
+    # 2026-08-16 -- so the no-LA case is log, not quiet.)
     await handle_delivery_event(
-        make_event("yard-cam", "trk1", "dog", zones=("yard",)),
+        make_event("street-cam", "trk1", "dog", zones=("street_side",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     assert la_sends(transport) == []
+
+    # And the old premise inverted: a glance cell (animal x yard) starts a
+    # catch-all activity even though no curated family matches a dog.
+    await handle_delivery_event(
+        make_event("yard-cam", "trk2", "dog", zones=("yard",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=1.0,
+    )
+    sends = la_sends(transport)
+    assert sends and sends[0]["event"] == "start"
 
 
 @pytest.mark.asyncio

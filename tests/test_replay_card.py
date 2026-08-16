@@ -182,11 +182,14 @@ async def test_dry_run_scenario_escalate_urgent():
 
     escalate = next(d for d in decisions if d["mutation"] == "escalate")
     assert escalate["level"] == "urgent"
-    # Routing-gated families: the dry-run device is LA-capable, so the
-    # escalation late-starts a person LA whose start alert carries the
-    # sound, and the card push is suppressed entirely (la_first).
+    # Merged ladder (2026-08-16): the quiet create's glance outcome already
+    # started the activity, so the escalation UPDATES it (the dry-run
+    # simulates the app's token upload, so the update covers and the card
+    # push is suppressed); the urgent sound rides the update alert.
+    create = decisions[0]
+    assert create.get("la_action") == "start"
     assert escalate["card"] == "suppressed (LA covers)"
-    assert escalate["la_action"] == "start"
+    assert escalate["la_action"] == "update"
     assert escalate["la_sound_name"] == "urgent.caf"
 
 
