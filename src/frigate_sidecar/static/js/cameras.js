@@ -358,6 +358,43 @@
       var r = reach();
       var selected = camera === selectedCamera;
 
+      // Everything this camera draws lives in one group so selecting
+      // another camera can dim it as a unit.
+      var camGroup = document.createElementNS(SVG_NS, "g");
+      if (selectedCamera && !selected) camGroup.setAttribute("opacity", "0.22");
+      svg.appendChild(camGroup);
+
+      if (hasAim) {
+        // Soft view gradient: the pie's direction carried to the map edge,
+        // fading out — reads as "what this camera can see beyond its
+        // interaction pie" without adding more hard lines.
+        var far = Math.max(
+          Math.hypot(entry.x, entry.y),
+          Math.hypot(1 - entry.x, entry.y),
+          Math.hypot(entry.x, 1 - entry.y),
+          Math.hypot(1 - entry.x, 1 - entry.y)
+        );
+        var grad = document.createElementNS(SVG_NS, "radialGradient");
+        grad.setAttribute("id", "fov-fade-" + i);
+        grad.setAttribute("gradientUnits", "userSpaceOnUse");
+        grad.setAttribute("cx", entry.x); grad.setAttribute("cy", entry.y);
+        grad.setAttribute("r", far);
+        [[0, 0.22], [0.45, 0.10], [1, 0]].forEach(function (stop) {
+          var s = document.createElementNS(SVG_NS, "stop");
+          s.setAttribute("offset", stop[0]);
+          s.setAttribute("stop-color", "var(--accent, #ffb454)");
+          s.setAttribute("stop-opacity", stop[1]);
+          grad.appendChild(s);
+        });
+        defs.appendChild(grad);
+        var fade = document.createElementNS(SVG_NS, "path");
+        fade.setAttribute("d", wedgePath(entry, az, fov, far));
+        fade.setAttribute("fill", "url(#fov-fade-" + i + ")");
+        fade.setAttribute("stroke", "none");
+        fade.style.pointerEvents = "none";
+        camGroup.appendChild(fade);
+      }
+
       if (hasAim) {
         var coverage = coverageToggle && coverageToggle.checked;
         var path = document.createElementNS(SVG_NS, "path");
@@ -374,18 +411,18 @@
         dragOn(path, camera, i, function (e, pointerAz) {
           e.azimuth = +pointerAz.toFixed(1);
         });
-        svg.appendChild(path);
+        camGroup.appendChild(path);
 
         // The two wedge edges: visible thin lines + invisible fat grab
         // lines. Dragging an edge sets the width symmetrically.
         [az - fov / 2, az + fov / 2].forEach(function (edgeAz) {
           var d = azDir(edgeAz);
           var ex = entry.x + d.x * r, ey = entry.y + d.y * r;
-          svgLine(svg, entry.x, entry.y, ex, ey, {
+          svgLine(camGroup, entry.x, entry.y, ex, ey, {
             stroke: "var(--accent, #ffb454)", "stroke-opacity": "0.55",
             "stroke-width": "0.004", "stroke-dasharray": "0.012 0.008",
           });
-          var grab = svgLine(svg, entry.x, entry.y, ex, ey, {
+          var grab = svgLine(camGroup, entry.x, entry.y, ex, ey, {
             stroke: "transparent", "stroke-width": "0.035",
           });
           grab.style.cursor = "col-resize";
@@ -401,13 +438,13 @@
       // grab to set the first aim.
       var dir = azDir(az);
       var ax = entry.x + dir.x * r * 0.72, ay = entry.y + dir.y * r * 0.72;
-      var arrow = svgLine(svg, entry.x, entry.y, ax, ay, {
+      var arrow = svgLine(camGroup, entry.x, entry.y, ax, ay, {
         stroke: "var(--accent, #ffb454)",
         "stroke-opacity": hasAim ? "0.95" : "0.35",
         "stroke-width": "0.008",
         "marker-end": "url(#map-arrowhead)",
       });
-      var grabArrow = svgLine(svg, entry.x, entry.y, ax, ay, {
+      var grabArrow = svgLine(camGroup, entry.x, entry.y, ax, ay, {
         stroke: "transparent", "stroke-width": "0.05",
       });
       grabArrow.style.cursor = "alias";
@@ -432,7 +469,7 @@
         text.setAttribute("stroke-width", "0.006");
         text.setAttribute("paint-order", "stroke");
         text.textContent = cardinalOf(az) + " " + Math.round(az) + "°";
-        svg.appendChild(text);
+        camGroup.appendChild(text);
       }
     });
     drawTrails(svg);
@@ -478,14 +515,23 @@
 
     cameras.forEach(function (camera, i) {
       var pos = layoutEntry(camera, i);
+      var isSel = camera === selectedCamera;
       var dot = document.createElement("div");
-      dot.textContent = camera;
+      var icon = document.createElement("span");
+      icon.textContent = "📷";
+      icon.style.cssText = "font-size:1.25em;line-height:1;margin-right:3px";
+      dot.appendChild(icon);
+      dot.appendChild(document.createTextNode(camera));
       dot.style.cssText =
-        "position:absolute;transform:translate(-50%,-50%);padding:2px 8px;" +
+        "position:absolute;transform:translate(-50%,-50%);padding:2px 7px;" +
+        "display:flex;align-items:center;" +
         "background:var(--surface-2);border:1px solid " +
-        (camera === selectedCamera ? "var(--accent, #ffb454)" : "var(--stroke)") + ";" +
-        "border-radius:999px;font-size:0.75em;cursor:grab;user-select:none;" +
-        "touch-action:none;white-space:nowrap";
+        (isSel ? "var(--accent, #ffb454)" : "var(--stroke)") + ";" +
+        "border-radius:999px;font-size:0.62em;cursor:grab;user-select:none;" +
+        "touch-action:none;white-space:nowrap;" +
+        (isSel
+          ? "box-shadow:0 0 0 2px var(--accent, #ffb454), 0 0 14px var(--accent, #ffb454);z-index:2;"
+          : selectedCamera ? "opacity:0.35;" : "");
       dot.style.left = pos.x * 100 + "%";
       dot.style.top = pos.y * 100 + "%";
       dot.addEventListener("pointerdown", function (ev) {
@@ -955,6 +1001,7 @@
       mapEl.removeEventListener("pointermove", move);
       mapEl.removeEventListener("pointerup", up);
       if (moved) markDirty();
+      else if (selectedCamera) { selectedCamera = null; renderMap(); }
     }
     mapEl.addEventListener("pointermove", move);
     mapEl.addEventListener("pointerup", up);
