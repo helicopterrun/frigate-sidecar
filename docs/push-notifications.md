@@ -334,7 +334,10 @@ pre-fanout, newest first. Each entry: `id`, `ts`, `camera`, `label`,
 raises and losing the buffer on restart is acceptable. This feeds the app's
 Recent Decisions screen — the tuning loop is: see a decision you disagree
 with, see which cell/override/reason produced it, change that cell, and the
-next evaluation uses the new policy. `POST /v1/push/feedback` logs a
+next evaluation uses the new policy. Events silenced by an `off` cell are
+traced too (level `"off"`, reason `suppressed`, once per track) — otherwise
+the feed goes dark for exactly the cells the user silenced and there is no
+evidence trail to dial one back up. `POST /v1/push/feedback` logs a
 per-card verdict (tuning trace only; no routing changes yet).
 
 ## HTTP surface (`routes/push.py`)

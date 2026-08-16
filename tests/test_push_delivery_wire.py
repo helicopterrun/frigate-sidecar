@@ -681,3 +681,46 @@ async def test_label_flip_escalation_routes_at_new_kind(sidecar_db_path: Path):
     assert payload["card_key"] == "doorbell:animal:trk1"  # birth key kept
     assert payload["mutation"] == "escalate"
     assert payload["level"] == "notify"
+
+
+@pytest.mark.asyncio
+async def test_off_cell_suppression_still_traced_once(sidecar_db_path: Path):
+    """An `off` cell silences the push but must still leave one decision-trace
+    entry (level "off") per track -- the Recent Decisions feed is the tuning
+    lever, and a cell you can't see suppressing is a cell you can never dial
+    back up."""
+    from frigate_sidecar.push import decision_trace, ladder_policy
+
+    decision_trace.reset_for_tests()
+    ladder_policy.set_off_cells({("person", "street")})
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    engine = PushEngine(db_path=str(sidecar_db_path), transport=transport, server_id="s_test")
+    config = PushSection(delivery_enabled=True, external_base_url=EXTERNAL_BASE_URL)
+    event = ReviewEvent(
+        review_id="r1", camera="street", severity="alert", labels=("person",),
+        track_ids=("trk1",), zones=(),
+    )
+
+    await handle_delivery_event(
+        event, conn=conn, devices=[make_device()], transport=transport,
+        config=config, engine=engine, now=0.0,
+    )
+
+    assert transport.sent == []  # suppressed: nothing on the wire
+    entries = decision_trace.recent()
+    assert len(entries) == 1
+    assert entries[0]["level"] == "off"
+    assert entries[0]["subject"] == "person"
+    assert entries[0]["place"] == "street"
+    assert "suppressed" in entries[0]["reasons"]
+
+    # A second update for the same track finds the closed card row and must
+    # NOT append again -- one row per suppressed track, not per MQTT update.
+    await handle_delivery_event(
+        event, conn=conn, devices=[make_device()], transport=transport,
+        config=config, engine=engine, now=10.0,
+    )
+    assert transport.sent == []
+    assert len(decision_trace.recent()) == 1

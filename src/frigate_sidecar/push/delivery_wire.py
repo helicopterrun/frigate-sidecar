@@ -41,6 +41,7 @@ from frigate_sidecar.push import (
     store,
 )
 from frigate_sidecar.push.cards import CREATE, DEESCALATE, ENRICH, ESCALATE, RESOLVE, Card
+from frigate_sidecar.push.cards import SUPPRESSED as SUPPRESSED_MUTATION
 from frigate_sidecar.push.delivery import (
     _device_eligible,
     _is_snoozed,
@@ -984,6 +985,29 @@ async def handle_delivery_event(
                 place=place_class,
                 level=card.level,
                 reasons=list(trace_reasons),
+                event_id=event.event_id,
+            )
+        elif (
+            mutation == SUPPRESSED_MUTATION
+            and (existing is None or not existing.closed)
+            and (snapshot.subject, snapshot.place) in _lp.OFF_CELLS
+        ):
+            # An `off` cell silenced this before evaluation -- trace it
+            # anyway (level "off", once per track: later updates find the
+            # closed row above and skip). Without this, Recent Decisions
+            # shows nothing for exactly the cells the user silenced, so
+            # there's no evidence trail to ever dial one back up. Global
+            # mute also lands on SUPPRESSED but is excluded by the
+            # OFF_CELLS check -- muting everything shouldn't flood the
+            # trace.
+            decision_trace.append(
+                camera=event.camera,
+                label=snapshot.label,
+                subject=subject_kind,
+                zones=list(event.zones) if event.zones else [],
+                place=place_class,
+                level="off",
+                reasons=["routing_table", "suppressed"],
                 event_id=event.event_id,
             )
 

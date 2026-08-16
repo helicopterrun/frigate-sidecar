@@ -94,7 +94,9 @@ def _reset_ladder_policy() -> Iterator[None]:
     original_overrides = {
         zone: dict(row) for zone, row in ladder_policy.ZONE_OVERRIDES.items()
     }
+    original_off_cells = set(ladder_policy.OFF_CELLS)
     yield
     ladder_policy.set_table(original_table)
     ladder_policy.set_zone_overrides(original_overrides)
+    ladder_policy.set_off_cells(original_off_cells)
     policy_settings.reset_for_tests()
