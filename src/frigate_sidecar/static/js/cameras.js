@@ -227,6 +227,14 @@
     svg.setAttribute("viewBox", "0 0 1 1");
     svg.setAttribute("preserveAspectRatio", "none");
     svg.style.cssText = "position:absolute;inset:0;width:100%;height:100%;cursor:crosshair";
+    if (heatmapURL) {
+      var heat = document.createElementNS(SVG_NS, "image");
+      heat.setAttribute("x", 0); heat.setAttribute("y", 0);
+      heat.setAttribute("width", 1); heat.setAttribute("height", 1);
+      heat.setAttribute("preserveAspectRatio", "none");
+      heat.setAttribute("href", heatmapURL);
+      svg.appendChild(heat);
+    }
     var defs = document.createElementNS(SVG_NS, "defs");
     var marker = document.createElementNS(SVG_NS, "marker");
     marker.setAttribute("id", "arrowhead");
@@ -407,6 +415,8 @@
     defs.appendChild(marker);
     svg.appendChild(defs);
     drawZoneOverlays(svg); // under the camera groups: zones are ground truth
+    drawFootprints(svg);   // true projected coverage (View: Footprints)
+    drawRingsGrid(svg);
 
     function dragOn(el, camera, i, apply) {
       if (!el.style.pointerEvents) el.style.pointerEvents = "stroke";
@@ -457,7 +467,7 @@
       if (activeLayer !== "cameras") camGroup.style.pointerEvents = "none";
       svg.appendChild(camGroup);
 
-      if (hasAim) {
+      if (hasAim && !(footprintsToggle && footprintsToggle.checked)) {
         // Soft view gradient: the pie's direction carried to the map edge,
         // fading out — reads as "what this camera can see beyond its
         // interaction pie" without adding more hard lines.
@@ -791,7 +801,7 @@
   trailsSelect.addEventListener("change", async function () {
     trailTracks = [];
     trailsNote.textContent = "";
-    if (!trailsSelect.value) { renderMap(); return; }
+    if (!trailsSelect.value) { buildHeatmap(); renderMap(); return; }
     if (!doc.map_scale_ft) {
       trailsNote.textContent = "set map width first";
       trailsSelect.value = "";
@@ -801,6 +811,7 @@
     try {
       var data = await fetchJson("/replay/capture-window?minutes=" + trailsSelect.value);
       trailTracks = data.tracks || [];
+      buildHeatmap();
       renderMap();
     } catch (err) {
       trailsNote.textContent = "error: " + err.message;
@@ -892,6 +903,170 @@
       poly.appendChild(title);
       svg.appendChild(poly);
     });
+  }
+
+  // ---- Footprints, rings/grid, heatmap (View visualizations) ----------
+
+  var footprintsToggle = document.getElementById("footprints-toggle");
+  var ringsToggle = document.getElementById("rings-toggle");
+  var heatmapToggle = document.getElementById("heatmap-toggle");
+  var footprintData = null; // fetched projected footprints; null = not loaded
+  var heatmapURL = null;    // cached data-URL, rebuilt on trails change only
+
+  footprintsToggle.addEventListener("change", async function () {
+    if (footprintsToggle.checked && footprintData === null) {
+      try {
+        var data = await fetchJson("/v1/push/map/footprints");
+        footprintData = data.footprints || [];
+        if (!footprintData.length) {
+          liveNote.textContent = "no projectable footprints (need placed cameras + scale)";
+        }
+      } catch (err) {
+        liveNote.textContent = "footprints error: " + err.message;
+        footprintsToggle.checked = false;
+        return;
+      }
+    }
+    renderMap();
+  });
+
+  function drawFootprints(svg) {
+    if (!footprintsToggle || !footprintsToggle.checked || !footprintData) return;
+    footprintData.forEach(function (f) {
+      var color = TRAIL_COLORS[cameras.indexOf(f.camera) % TRAIL_COLORS.length];
+      var poly = document.createElementNS(SVG_NS, "polygon");
+      poly.setAttribute("points", f.points.map(function (p) {
+        return p[0] + "," + p[1];
+      }).join(" "));
+      poly.setAttribute("fill", color);
+      poly.setAttribute("fill-opacity", "0.18");
+      poly.setAttribute("stroke", color);
+      poly.setAttribute("stroke-opacity", "0.6");
+      poly.setAttribute("stroke-width", sz(0.003));
+      poly.setAttribute("stroke-linejoin", "round");
+      var title = document.createElementNS(SVG_NS, "title");
+      title.textContent = f.camera + " ground footprint" +
+        (f.clipped ? " (clipped at horizon/range)" : "");
+      poly.appendChild(title);
+      svg.appendChild(poly);
+    });
+  }
+
+  ringsToggle.addEventListener("change", renderMap);
+
+  function drawRingsGrid(svg) {
+    if (!ringsToggle || !ringsToggle.checked) return;
+    var scale = doc.map_scale_ft;
+    if (!scale) return;
+    var aspect = mapAspect();
+    // Grid pitch adapts to zoom so lines never crowd.
+    var gridFt = view.w > 0.5 ? 25 : view.w > 0.2 ? 10 : 5;
+    var stepX = gridFt / scale;
+    var stepY = gridFt / (scale * aspect);
+    var g = document.createElementNS(SVG_NS, "g");
+    g.setAttribute("pointer-events", "none");
+    var x, y;
+    for (x = Math.ceil(view.x / stepX) * stepX; x <= view.x + view.w; x += stepX) {
+      svgLine(g, x, view.y, x, view.y + view.w, {
+        stroke: "var(--muted, #8f9fb8)", "stroke-opacity": "0.12",
+        "stroke-width": sz(0.0015),
+      });
+    }
+    for (y = Math.ceil(view.y / stepY) * stepY; y <= view.y + view.w; y += stepY) {
+      svgLine(g, view.x, y, view.x + view.w, y, {
+        stroke: "var(--muted, #8f9fb8)", "stroke-opacity": "0.12",
+        "stroke-width": sz(0.0015),
+      });
+    }
+    var gLabel = document.createElementNS(SVG_NS, "text");
+    gLabel.setAttribute("x", view.x + sz(0.012));
+    gLabel.setAttribute("y", view.y + view.w - sz(0.015));
+    gLabel.setAttribute("font-size", sz(0.02));
+    gLabel.setAttribute("fill", "var(--muted, #8f9fb8)");
+    gLabel.textContent = "grid " + gridFt + " ft";
+    g.appendChild(gLabel);
+    // Range rings around the selected camera.
+    var entry = selectedCamera && (doc.camera_layout || {})[selectedCamera];
+    if (entry) {
+      [10, 25, 50, 100].forEach(function (r) {
+        var el = document.createElementNS(SVG_NS, "ellipse");
+        el.setAttribute("cx", entry.x); el.setAttribute("cy", entry.y);
+        el.setAttribute("rx", r / scale);
+        el.setAttribute("ry", r / (scale * aspect));
+        el.setAttribute("fill", "none");
+        el.setAttribute("stroke", "var(--accent, #ffb454)");
+        el.setAttribute("stroke-opacity", "0.35");
+        el.setAttribute("stroke-width", sz(0.0025));
+        el.setAttribute("stroke-dasharray", sz(0.008) + " " + sz(0.006));
+        g.appendChild(el);
+        var t = document.createElementNS(SVG_NS, "text");
+        t.setAttribute("x", entry.x);
+        t.setAttribute("y", entry.y - r / (scale * aspect) - sz(0.006));
+        t.setAttribute("text-anchor", "middle");
+        t.setAttribute("font-size", sz(0.02));
+        t.setAttribute("fill", "var(--accent, #ffb454)");
+        t.setAttribute("fill-opacity", "0.7");
+        t.textContent = r + " ft";
+        g.appendChild(t);
+      });
+    }
+    svg.appendChild(g);
+  }
+
+  heatmapToggle.addEventListener("change", function () {
+    if (heatmapToggle.checked && !trailTracks.length) {
+      trailsNote.textContent = "pick a Walks window to feed the heatmap";
+    }
+    buildHeatmap();
+    renderMap();
+  });
+
+  function buildHeatmap() {
+    // Rebuilt only on toggle/trails change — never per renderMap frame.
+    heatmapURL = null;
+    if (!heatmapToggle || !heatmapToggle.checked || !trailTracks.length) return;
+    var aspect = mapAspect();
+    var W = 512, H = Math.max(64, Math.round(512 * aspect));
+    var canvas = document.createElement("canvas");
+    canvas.width = W; canvas.height = H;
+    var ctx = canvas.getContext("2d");
+    // Accumulate projected points into a count grid (coarser than the
+    // canvas so a walk reads as a ribbon, not pinpricks).
+    var GW = 128, GH = Math.max(16, Math.round(128 * aspect));
+    var counts = new Float32Array(GW * GH);
+    var maxC = 0;
+    trailTracks.forEach(function (track) {
+      (track.points || []).forEach(function (p) {
+        var w = worldPosition(track.camera, p[0], p[1]);
+        if (!w || w.x < 0 || w.x > 1 || w.y < 0 || w.y > 1) return;
+        var gx = Math.min(GW - 1, Math.floor(w.x * GW));
+        var gy = Math.min(GH - 1, Math.floor(w.y * GH));
+        counts[gy * GW + gx] += 1;
+        if (counts[gy * GW + gx] > maxC) maxC = counts[gy * GW + gx];
+      });
+    });
+    if (!maxC) return;
+    var logMax = Math.log(1 + maxC);
+    var cellW = W / GW, cellH = H / GH;
+    for (var gy = 0; gy < GH; gy++) {
+      for (var gx = 0; gx < GW; gx++) {
+        var c = counts[gy * GW + gx];
+        if (!c) continue;
+        var v = Math.log(1 + c) / logMax; // log-normalized 0..1
+        // transparent -> amber -> red
+        var red = 255;
+        var green = Math.round(180 * (1 - v * 0.8));
+        var grad = ctx.createRadialGradient(
+          (gx + 0.5) * cellW, (gy + 0.5) * cellH, 0,
+          (gx + 0.5) * cellW, (gy + 0.5) * cellH, cellW * 1.6
+        );
+        grad.addColorStop(0, "rgba(" + red + "," + green + ",0," + (0.5 * v + 0.12) + ")");
+        grad.addColorStop(1, "rgba(" + red + "," + green + ",0,0)");
+        ctx.fillStyle = grad;
+        ctx.fillRect((gx - 1.5) * cellW, (gy - 1.5) * cellH, cellW * 4, cellH * 4);
+      }
+    }
+    heatmapURL = canvas.toDataURL();
   }
 
   var LIVE_COLORS = {
@@ -2062,6 +2237,13 @@
         body: JSON.stringify(doc),
       });
       saveState.textContent = "saved ✓";
+      footprintData = null; // rig facts may have changed; refetch on demand
+      if (footprintsToggle.checked) {
+        try {
+          footprintData = (await fetchJson("/v1/push/map/footprints")).footprints || [];
+        } catch (fpErr) { footprintData = null; }
+        renderMap();
+      }
     } catch (err) {
       saveState.textContent = "error: " + err.message;
     }
