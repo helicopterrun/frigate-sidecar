@@ -268,6 +268,7 @@
         // frame — the "moves a tiny bit then stops" bug.
         selectedCamera = camera;
         function move(mv) {
+          if (pinchActive) return;
           var e = ensureEntry(camera, i);
           var az = pointerAzimuth(mv, e);
           if (az === null) return;
@@ -404,6 +405,7 @@
         selectedCamera = camera;
         var movedPt = false;
         function mm(mv) {
+          if (pinchActive) return;
           movedPt = true;
           var p = clientToUnit(mv);
           var e = ensureEntry(camera, i);
@@ -525,6 +527,7 @@
       svg.appendChild(saLabel);
     }
     clearSecureBtn.style.display = doc.secure_area ? "inline-block" : "none";
+    syncSecureControls();
 
     var north = document.createElement("div");
     north.textContent = "N ↑";
@@ -563,6 +566,7 @@
         selectedCamera = camera;
         var moved = false;
         function move(mv) {
+          if (pinchActive) return;
           moved = true;
           var p = clientToUnit(mv);
           var x = Math.min(1, Math.max(0, p.x));
@@ -1326,6 +1330,7 @@
     var last = { x: ev.clientX, y: ev.clientY };
     var rect = null;
     function move(mv) {
+      if (pinchActive) return; // second finger landed: pinch owns the view
       rect = mapEl.getBoundingClientRect(); // fresh: layout can shift
       view.x -= ((mv.clientX - last.x) / rect.width) * view.w;
       view.y -= ((mv.clientY - last.y) / rect.height) * view.w;
@@ -1340,6 +1345,71 @@
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   }
+
+  // ---- Pinch zoom (touch) ---------------------------------------------
+  // Tracked in the capture phase so a pinch wins even when the first
+  // finger landed on a camera element; single-finger gestures check
+  // pinchActive and go quiet while two fingers are down.
+  var touchPts = {};
+  var pinchActive = false;
+  var pinchStart = null; // {dist, w, mid:{x,y unit}}
+
+  function touchIds() { return Object.keys(touchPts); }
+
+  mapEl.addEventListener("pointerdown", function (ev) {
+    if (ev.pointerType !== "touch") return;
+    touchPts[ev.pointerId] = { x: ev.clientX, y: ev.clientY };
+    var ids = touchIds();
+    if (ids.length === 2) {
+      var a = touchPts[ids[0]], b = touchPts[ids[1]];
+      var rect = mapEl.getBoundingClientRect();
+      pinchActive = true;
+      pinchStart = {
+        dist: Math.hypot(a.x - b.x, a.y - b.y),
+        w: view.w,
+        mid: {
+          x: view.x + (((a.x + b.x) / 2 - rect.left) / rect.width) * view.w,
+          y: view.y + (((a.y + b.y) / 2 - rect.top) / rect.height) * view.w,
+        },
+      };
+      ev.stopPropagation();
+    }
+  }, true);
+
+  window.addEventListener("pointermove", function (ev) {
+    if (ev.pointerType !== "touch" || !touchPts[ev.pointerId]) return;
+    touchPts[ev.pointerId] = { x: ev.clientX, y: ev.clientY };
+    if (!pinchActive) return;
+    var ids = touchIds();
+    if (ids.length < 2) return;
+    var a = touchPts[ids[0]], b = touchPts[ids[1]];
+    var dist = Math.hypot(a.x - b.x, a.y - b.y);
+    if (dist < 10 || !pinchStart.dist) return;
+    var rect = mapEl.getBoundingClientRect();
+    view.w = pinchStart.w * (pinchStart.dist / dist);
+    clampView();
+    // Keep the pinch midpoint's map location under the fingers.
+    var midClient = {
+      x: ((a.x + b.x) / 2 - rect.left) / rect.width,
+      y: ((a.y + b.y) / 2 - rect.top) / rect.height,
+    };
+    view.x = pinchStart.mid.x - midClient.x * view.w;
+    view.y = pinchStart.mid.y - midClient.y * view.w;
+    clampView();
+    syncViewReset();
+    renderMap();
+  });
+
+  function endTouch(ev) {
+    if (ev.pointerType !== "touch") return;
+    delete touchPts[ev.pointerId];
+    if (touchIds().length < 2) {
+      pinchActive = false;
+      pinchStart = null;
+    }
+  }
+  window.addEventListener("pointerup", endTouch);
+  window.addEventListener("pointercancel", endTouch);
 
   // ---- Measure tool (View layer) --------------------------------------
 
@@ -1436,6 +1506,20 @@
       ev.target.tagName === "image";
   }
 
+  var secureDrawArmed = false;
+  var secureRedrawBtn = document.getElementById("secure-redraw");
+
+  function syncSecureControls() {
+    secureRedrawBtn.style.display = doc && doc.secure_area ? "inline-block" : "none";
+    secureRedrawBtn.textContent = secureDrawArmed ? "Cancel redraw" : "Redraw secure area";
+  }
+
+  secureRedrawBtn.addEventListener("click", function () {
+    secureDrawArmed = !secureDrawArmed;
+    mapEl.style.cursor = secureDrawArmed ? "crosshair" : "";
+    syncSecureControls();
+  });
+
   function secureAreaDrag(ev) {
     // mapUnit per move (never a cached rect): a pan/zoom mid-drag must not
     // un-anchor the rectangle.
@@ -1443,6 +1527,7 @@
     var moved = false;
     mapEl.setPointerCapture(ev.pointerId);
     function move(mv) {
+      if (pinchActive) return;
       var p = mapUnit(mv);
       if (Math.hypot(p.x - start.x, p.y - start.y) < sz(0.02)) return;
       moved = true;
@@ -1455,7 +1540,12 @@
     function up() {
       mapEl.removeEventListener("pointermove", move);
       mapEl.removeEventListener("pointerup", up);
-      if (moved) markDirty();
+      if (moved) {
+        markDirty();
+        secureDrawArmed = false; // one redraw per arm — then locked again
+        mapEl.style.cursor = "";
+        syncSecureControls();
+      }
     }
     mapEl.addEventListener("pointermove", move);
     mapEl.addEventListener("pointerup", up);
@@ -1497,7 +1587,11 @@
       return;
     }
     if (activeLayer === "areas") {
-      if (isMapBackground(ev)) secureAreaDrag(ev);
+      // Locked once set: an existing rectangle only redraws after an
+      // explicit "Redraw" (accidental drags kept wrecking it).
+      if (isMapBackground(ev) && (!doc.secure_area || secureDrawArmed)) {
+        secureAreaDrag(ev);
+      }
       return;
     }
     // View layer: measure when armed, else drag pans.
@@ -1548,6 +1642,12 @@
     }
     if (ev.key !== "Escape") return;
     if (activeLayer === "cameras" && placeMode) { placeMode = null; renderMap(); return; }
+    if (activeLayer === "areas" && secureDrawArmed) {
+      secureDrawArmed = false;
+      mapEl.style.cursor = "";
+      syncSecureControls();
+      return;
+    }
     if (activeLayer === "calibrate") {
       if (landmarkMode && landmarkPending) {
         landmarkPending = null;

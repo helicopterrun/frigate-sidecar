@@ -462,3 +462,19 @@ body[data-layer="areas"] .layer-group[data-layer="areas"],
 body[data-layer="calibrate"] .layer-group[data-layer="calibrate"],
 .layer-group[data-layer="view"] { display: block; }
 #layer-seg { margin: 6px 0; }
+
+/* Cameras page: the map is a gesture surface — no browser scroll/zoom on it
+   (pinch zooms the map, one-finger drags follow the active layer). */
+.cam-map { touch-action: none; }
+
+@media (max-width: 720px) {
+  /* Thumb-sized controls on the cameras page. */
+  .cam-map { width: 100%; }
+  .inline-label, .inline-label-lg { display: inline-block; margin: 4px 10px 4px 0; }
+  .inline-label-lg input[type=checkbox] { width: 20px; height: 20px; vertical-align: middle; }
+  .num-4e, .num-5e { min-height: 36px; }
+  #camera-detail .inline-label { flex: 1 1 40%; }
+  #camera-detail { display: flex; flex-wrap: wrap; gap: 4px; }
+  .layer-group .btn-primary, #layer-seg ~ * .btn-primary { min-height: 40px; }
+  #landmark-snapshot { max-width: 100%; }
+}
