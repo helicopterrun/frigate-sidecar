@@ -235,7 +235,7 @@ class PushEngine:
             obj.camera, obj.track_id, obj.current_zones, now=now,
             path_data=obj.path_data, velocity_angle=obj.velocity_angle,
             average_estimated_speed=obj.average_estimated_speed,
-            stationary=obj.stationary,
+            stationary=obj.stationary, label=obj.label,
         )
         # Zone-transition escalation (delivery_wire.handle_zone_transition):
         # reviews go quiet on stationary objects, so a loiter drifting into

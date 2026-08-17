@@ -310,6 +310,9 @@ class TrackState:
     velocity_angle: float | None = None
     average_estimated_speed: float | None = None
     stationary: bool = False
+    #: Frigate's object label ("person", "car", ...) — kept so the live map
+    #: can color/filter fused positions without re-parsing MQTT.
+    label: str | None = None
 
 
 class TrackStore:
@@ -335,6 +338,10 @@ class TrackStore:
 
     def get(self, camera: str, track_id: str) -> TrackState | None:
         return self._tracks.get((camera, track_id))
+
+    def items(self) -> list[tuple[tuple[str, str], TrackState]]:
+        """Snapshot of all live tracks, for the fusion/live-map readers."""
+        return list(self._tracks.items())
 
     def observe(self, event: ReviewEvent, *, now: float) -> None:
         """Record this message's zones against every track it mentions.
@@ -378,6 +385,7 @@ class TrackStore:
         velocity_angle: float | None = None,
         average_estimated_speed: float | None = None,
         stationary: bool = False,
+        label: str | None = None,
     ) -> None:
         """Record live occupancy from a `frigate/events` message.
 
@@ -406,6 +414,8 @@ class TrackStore:
         state.velocity_angle = velocity_angle
         state.average_estimated_speed = average_estimated_speed
         state.stationary = stationary
+        if label:
+            state.label = label
 
     def forget(self, camera: str, track_id: str) -> None:
         """Drop a track outright -- Frigate says the object is gone."""

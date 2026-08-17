@@ -905,23 +905,34 @@ async def handle_delivery_event(
             track_motion[_tid] = _build_motion(
                 _ts.path_data, _ts.stationary, event.camera, speed_label=_speed,
             )
-            # World-projection validation (log-only this round): with the
-            # map scaled and this camera aimed, place the track on the map.
-            # Two cameras seeing one walk should log nearby positions —
-            # the evidence for future geometric dedup.
-            _layout = policy.get("camera_layout", {}).get(event.camera)
-            _scale = policy.get("map_scale_ft")
-            if _layout and _scale and _ts.path_data:
-                _pt = _ts.path_data[-1]
-                _wp = ground.world_position(
-                    _pt[0], _pt[1], camera=event.camera,
-                    layout_entry=_layout, scale_ft=_scale,
-                    aspect_h_over_w=ground.map_aspect(policy),
-                )
-                if _wp is not None:
+        # Geometric-fusion validation (log-only): project every live track
+        # onto the map and cluster cross-camera sightings. A cluster of >1
+        # member is what geometry WOULD merge into one object — evidence to
+        # validate against the zone/neighbor dedup before it earns a vote
+        # in routing.
+        _scale = policy.get("map_scale_ft")
+        if _scale and _scale > 0:
+            from frigate_sidecar.push import fusion
+            _positions = fusion.track_world_positions(
+                engine.tracks, policy, now=time.time(),
+            )
+            for _tp in _positions:
+                if _tp.camera == event.camera:
                     logger.info(
                         "push: world pos camera=%s track=%s map=(%.3f, %.3f)",
-                        event.camera, _tid, _wp[0], _wp[1],
+                        _tp.camera, _tp.track_id, _tp.x, _tp.y,
+                    )
+            for _cl in fusion.cluster(
+                _positions, scale_ft=_scale,
+                aspect_h_over_w=ground.map_aspect(policy),
+            ):
+                if len(_cl.members) > 1:
+                    logger.info(
+                        "push: geometric_dedup would_link=%s label=%s map=(%.3f, %.3f)",
+                        ",".join(
+                            f"{m.camera}/{m.track_id}" for m in _cl.members
+                        ),
+                        _cl.label, _cl.x, _cl.y,
                     )
     # A track approaching outranks another leaving in the same event.
     leaving_scene = leaving_scene and not approaching_secure

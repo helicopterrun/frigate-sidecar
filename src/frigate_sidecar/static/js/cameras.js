@@ -323,6 +323,7 @@
     marker.appendChild(tip);
     defs.appendChild(marker);
     svg.appendChild(defs);
+    drawZoneOverlays(svg); // under the camera groups: zones are ground truth
 
     function dragOn(el, camera, i, apply) {
       if (!el.style.pointerEvents) el.style.pointerEvents = "stroke";
@@ -551,6 +552,10 @@
     });
     drawTrails(svg);
     drawCalibrationLine(svg);
+    // The live layer is a PERSISTENT node re-appended into each rebuilt
+    // SVG — the 1 Hz poll updates its children without touching renderMap,
+    // so live dots never fight drag gestures (see the dragOn comment).
+    svg.appendChild(liveLayer);
     // Coverage view: darken the ground so unlit (unwatched) area reads as
     // the blind spots.
     // backgroundColor, not the background shorthand — the shorthand would
@@ -740,6 +745,149 @@
     trailsNote.textContent = drawn + " trail(s)" +
       (skipped.length ? " — no projection for: " + skipped.join(", ") : "");
   }
+
+  // ---- Zone overlays + live fused positions --------------------------
+
+  var zonesToggle = document.getElementById("zones-toggle");
+  var liveToggle = document.getElementById("live-toggle");
+  var liveNote = document.getElementById("live-note");
+  var zoneOverlays = null; // server-projected polygons; null = not fetched yet
+  // Persistent SVG group re-appended by renderMap; the poll rewrites only
+  // its children so live updates never rebuild the interactive map.
+  var liveLayer = document.createElementNS(SVG_NS, "g");
+  liveLayer.setAttribute("id", "live-layer");
+  liveLayer.setAttribute("pointer-events", "none");
+  var liveTimer = null;
+  var liveTrails = {}; // fused-object key -> recent positions (client-side fade)
+
+  zonesToggle.addEventListener("change", async function () {
+    if (zonesToggle.checked && zoneOverlays === null) {
+      try {
+        var data = await fetchJson("/v1/push/map/zones");
+        zoneOverlays = data.zones || [];
+        if (!zoneOverlays.length) {
+          liveNote.textContent = "no projectable zones (need placed cameras + scale)";
+        }
+      } catch (err) {
+        liveNote.textContent = "zones error: " + err.message;
+        zonesToggle.checked = false;
+        return;
+      }
+    }
+    renderMap();
+  });
+
+  function drawZoneOverlays(svg) {
+    if (!zonesToggle || !zonesToggle.checked || !zoneOverlays) return;
+    zoneOverlays.forEach(function (z) {
+      var poly = document.createElementNS(SVG_NS, "polygon");
+      poly.setAttribute("points", z.points.map(function (p) {
+        return p[0] + "," + p[1];
+      }).join(" "));
+      poly.setAttribute("fill", z.color);
+      poly.setAttribute("fill-opacity", "0.12");
+      poly.setAttribute("stroke", z.color);
+      poly.setAttribute("stroke-opacity", "0.5");
+      poly.setAttribute("stroke-width", "0.003");
+      poly.setAttribute("stroke-linejoin", "round");
+      var title = document.createElementNS(SVG_NS, "title");
+      title.textContent = z.name + " (" + z.camera + ")" +
+        (z.clipped ? " — clipped at range limit" : "");
+      poly.appendChild(title);
+      svg.appendChild(poly);
+    });
+  }
+
+  var LIVE_COLORS = {
+    person: "#e86a6a", car: "#6aa5ff", truck: "#6aa5ff", motorcycle: "#6aa5ff",
+    bicycle: "#57c7c7", dog: "#4caf82", cat: "#4caf82",
+  };
+
+  function updateLiveLayer(objects) {
+    liveLayer.textContent = "";
+    var seen = {};
+    objects.forEach(function (o) {
+      var key = (o.track_ids || []).slice().sort().join("+");
+      seen[key] = true;
+      var trail = liveTrails[key] = liveTrails[key] || [];
+      var last = trail[trail.length - 1];
+      if (!last || last.x !== o.x || last.y !== o.y) trail.push({ x: o.x, y: o.y });
+      if (trail.length > 15) trail.shift();
+      var color = LIVE_COLORS[o.label] || "var(--accent, #ffb454)";
+      if (trail.length > 1) {
+        var tp = document.createElementNS(SVG_NS, "polyline");
+        tp.setAttribute("points", trail.map(function (p) {
+          return p.x.toFixed(4) + "," + p.y.toFixed(4);
+        }).join(" "));
+        tp.setAttribute("fill", "none");
+        tp.setAttribute("stroke", color);
+        tp.setAttribute("stroke-opacity", "0.45");
+        tp.setAttribute("stroke-width", "0.004");
+        tp.setAttribute("stroke-linejoin", "round");
+        liveLayer.appendChild(tp);
+      }
+      var dot = document.createElementNS(SVG_NS, "circle");
+      dot.setAttribute("cx", o.x); dot.setAttribute("cy", o.y);
+      dot.setAttribute("r", "0.009");
+      dot.setAttribute("fill", color);
+      dot.setAttribute("stroke", "var(--surface, #111)");
+      dot.setAttribute("stroke-width", "0.003");
+      liveLayer.appendChild(dot);
+      var text = document.createElementNS(SVG_NS, "text");
+      text.setAttribute("x", o.x); text.setAttribute("y", o.y + 0.032);
+      text.setAttribute("text-anchor", "middle");
+      text.setAttribute("font-size", "0.022");
+      text.setAttribute("fill", color);
+      text.setAttribute("stroke", "var(--surface, #111)");
+      text.setAttribute("stroke-width", "0.005");
+      text.setAttribute("paint-order", "stroke");
+      // >1 camera = geometry fused these sightings into one object.
+      text.textContent = (o.label || "object") +
+        ((o.cameras || []).length > 1 ? " ×" + o.cameras.length : "");
+      liveLayer.appendChild(text);
+    });
+    Object.keys(liveTrails).forEach(function (k) {
+      if (!seen[k]) delete liveTrails[k];
+    });
+  }
+
+  async function pollLive() {
+    try {
+      var data = await fetchJson("/v1/push/map/live");
+      updateLiveLayer(data.objects || []);
+      liveNote.textContent = data.objects.length
+        ? data.objects.length + " live" : "live: quiet";
+    } catch (err) {
+      liveNote.textContent = "live error: " + err.message;
+    }
+  }
+
+  function stopLive() {
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  }
+
+  liveToggle.addEventListener("change", function () {
+    if (liveToggle.checked) {
+      if (!doc.map_scale_ft) {
+        liveNote.textContent = "set map width first";
+        liveToggle.checked = false;
+        return;
+      }
+      pollLive();
+      liveTimer = setInterval(pollLive, 1000);
+    } else {
+      stopLive();
+      liveTrails = {};
+      liveLayer.textContent = "";
+      liveNote.textContent = "";
+    }
+  });
+
+  // Don't poll a hidden tab; resume where the user left off.
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) stopLive();
+    else if (liveToggle.checked && !liveTimer) liveTimer = setInterval(pollLive, 1000);
+  });
 
   // ---- Floorplan + scale calibration ---------------------------------
 
