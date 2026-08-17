@@ -240,8 +240,28 @@
       // Fresh GET: export what the engine is actually running, not the
       // page's possibly-unsaved draft.
       var data = await fetchJson("/v1/push/settings");
+      var settings = data.settings;
+      if (settings.floorplan) {
+        // Carry the floorplan image itself, base64-embedded — the settings
+        // key alone is just metadata and the target instance wouldn't have
+        // the file. Stripped back out on import before the PUT.
+        var imgResp = await fetch("/v1/push/floorplan", { credentials: "same-origin" });
+        if (imgResp.ok) {
+          var dataUrl = await new Promise(function (resolve, reject) {
+            imgResp.blob().then(function (b) {
+              var reader = new FileReader();
+              reader.onload = function () { resolve(reader.result); };
+              reader.onerror = reject;
+              reader.readAsDataURL(b);
+            }, reject);
+          });
+          settings = Object.assign({}, settings, {
+            _floorplan_image: String(dataUrl).split(",")[1],
+          });
+        }
+      }
       var blob = new Blob(
-        [JSON.stringify(data.settings, null, 2)], { type: "application/json" }
+        [JSON.stringify(settings, null, 2)], { type: "application/json" }
       );
       var a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
@@ -263,6 +283,20 @@
       var imported = JSON.parse(await file.text());
       if (typeof imported !== "object" || !imported || Array.isArray(imported)) {
         throw new Error("not a settings document");
+      }
+      var image = imported._floorplan_image;
+      delete imported._floorplan_image;
+      if (image && imported.floorplan) {
+        // Upload the embedded image first; the PUT below then applies the
+        // exported floorplan metadata (incl. the calibration line) on top.
+        var bin = atob(image);
+        var bytes = new Uint8Array(bin.length);
+        for (var bi = 0; bi < bin.length; bi++) bytes[bi] = bin.charCodeAt(bi);
+        await fetchJson("/v1/push/floorplan", { method: "POST", body: bytes });
+      } else if (!image) {
+        // No embedded image (older export): leave the target's floorplan
+        // alone rather than pointing its settings at a file it can't have.
+        delete imported.floorplan;
       }
       await fetchJson("/v1/push/settings", {
         method: "PUT",
