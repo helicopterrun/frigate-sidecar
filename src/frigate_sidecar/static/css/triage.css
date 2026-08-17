@@ -453,3 +453,12 @@ a { color: var(--accent); }
 .cam-map { position: relative; width: min(560px, 100%); aspect-ratio: 1; background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); }
 .section-title .help { font-weight: normal; }
 .plus-toggle { font-size: 12px; }
+
+/* Cameras page layer groups: only the active layer's editing controls show;
+   the View group (observation toggles) is always visible. */
+.layer-group { display: none; }
+body[data-layer="cameras"] .layer-group[data-layer="cameras"],
+body[data-layer="areas"] .layer-group[data-layer="areas"],
+body[data-layer="calibrate"] .layer-group[data-layer="calibrate"],
+.layer-group[data-layer="view"] { display: block; }
+#layer-seg { margin: 6px 0; }

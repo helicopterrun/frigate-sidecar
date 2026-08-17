@@ -52,6 +52,49 @@
     renderMap();
   }
 
+  // ---- Layers ---------------------------------------------------------
+  // The active layer owns the map's clicks and drags; visibility toggles
+  // (View group) apply regardless. Persisted so a calibration session
+  // survives reloads.
+  var LAYERS = ["cameras", "areas", "calibrate", "view"];
+  var activeLayer = localStorage.getItem("cam_layer") || "cameras";
+  if (LAYERS.indexOf(activeLayer) === -1) activeLayer = "cameras";
+
+  function setLayer(name) {
+    activeLayer = name;
+    localStorage.setItem("cam_layer", name);
+    document.body.dataset.layer = name;
+    var seg = document.getElementById("layer-seg");
+    Array.prototype.forEach.call(seg.querySelectorAll(".vbtn"), function (b) {
+      b.classList.toggle("active", b.dataset.layer === name);
+    });
+    // Leaving a layer cancels the modes it owns — a stale placeMode or
+    // half-drawn calibration line must not ambush the next layer's clicks.
+    if (name !== "cameras") placeMode = null;
+    if (name !== "calibrate") {
+      calibrating = false;
+      calibrateStart = null;
+      if (typeof closeLandmarkMode === "function" && landmarkMode) {
+        closeLandmarkMode();
+      }
+    }
+    if (typeof renderMap === "function" && doc) renderMap();
+  }
+
+  Array.prototype.forEach.call(
+    document.getElementById("layer-seg").querySelectorAll(".vbtn"),
+    function (b) {
+      b.addEventListener("click", function () { setLayer(b.dataset.layer); });
+    }
+  );
+  document.body.dataset.layer = activeLayer;
+  (function syncSegInitial() {
+    var seg = document.getElementById("layer-seg");
+    Array.prototype.forEach.call(seg.querySelectorAll(".vbtn"), function (b) {
+      b.classList.toggle("active", b.dataset.layer === activeLayer);
+    });
+  })();
+
   var CARDINAL_DEG = {
     N: 0, NNE: 22.5, NE: 45, ENE: 67.5, E: 90, ESE: 112.5, SE: 135, SSE: 157.5,
     S: 180, SSW: 202.5, SW: 225, WSW: 247.5, W: 270, WNW: 292.5, NW: 315, NNW: 337.5,
@@ -369,6 +412,7 @@
       if (!el.style.pointerEvents) el.style.pointerEvents = "stroke";
       el.style.touchAction = "none";
       el.addEventListener("pointerdown", function (ev) {
+        if (activeLayer !== "cameras") return; // aim drags are Cameras-layer only
         ev.stopPropagation();
         ev.preventDefault();
         // Select WITHOUT re-rendering here, and track the gesture on
@@ -408,6 +452,9 @@
       // another camera can dim it as a unit.
       var camGroup = document.createElementNS(SVG_NS, "g");
       if (selectedCamera && !selected) camGroup.setAttribute("opacity", "0.22");
+      // Outside the Cameras layer the geometry is display-only: hits must
+      // fall through to the map background (pan, secure drag, measure).
+      if (activeLayer !== "cameras") camGroup.style.pointerEvents = "none";
       svg.appendChild(camGroup);
 
       if (hasAim) {
@@ -504,6 +551,7 @@
       moveGrab.style.touchAction = "none";
       moveGrab.setAttribute("aria-label", "move " + camera);
       moveGrab.addEventListener("pointerdown", function (ev) {
+        if (activeLayer !== "cameras") return;
         ev.stopPropagation();
         ev.preventDefault();
         selectedCamera = camera;
@@ -597,6 +645,8 @@
     // so they never fight drag gestures (see the dragOn comment).
     svg.appendChild(liveLayer);
     svg.appendChild(landmarkLayer);
+    svg.appendChild(measureLayer);
+    if (measurePts.length === 2) drawMeasure();
     // Coverage view: darken the ground so unlit (unwatched) area reads as
     // the blind spots.
     // backgroundColor, not the background shorthand — the shorthand would
@@ -659,6 +709,7 @@
         dot.style.display = "none";
       }
       dot.addEventListener("pointerdown", function (ev) {
+        if (activeLayer !== "cameras") return;
         // Gesture tracked on window — the pill survives (no mid-drag
         // rebuild here), but window listeners are the uniform, un-killable
         // pattern all three drags share.
@@ -1208,6 +1259,7 @@
             fov: +h.toFixed(1),
           };
         }
+        setLayer("cameras");
         placeMode = camera;
         showBanner("Click the map where " + camera + " is mounted.", false);
         markDirty();
@@ -1278,39 +1330,102 @@
     window.addEventListener("pointerup", up);
   }
 
-  // Drawing the secure area: a drag that STARTS on empty map background
-  // (not a dot, wedge, or arrow) sketches the rectangle corner-to-corner.
-  // Landmark, place, and scale-calibration modes claim the click first.
-  mapEl.addEventListener("pointerdown", function (ev) {
-    if (ev.button === 1) { // middle-button pan works in every layer/mode
-      startPan(ev);
+  // ---- Measure tool (View layer) --------------------------------------
+
+  var measureBtn = document.getElementById("measure-btn");
+  var measureNote = document.getElementById("measure-note");
+  var measureArmed = false;
+  var measurePts = []; // 0, 1 (anchored, previewing) or 2 (frozen) points
+  var measureLayer = document.createElementNS(SVG_NS, "g");
+  measureLayer.setAttribute("id", "measure-layer");
+  measureLayer.setAttribute("pointer-events", "none");
+
+  function measureDistFt(a, b) {
+    // Same aspect-corrected math as the scale-calibration line.
+    var scale = doc.map_scale_ft || 0;
+    return Math.hypot((b.x - a.x) * scale, (b.y - a.y) * scale * mapAspect());
+  }
+
+  function drawMeasure(previewPt) {
+    measureLayer.textContent = "";
+    if (!measurePts.length) return;
+    var a = measurePts[0];
+    var b = measurePts[1] || previewPt;
+    if (!b) return;
+    var line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", a.x); line.setAttribute("y1", a.y);
+    line.setAttribute("x2", b.x); line.setAttribute("y2", b.y);
+    line.setAttribute("stroke", "var(--warn, #e8a735)");
+    line.setAttribute("stroke-width", sz(0.004));
+    line.setAttribute("stroke-dasharray", sz(0.014) + " " + sz(0.008));
+    measureLayer.appendChild(line);
+    [a, b].forEach(function (p) {
+      var c = document.createElementNS(SVG_NS, "circle");
+      c.setAttribute("cx", p.x); c.setAttribute("cy", p.y);
+      c.setAttribute("r", sz(0.006));
+      c.setAttribute("fill", "var(--warn, #e8a735)");
+      measureLayer.appendChild(c);
+    });
+    var t = document.createElementNS(SVG_NS, "text");
+    t.setAttribute("x", (a.x + b.x) / 2);
+    t.setAttribute("y", (a.y + b.y) / 2 - sz(0.015));
+    t.setAttribute("text-anchor", "middle");
+    t.setAttribute("font-size", sz(0.026));
+    t.setAttribute("fill", "var(--warn, #e8a735)");
+    t.setAttribute("stroke", "var(--surface, #111)");
+    t.setAttribute("stroke-width", sz(0.005));
+    t.setAttribute("paint-order", "stroke");
+    t.textContent = measureDistFt(a, b).toFixed(1) + " ft";
+    measureLayer.appendChild(t);
+  }
+
+  function clearMeasure() {
+    measureArmed = false;
+    measurePts = [];
+    measureLayer.textContent = "";
+    measureNote.textContent = "";
+    mapEl.style.cursor = "";
+    window.removeEventListener("pointermove", measurePreview);
+  }
+
+  function measurePreview(mv) {
+    if (measurePts.length === 1) drawMeasure(mapUnit(mv));
+  }
+
+  function handleMeasureClick(p) {
+    if (measurePts.length >= 2) { // third click starts over
+      measurePts = [];
+      measureLayer.textContent = "";
+    }
+    measurePts.push(p);
+    if (measurePts.length === 1) {
+      window.addEventListener("pointermove", measurePreview);
+      measureNote.textContent = "click the far end";
+    } else {
+      window.removeEventListener("pointermove", measurePreview);
+      drawMeasure();
+      measureNote.textContent = measureDistFt(measurePts[0], measurePts[1]).toFixed(1) + " ft";
+    }
+  }
+
+  measureBtn.addEventListener("click", function () {
+    if (!doc.map_scale_ft) {
+      measureNote.textContent = "set the map scale first";
       return;
     }
-    if (landmarkMode) {
-      handleLandmarkMapClick(mapUnit(ev));
-      return;
-    }
-    if (placeMode) {
-      var cam = placeMode;
-      placeMode = null;
-      var p = mapUnit(ev);
-      if (!doc.camera_layout) doc.camera_layout = {};
-      var entry = doc.camera_layout[cam] || {};
-      entry.x = +p.x.toFixed(4);
-      entry.y = +p.y.toFixed(4);
-      doc.camera_layout[cam] = entry;
-      selectedCamera = cam;
-      showBanner(cam + " placed — drag its arrow to aim, then Save.", false);
-      markDirty();
-      renderMap();
-      return;
-    }
-    if (calibrating) {
-      handleCalibrateClick(mapUnit(ev));
-      return;
-    }
-    if (ev.target !== mapEl && ev.target.tagName !== "svg" &&
-        ev.target.tagName !== "image") return;
+    if (measureArmed || measurePts.length) { clearMeasure(); return; }
+    setLayer("view");
+    measureArmed = true;
+    mapEl.style.cursor = "crosshair";
+    measureNote.textContent = "click the first point";
+  });
+
+  function isMapBackground(ev) {
+    return ev.target === mapEl || ev.target.tagName === "svg" ||
+      ev.target.tagName === "image";
+  }
+
+  function secureAreaDrag(ev) {
     // mapUnit per move (never a cached rect): a pan/zoom mid-drag must not
     // un-anchor the rectangle.
     var start = mapUnit(ev);
@@ -1330,10 +1445,79 @@
       mapEl.removeEventListener("pointermove", move);
       mapEl.removeEventListener("pointerup", up);
       if (moved) markDirty();
-      else if (selectedCamera) { selectedCamera = null; renderMap(); }
     }
     mapEl.addEventListener("pointermove", move);
     mapEl.addEventListener("pointerup", up);
+  }
+
+  // The per-layer map dispatcher. Per-element camera drags (pie, ring,
+  // moveGrab, pills) stopPropagation before this fires and are themselves
+  // gated to the Cameras layer.
+  mapEl.addEventListener("pointerdown", function (ev) {
+    if (ev.button === 1) { // middle-button pan works in every layer/mode
+      startPan(ev);
+      return;
+    }
+    if (activeLayer === "cameras") {
+      if (placeMode) {
+        var cam = placeMode;
+        placeMode = null;
+        var p = mapUnit(ev);
+        if (!doc.camera_layout) doc.camera_layout = {};
+        var entry = doc.camera_layout[cam] || {};
+        entry.x = +p.x.toFixed(4);
+        entry.y = +p.y.toFixed(4);
+        doc.camera_layout[cam] = entry;
+        selectedCamera = cam;
+        showBanner(cam + " placed — drag its arrow to aim, then Save.", false);
+        markDirty();
+        renderMap();
+        return;
+      }
+      if (isMapBackground(ev) && selectedCamera) {
+        selectedCamera = null;
+        renderMap();
+      }
+      return;
+    }
+    if (activeLayer === "calibrate") {
+      if (landmarkMode) { handleLandmarkMapClick(mapUnit(ev)); return; }
+      if (calibrating) { handleCalibrateClick(mapUnit(ev)); return; }
+      return;
+    }
+    if (activeLayer === "areas") {
+      if (isMapBackground(ev)) secureAreaDrag(ev);
+      return;
+    }
+    // View layer: measure when armed, else drag pans.
+    if (measureArmed) { handleMeasureClick(mapUnit(ev)); return; }
+    if (isMapBackground(ev)) startPan(ev);
+  });
+
+  // Escape cancels whatever the active layer is doing.
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Escape") return;
+    if (activeLayer === "cameras" && placeMode) { placeMode = null; renderMap(); return; }
+    if (activeLayer === "calibrate") {
+      if (landmarkMode && landmarkPending) {
+        landmarkPending = null;
+        drawLandmarkMarkers();
+        landmarkStatus();
+        return;
+      }
+      if (calibrating) {
+        calibrating = false;
+        calibrateStart = null;
+        calibrateBtn.textContent = "Calibrate scale";
+        mapEl.style.cursor = "";
+        return;
+      }
+    }
+    if (activeLayer === "view" && (measureArmed || measurePts.length)) {
+      clearMeasure();
+      return;
+    }
+    if (selectedCamera) { selectedCamera = null; renderMap(); }
   });
 
   document.getElementById("placement-fov-btn").addEventListener("click", function () {
@@ -1675,7 +1859,10 @@
       );
       return;
     }
-    landmarkMode = selectedCamera;
+    var lmCam = selectedCamera;
+    setLayer("calibrate"); // landmark clicks live on the Calibrate layer
+    selectedCamera = lmCam;
+    landmarkMode = lmCam;
     landmarkMatches = [];
     landmarkPending = null;
     landmarkResult.textContent = "";
