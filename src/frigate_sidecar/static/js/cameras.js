@@ -149,6 +149,14 @@
 
   function markDirty() { saveState.textContent = "unsaved changes"; }
 
+  // Locked camera: its calibration is read-only — no drags, nudges, detail
+  // edits or bulk tools touch it until unlocked. Persisted in camera_layout
+  // (saved with Save) so a finished calibration stays protected everywhere.
+  function camLocked(camera) {
+    var e = camera && (doc.camera_layout || {})[camera];
+    return !!(e && e.locked);
+  }
+
   var SVG_NS = "http://www.w3.org/2000/svg";
 
   // ---- Layout map (top-down, north = up) -----------------------------
@@ -281,6 +289,12 @@
         if (activeLayer !== "cameras") return; // aim drags are Cameras-layer only
         ev.stopPropagation();
         ev.preventDefault();
+        // A locked camera still selects (so it can be inspected/unlocked)
+        // but never drags.
+        if (camLocked(camera)) {
+          if (selectedCamera !== camera) { selectedCamera = camera; renderMap(); }
+          return;
+        }
         // Select WITHOUT re-rendering here, and track the gesture on
         // window: renderMap() rebuilds the SVG mid-drag, so listeners on
         // the (detached) element itself would go silent after the first
@@ -315,6 +329,7 @@
       var fov = entry.fov || defaultFov(camera);
       var r = reach();
       var selected = camera === selectedCamera;
+      var locked = camLocked(camera);
 
       // Everything this camera draws lives in one group so selecting
       // another camera can dim it as a unit.
@@ -368,7 +383,7 @@
         // The whole pie is a rotation surface: drag anywhere inside it to
         // swing the aim — the biggest possible target.
         path.style.pointerEvents = "fill";
-        path.style.cursor = "grab";
+        path.style.cursor = locked ? "default" : "grab";
         dragOn(path, camera, i, function (e, pointerAz) {
           e.azimuth = +pointerAz.toFixed(1);
         });
@@ -415,7 +430,7 @@
       moveGrab.setAttribute("r", sz(0.03));
       moveGrab.setAttribute("fill", "transparent");
       moveGrab.style.pointerEvents = "fill";
-      moveGrab.style.cursor = "move";
+      moveGrab.style.cursor = locked ? "default" : "move";
       moveGrab.style.touchAction = "none";
       moveGrab.setAttribute("aria-label", "move " + camera);
       moveGrab.addEventListener("pointerdown", function (ev) {
@@ -423,6 +438,7 @@
         ev.stopPropagation();
         ev.preventDefault();
         selectedCamera = camera;
+        if (camLocked(camera)) { renderMap(); return; }
         var movedPt = false;
         function mm(mv) {
           if (pinchActive) return;
@@ -447,7 +463,7 @@
       // Rotation wheel: shown only for the selected camera, so "turn" has
       // its own visible control distinct from "move" (dragging the pill).
       // Drag anywhere on the ring — or its knob — to swing the azimuth.
-      if (selected) {
+      if (selected && !locked) {
         var rw = sz(0.055);
         var ring = document.createElementNS(SVG_NS, "circle");
         ring.setAttribute("cx", entry.x); ring.setAttribute("cy", entry.y);
@@ -576,15 +592,17 @@
       if (hiddenCams[camera]) return;
       var pos = layoutEntry(camera, i);
       var isSel = camera === selectedCamera;
+      var isLocked = camLocked(camera);
       var dot = document.createElement("div");
-      dot.textContent = camera;
+      dot.textContent = isLocked ? camera + " 🔒" : camera;
       // Hangs below the dot marking the exact mount point; dragging the
       // pill MOVES the camera (turning is the selected camera's wheel).
       dot.style.cssText =
         "position:absolute;transform:translate(-50%," + (isSel ? "30px" : "9px") + ");" +
         "padding:1px 7px;background:var(--surface-2);border:1px solid " +
         (isSel ? "var(--accent, #ffb454)" : "var(--stroke)") + ";" +
-        "border-radius:999px;font-size:0.62em;cursor:move;user-select:none;" +
+        "border-radius:999px;font-size:0.62em;cursor:" +
+        (isLocked ? "pointer" : "move") + ";user-select:none;" +
         "touch-action:none;white-space:nowrap;" +
         (isSel
           ? "box-shadow:0 0 10px var(--accent, #ffb454);z-index:2;"
@@ -602,6 +620,7 @@
         // pattern all three drags share.
         ev.preventDefault();
         selectedCamera = camera;
+        if (camLocked(camera)) { renderMap(); return; } // tap selects, never drags
         var moved = false;
         function move(mv) {
           if (pinchActive) return;
@@ -1759,7 +1778,7 @@
   // selected camera (Cameras layer only, never while typing in a field).
   document.addEventListener("keydown", function (ev) {
     if (ev.key !== "Escape" && activeLayer === "cameras" && selectedCamera &&
-        doc && !typingInField()) {
+        doc && !typingInField() && !camLocked(selectedCamera)) {
       var nudgeFt = ev.shiftKey ? 1.0 : 0.1;
       var scale = doc.map_scale_ft;
       var e, i;
@@ -1823,6 +1842,7 @@
   document.getElementById("placement-fov-btn").addEventListener("click", function () {
     var changed = 0;
     cameras.forEach(function (camera) {
+      if (camLocked(camera)) return; // bulk tools respect the lock
       var entry = (doc.camera_layout || {})[camera];
       var p = placements[camera];
       if (!entry || !p || !p.hfov) return;
@@ -1865,7 +1885,25 @@
     detailX.title = detailY.title = haveFt
       ? "feet from the map's top-left corner"
       : "set the map scale to edit position in feet";
+    // Locked: everything that could change the calibration goes read-only.
+    var locked = camLocked(selectedCamera);
+    [detailAzimuth, detailFov, detailHfov, detailMount, detailTilt]
+      .forEach(function (inp) { inp.disabled = locked; });
+    if (locked) { detailX.disabled = detailY.disabled = true; }
+    landmarkBtn.disabled = locked;
+    lockBtn.textContent = locked ? "Unlock" : "Lock";
+    lockBtn.classList.toggle("active", locked);
   }
+
+  var lockBtn = document.getElementById("lock-btn");
+  lockBtn.addEventListener("click", function () {
+    if (!selectedCamera) return;
+    var e = ensureEntry(selectedCamera, cameras.indexOf(selectedCamera));
+    if (e.locked) delete e.locked;
+    else e.locked = true;
+    markDirty();
+    renderMap();
+  });
 
   var detailX = document.getElementById("detail-x");
   var detailY = document.getElementById("detail-y");
@@ -2079,6 +2117,7 @@
         apply.style.marginLeft = "0.6em";
         apply.addEventListener("click", function () {
           changed.forEach(function (cam) {
+            if (camLocked(cam)) return; // bulk tools respect the lock
             var c = report.cameras[cam];
             if ((doc.camera_layout || {})[cam]) {
               doc.camera_layout[cam].azimuth = c.azimuth_after;
@@ -2176,6 +2215,10 @@
   }
 
   function startLandmark(camera) {
+    if (camLocked(camera)) {
+      showBanner(camera + " is locked — unlock it to recalibrate.", true);
+      return;
+    }
     var entry = (doc.camera_layout || {})[camera];
     if (!entry || entry.azimuth === undefined || !doc.map_scale_ft) {
       landmarkResult.textContent = "";

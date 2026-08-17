@@ -363,6 +363,18 @@ def test_normalize_floorplan_round_trips_and_clears():
     assert cleared["floorplan"] is None
 
 
+def test_normalize_camera_layout_lock_round_trips():
+    doc = policy_settings.default_settings()
+    doc["camera_layout"] = {
+        "porch": {"x": 0.5, "y": 0.5, "azimuth": 90, "locked": True},
+        "drive": {"x": 0.2, "y": 0.2, "locked": False},
+    }
+    merged = policy_settings.normalize_settings(doc)
+    assert merged["camera_layout"]["porch"]["locked"] is True
+    assert "locked" not in merged["camera_layout"]["drive"]
+    assert not policy_settings.validate_settings(doc)
+
+
 def test_normalize_floorplan_rotation():
     doc = policy_settings.default_settings()
     doc["floorplan"] = {"ext": "png", "w": 1600, "h": 1200, "rotation_deg": -14.5}

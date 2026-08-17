@@ -747,7 +747,7 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
 
     camera_layout = data.get("camera_layout")
     if isinstance(camera_layout, dict):
-        cleaned_layout: dict[str, dict[str, float]] = {}
+        cleaned_layout: dict[str, dict[str, Any]] = {}
         for cam, pos in camera_layout.items():
             if not isinstance(pos, dict):
                 continue
@@ -764,6 +764,8 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
             fov = pos.get("fov")
             if isinstance(fov, (int, float)) and 10.0 <= fov <= 360.0:
                 entry["fov"] = round(float(fov), 1)
+            if pos.get("locked") is True:
+                entry["locked"] = True
             cleaned_layout[str(cam)] = entry
         merged["camera_layout"] = cleaned_layout
 
