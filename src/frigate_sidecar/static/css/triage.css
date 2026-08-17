@@ -120,6 +120,33 @@ header .page-link:hover { background: var(--surface-2); color: var(--text); }
 header .page-link.active { background: var(--surface-2); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
 main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 
+/* Cross-page cross-fade (progressive enhancement; MPA view transitions).
+   The reduced-motion block above zeroes its animations. */
+@view-transition { navigation: auto; }
+
+/* ----- Bottom tab bar (phones) — hidden on desktop ----- */
+.tabbar { display: none; }
+@media (max-width: 720px) {
+  .tabbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+    display: flex; justify-content: space-around;
+    background: var(--surface); border-top: 1px solid var(--stroke);
+    padding: 6px 0 calc(6px + env(safe-area-inset-bottom, 0px));
+  }
+  .tabbar .tab {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    flex: 1; min-height: 44px; justify-content: center;
+    color: var(--muted-2); text-decoration: none; font-size: 10px;
+  }
+  .tabbar .tab svg { width: 24px; height: 24px; }
+  .tabbar .tab.active { color: var(--accent); }
+  /* Content must never hide behind the bar. */
+  body { padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px)); }
+  /* The top bar shrinks to title + summary + theme; the tab bar owns nav. */
+  header .pages { display: none; }
+  header .page-link.util { display: none; }
+}
+
 /* Motion page */
 .motion-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
 .motion-table th { text-align: left; padding: 8px 10px; background: var(--surface); color: var(--muted); border-bottom: 1px solid var(--stroke); font-weight: 600; }

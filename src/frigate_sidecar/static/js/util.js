@@ -66,6 +66,20 @@
     });
   }
 
+  // Nav dropdowns (<details class="nav-group">): close on outside click and
+  // Escape, so a stray tap on iOS doesn't leave the menu pinned open.
+  document.addEventListener("click", function (ev) {
+    document.querySelectorAll("details.nav-group[open]").forEach(function (d) {
+      if (!d.contains(ev.target)) d.removeAttribute("open");
+    });
+  });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Escape") return;
+    document.querySelectorAll("details.nav-group[open]").forEach(function (d) {
+      d.removeAttribute("open");
+    });
+  });
+
   window.SC = {
     fetchJson: fetchJson,
     el: el,
