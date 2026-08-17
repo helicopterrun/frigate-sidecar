@@ -220,6 +220,110 @@ def mine_pairs(
     return pairs, counts, warnings
 
 
+def solve_landmarks(
+    camera: str,
+    matches: list[dict[str, float]],
+    settings: dict,
+    *,
+    az_bound_deg: float = 60.0,
+    tilt_bound_deg: float = 25.0,
+    hfov_span: tuple[float, float] = (0.5, 1.6),
+    max_rounds: int = 60,
+) -> dict[str, Any]:
+    """Solve one camera's (hfov, azimuth, tilt) from landmark matches.
+
+    Each match pairs an image click `{u, v}` (normalized frame coords)
+    with the same physical spot clicked on the calibrated floorplan
+    `{mx, my}` (normalized map coords). Camera position, mount height,
+    and map scale are trusted facts; the three aim/lens numbers are
+    solved by minimizing the mean squared distance in feet between where
+    the model puts each image click and where the user clicked the map.
+    Two matches determine the system; three or more overdetermine it and
+    the residuals expose bad clicks. VFOV rides along with HFOV: a
+    vendor-published vfov scales by the tan-ratio (both are set by the
+    same sensor/lens geometry), otherwise it derives at 16:9.
+    """
+    facts = facts_for(settings, camera)
+    layout = (settings.get("camera_layout") or {}).get(camera)
+    scale_ft = settings.get("map_scale_ft")
+    if facts is None or not layout or layout.get("azimuth") is None:
+        raise ValueError(f"{camera}: needs optics and a placed, aimed layout entry")
+    if not scale_ft or scale_ft <= 0:
+        raise ValueError("map scale is not set")
+    if len(matches) < 2:
+        raise ValueError("need at least 2 landmark matches")
+    aspect = ground.map_aspect(settings)
+    hfov0, tilt0, az0 = facts["hfov"], facts["tilt_deg"], float(layout["azimuth"])
+    vendor_vfov = (settings.get("camera_optics") or {}).get(camera, {}).get("vfov")
+    mount = facts["mount_ft"]
+    cam_x = layout.get("x", 0.0) * scale_ft
+    cam_y = layout.get("y", 0.0) * scale_ft * aspect
+    targets = [
+        (m["mx"] * scale_ft, m["my"] * scale_ft * aspect) for m in matches
+    ]
+
+    def vfov_of(hfov: float) -> float:
+        if vendor_vfov:
+            t = math.tan(math.radians(hfov / 2)) / math.tan(math.radians(hfov0 / 2))
+            return 2 * math.degrees(math.atan(
+                math.tan(math.radians(vendor_vfov / 2)) * t
+            ))
+        return optics.vfov_from_hfov(hfov, *_DETECT_ASPECT)
+
+    def residuals(hfov: float, az: float, tilt: float) -> list[float]:
+        vfov = vfov_of(hfov)
+        rad = math.radians(az)
+        out = []
+        for m, (tx, ty) in zip(matches, targets, strict=True):
+            depression = tilt + (m["v"] - 0.5) * vfov
+            if depression < 0.5:
+                out.append(_OFFRANGE_MISS_FT * 2)
+                continue
+            forward = mount / math.tan(math.radians(depression))
+            lateral = (m["u"] - 0.5) * 2 * forward * math.tan(math.radians(hfov / 2))
+            wx = cam_x + forward * math.sin(rad) + lateral * math.cos(rad)
+            wy = cam_y + forward * -math.cos(rad) + lateral * math.sin(rad)
+            out.append(math.hypot(wx - tx, wy - ty))
+        return out
+
+    def score(hfov: float, az: float, tilt: float) -> float:
+        return sum(r * r for r in residuals(hfov, az, tilt)) / len(matches)
+
+    hfov, az, tilt = hfov0, az0, tilt0
+    hfov_lo = max(10.5, hfov0 * hfov_span[0])
+    hfov_hi = min(179.0, hfov0 * hfov_span[1])
+    best = score(hfov, az, tilt)
+    for _ in range(max_rounds):
+        az = _golden_min(
+            lambda v, h=hfov, t=tilt: score(h, v, t),
+            az0 - az_bound_deg, az0 + az_bound_deg,
+        )
+        tilt = _golden_min(
+            lambda v, h=hfov, a=az: score(h, a, v),
+            max(0.5, tilt0 - tilt_bound_deg), min(89.0, tilt0 + tilt_bound_deg),
+        )
+        hfov = _golden_min(
+            lambda v, a=az, t=tilt: score(v, a, t), hfov_lo, hfov_hi,
+        )
+        cur = score(hfov, az, tilt)
+        if best - cur < 1e-6 * max(1.0, best):
+            break
+        best = cur
+
+    res = residuals(hfov, az, tilt)
+    report = {
+        "camera": camera,
+        "hfov_before": round(hfov0, 1), "hfov_after": round(hfov, 1),
+        "azimuth_before": round(az0, 1), "azimuth_after": round(az % 360.0, 1),
+        "tilt_before": round(tilt0, 1), "tilt_after": round(tilt, 1),
+        "vfov_after": round(vfov_of(hfov), 1) if vendor_vfov else None,
+        "residual_ft": [round(r, 1) for r in res],
+        "rms_ft": round(math.sqrt(sum(r * r for r in res) / len(res)), 1),
+        "matches": len(matches),
+    }
+    return report
+
+
 def _huber(d: float, delta: float) -> float:
     return d * d / 2.0 if d <= delta else delta * (d - delta / 2.0)
 

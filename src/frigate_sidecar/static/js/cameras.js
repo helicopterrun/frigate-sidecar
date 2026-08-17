@@ -552,10 +552,11 @@
     });
     drawTrails(svg);
     drawCalibrationLine(svg);
-    // The live layer is a PERSISTENT node re-appended into each rebuilt
-    // SVG — the 1 Hz poll updates its children without touching renderMap,
-    // so live dots never fight drag gestures (see the dragOn comment).
+    // The live + landmark layers are PERSISTENT nodes re-appended into
+    // each rebuilt SVG — their children update without touching renderMap,
+    // so they never fight drag gestures (see the dragOn comment).
     svg.appendChild(liveLayer);
+    svg.appendChild(landmarkLayer);
     // Coverage view: darken the ground so unlit (unwatched) area reads as
     // the blind spots.
     // backgroundColor, not the background shorthand — the shorthand would
@@ -1180,8 +1181,12 @@
 
   // Drawing the secure area: a drag that STARTS on empty map background
   // (not a dot, wedge, or arrow) sketches the rectangle corner-to-corner.
-  // Place mode (onboarding) and scale calibration claim the click first.
+  // Landmark, place, and scale-calibration modes claim the click first.
   mapEl.addEventListener("pointerdown", function (ev) {
+    if (landmarkMode) {
+      handleLandmarkMapClick(mapUnit(ev));
+      return;
+    }
     if (placeMode) {
       var cam = placeMode;
       placeMode = null;
@@ -1482,6 +1487,187 @@
       autotuneDiff.textContent = "auto-tune error: " + err.message;
     }
     autotuneBtn.disabled = false;
+  });
+
+  // ---- Landmark calibrator: measure HFOV/azimuth/tilt per camera ------
+
+  var landmarkBtn = document.getElementById("landmark-btn");
+  var landmarkSection = document.getElementById("landmark-section");
+  var landmarkInstructions = document.getElementById("landmark-instructions");
+  var landmarkSnap = document.getElementById("landmark-snapshot");
+  var landmarkWrap = document.getElementById("landmark-snapshot-wrap");
+  var landmarkSolveBtn = document.getElementById("landmark-solve");
+  var landmarkUndoBtn = document.getElementById("landmark-undo");
+  var landmarkCancelBtn = document.getElementById("landmark-cancel");
+  var landmarkResult = document.getElementById("landmark-result");
+  var landmarkMode = null;    // camera being calibrated, or null
+  var landmarkMatches = [];   // completed {u, v, mx, my}
+  var landmarkPending = null; // image click waiting for its map click
+  // Persistent SVG group re-appended by renderMap (same pattern as
+  // liveLayer) so markers survive map redraws.
+  var landmarkLayer = document.createElementNS(SVG_NS, "g");
+  landmarkLayer.setAttribute("id", "landmark-layer");
+  landmarkLayer.setAttribute("pointer-events", "none");
+
+  function landmarkStatus() {
+    var n = landmarkMatches.length;
+    if (landmarkPending) {
+      landmarkInstructions.textContent =
+        "Point " + (n + 1) + ": now click the SAME spot on the floorplan map.";
+    } else {
+      landmarkInstructions.textContent =
+        "Click a ground landmark in the snapshot (gate post, path corner...), " +
+        "then the same spot on the map. " + n + " matched — " +
+        (n >= 2 ? "ready to solve; more points = better." : "need at least 2.");
+    }
+    landmarkSolveBtn.disabled = landmarkMatches.length < 2 || !!landmarkPending;
+  }
+
+  function drawLandmarkMarkers() {
+    // Snapshot dots (numbered divs over the img).
+    landmarkWrap.querySelectorAll(".lm-dot").forEach(function (d) { d.remove(); });
+    landmarkLayer.textContent = "";
+    var all = landmarkMatches.concat(landmarkPending ? [landmarkPending] : []);
+    all.forEach(function (m, i) {
+      var d = document.createElement("div");
+      d.className = "lm-dot";
+      d.textContent = i + 1;
+      d.style.cssText =
+        "position:absolute;transform:translate(-50%,-50%);width:18px;height:18px;" +
+        "border-radius:50%;background:var(--accent, #ffb454);color:#000;" +
+        "font-size:11px;font-weight:bold;text-align:center;line-height:18px;" +
+        "pointer-events:none;left:" + m.u * 100 + "%;top:" + m.v * 100 + "%";
+      landmarkWrap.appendChild(d);
+      if (m.mx === undefined) return;
+      var c = document.createElementNS(SVG_NS, "circle");
+      c.setAttribute("cx", m.mx); c.setAttribute("cy", m.my);
+      c.setAttribute("r", "0.010");
+      c.setAttribute("fill", "var(--accent, #ffb454)");
+      c.setAttribute("stroke", "#000");
+      c.setAttribute("stroke-width", "0.002");
+      landmarkLayer.appendChild(c);
+      var t = document.createElementNS(SVG_NS, "text");
+      t.setAttribute("x", m.mx); t.setAttribute("y", m.my + 0.005);
+      t.setAttribute("text-anchor", "middle");
+      t.setAttribute("font-size", "0.018");
+      t.setAttribute("fill", "#000");
+      t.textContent = i + 1;
+      landmarkLayer.appendChild(t);
+    });
+  }
+
+  function closeLandmarkMode() {
+    landmarkMode = null;
+    landmarkMatches = [];
+    landmarkPending = null;
+    landmarkSection.style.display = "none";
+    landmarkResult.textContent = "";
+    drawLandmarkMarkers();
+  }
+
+  landmarkBtn.addEventListener("click", function () {
+    if (!selectedCamera) return;
+    var entry = (doc.camera_layout || {})[selectedCamera];
+    if (!entry || entry.azimuth === undefined || !doc.map_scale_ft) {
+      landmarkResult.textContent = "";
+      showBanner(
+        "Landmark calibrate needs the camera placed + aimed and the map scale set.",
+        true
+      );
+      return;
+    }
+    landmarkMode = selectedCamera;
+    landmarkMatches = [];
+    landmarkPending = null;
+    landmarkResult.textContent = "";
+    landmarkSection.style.display = "block";
+    // Through the sidecar's Frigate proxy — same session cookie.
+    landmarkSnap.src = "/api/" + encodeURIComponent(landmarkMode) +
+      "/latest.jpg?h=720&cache=" + (window.performance ? performance.now() : "");
+    drawLandmarkMarkers();
+    landmarkStatus();
+    landmarkSection.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+
+  landmarkSnap.addEventListener("pointerdown", function (ev) {
+    if (!landmarkMode || landmarkPending) return;
+    ev.preventDefault();
+    var rect = landmarkSnap.getBoundingClientRect();
+    landmarkPending = {
+      u: Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width)),
+      v: Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height)),
+    };
+    drawLandmarkMarkers();
+    landmarkStatus();
+  });
+
+  function handleLandmarkMapClick(p) {
+    if (!landmarkPending) return; // ignore stray map clicks while calibrating
+    landmarkPending.mx = +p.x.toFixed(4);
+    landmarkPending.my = +p.y.toFixed(4);
+    landmarkMatches.push(landmarkPending);
+    landmarkPending = null;
+    drawLandmarkMarkers();
+    landmarkStatus();
+  }
+
+  landmarkUndoBtn.addEventListener("click", function () {
+    if (landmarkPending) landmarkPending = null;
+    else landmarkMatches.pop();
+    drawLandmarkMarkers();
+    landmarkStatus();
+  });
+
+  landmarkCancelBtn.addEventListener("click", closeLandmarkMode);
+
+  landmarkSolveBtn.addEventListener("click", async function () {
+    landmarkSolveBtn.disabled = true;
+    landmarkResult.textContent = "solving...";
+    try {
+      var cam = landmarkMode;
+      var report = await fetchJson("/v1/push/map/landmark-solve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ camera: cam, matches: landmarkMatches }),
+      });
+      landmarkResult.textContent =
+        cam + ": HFOV " + report.hfov_before + "° → " + report.hfov_after +
+        "°, azimuth " + report.azimuth_before + "° → " + report.azimuth_after +
+        "°, tilt " + report.tilt_before + "° → " + report.tilt_after +
+        "° — fit error " + report.rms_ft + " ft (per point: " +
+        report.residual_ft.join(", ") + "). ";
+      var worst = Math.max.apply(null, report.residual_ft);
+      if (worst > 8) {
+        var warn = document.createElement("div");
+        warn.textContent = "⚠ point " +
+          (report.residual_ft.indexOf(worst) + 1) + " fits poorly (" + worst +
+          " ft) — mismatched click? Undo it and re-add.";
+        landmarkResult.appendChild(warn);
+      }
+      var apply = document.createElement("button");
+      apply.textContent = "Apply";
+      apply.className = "btn-primary";
+      apply.style.marginLeft = "0.6em";
+      apply.addEventListener("click", function () {
+        var o = opticsEntry(cam);
+        o.hfov = report.hfov_after;
+        o.tilt_deg = report.tilt_after;
+        if (report.vfov_after !== null && o.vfov) o.vfov = report.vfov_after;
+        var entry = (doc.camera_layout || {})[cam];
+        if (entry) {
+          entry.azimuth = report.azimuth_after;
+          entry.fov = report.hfov_after; // keep the pie honest too
+        }
+        markDirty();
+        closeLandmarkMode();
+        renderMap();
+        showBanner(cam + " calibrated from landmarks — remember to Save.", false);
+      });
+      landmarkResult.appendChild(apply);
+    } catch (err) {
+      landmarkResult.textContent = "solve error: " + err.message;
+    }
+    landmarkSolveBtn.disabled = landmarkMatches.length < 2;
   });
 
   // ---- Reload Frigate config -----------------------------------------

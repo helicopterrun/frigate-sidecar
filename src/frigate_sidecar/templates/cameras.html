@@ -56,6 +56,21 @@
       <input id="detail-tilt" type="number" min="-90" max="90" step="1" class="num-4e">° down
     </label>
     <span id="detail-placement" class="inline-label"></span>
+    <button id="landmark-btn" class="btn-primary inline-label"
+            title="Measure this camera's HFOV, azimuth and tilt by matching landmarks between its snapshot and the floorplan">Landmark calibrate</button>
+  </div>
+
+  <div id="landmark-section" class="help subsection" style="display:none"> {# JS-toggled #}
+    <div id="landmark-instructions"></div>
+    <div id="landmark-snapshot-wrap" style="position:relative;display:inline-block;max-width:100%">
+      <img id="landmark-snapshot" alt="camera snapshot" style="max-width:640px;width:100%;display:block;cursor:crosshair">
+    </div>
+    <div class="control-row">
+      <button id="landmark-solve" class="btn-primary inline-label" disabled>Solve</button>
+      <button id="landmark-undo" class="btn-primary inline-label">Undo point</button>
+      <button id="landmark-cancel" class="btn-primary inline-label">Cancel</button>
+    </div>
+    <div id="landmark-result" class="control-row"></div>
   </div>
   <div class="control-row">
     <button id="clear-secure" class="btn-primary" style="display:none">Clear secure area</button>

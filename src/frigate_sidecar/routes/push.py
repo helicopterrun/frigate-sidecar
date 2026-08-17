@@ -1006,6 +1006,44 @@ async def map_live(request: Request, debug: int = Query(default=0)) -> dict[str,
     return {"t": now, "objects": objects}
 
 
+@router.post("/map/landmark-solve")
+async def map_landmark_solve(request: Request) -> dict[str, Any]:
+    """Solve one camera's HFOV/azimuth/tilt from landmark matches.
+
+    Body: `{"camera": str, "matches": [{"u","v","mx","my"}, ...]}` — each
+    match pairs a click in the camera frame with the same physical spot
+    clicked on the calibrated floorplan. Pure preview: returns the solved
+    values + per-match residuals; the /cameras page applies accepted
+    numbers through the normal Save flow.
+    """
+    from frigate_sidecar.push import calibrate
+
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+    camera = body.get("camera")
+    matches = body.get("matches")
+    if not isinstance(camera, str) or not isinstance(matches, list):
+        raise HTTPException(status_code=400, detail="camera and matches required")
+    if not (2 <= len(matches) <= 12):
+        raise HTTPException(status_code=400, detail="need 2-12 landmark matches")
+    clean = []
+    for m in matches:
+        try:
+            entry = {k: float(m[k]) for k in ("u", "v", "mx", "my")}
+        except (TypeError, KeyError, ValueError):
+            raise HTTPException(
+                status_code=400, detail="each match needs numeric u, v, mx, my",
+            ) from None
+        if not all(-0.5 <= v <= 1.5 for v in entry.values()):
+            raise HTTPException(status_code=400, detail="match coords out of range")
+        clean.append(entry)
+    try:
+        return calibrate.solve_landmarks(camera, clean, policy_settings.get_active())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/feedback")
 async def post_feedback(request: Request) -> dict[str, Any]:
     """Log user feedback on a push notification (tuning trace, no routing

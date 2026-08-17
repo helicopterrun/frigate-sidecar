@@ -297,3 +297,91 @@ def test_autotune_endpoint_400_on_empty_capture(
         assert "cross-camera" in resp.json()["detail"]
     finally:
         policy_settings.reset_for_tests()
+
+
+# ---- solve_landmarks ------------------------------------------------------
+
+
+def _landmark_matches(cam, world_pts):
+    out = []
+    for wx, wy in world_pts:
+        pt = _image_point(cam, wx, wy)
+        assert pt is not None, (cam, wx, wy)
+        out.append({"u": pt[0], "v": pt[1], "mx": wx / SCALE_FT, "my": wy / SCALE_FT})
+    return out
+
+
+NORTH_LANDMARKS = [
+    (0.42 * SCALE_FT, 0.34 * SCALE_FT), (0.58 * SCALE_FT, 0.32 * SCALE_FT),
+    (0.50 * SCALE_FT, 0.45 * SCALE_FT), (0.60 * SCALE_FT, 0.48 * SCALE_FT),
+]
+
+
+def test_solve_landmarks_recovers_hfov_azimuth_tilt():
+    settings = _settings({"north": (8.0, -4.0)})
+    settings["camera_optics"]["north"]["hfov"] = 105.0  # true is 90
+    settings["camera_optics"]["north"]["vfov"] = None
+    del settings["camera_optics"]["north"]["vfov"]
+    matches = _landmark_matches("north", NORTH_LANDMARKS)
+    report = calibrate.solve_landmarks("north", matches, settings)
+    assert abs(report["hfov_after"] - HFOV) < 2.0, report
+    d_az = abs((report["azimuth_after"] - TRUE["north"]["azimuth"] + 180) % 360 - 180)
+    assert d_az < 1.0, report
+    assert abs(report["tilt_after"] - TRUE["north"]["tilt"]) < 1.0, report
+    assert report["rms_ft"] < 1.0, report
+
+
+def test_solve_landmarks_scales_vendor_vfov():
+    settings = _settings({"north": (8.0, -4.0)})
+    settings["camera_optics"]["north"]["hfov"] = 105.0
+    # Vendor vfov consistent with the TRUE rig at hfov 105 would be wrong;
+    # here the vendor value equals the 16:9 derivation at the wrong hfov,
+    # so after solving back to ~90 the returned vfov must shrink with it.
+    matches = _landmark_matches("north", NORTH_LANDMARKS)
+    report = calibrate.solve_landmarks("north", matches, settings)
+    assert report["vfov_after"] is not None
+    assert report["vfov_after"] < settings["camera_optics"]["north"]["vfov"]
+
+
+def test_solve_landmarks_requires_two_matches():
+    import pytest
+
+    settings = _settings()
+    with pytest.raises(ValueError):
+        calibrate.solve_landmarks(
+            "north", _landmark_matches("north", NORTH_LANDMARKS[:1]), settings,
+        )
+
+
+def test_landmark_solve_endpoint(tmp_path, frigate_db_path, sidecar_db_path):
+    from frigate_sidecar.push import policy_settings
+
+    policy_settings.reset_for_tests()
+    try:
+        client = _autotune_client(tmp_path, frigate_db_path, sidecar_db_path, [])
+        doc = dict(policy_settings.get_active())
+        settings = _settings({"north": (8.0, -4.0)})
+        settings["camera_optics"]["north"]["hfov"] = 105.0
+        del settings["camera_optics"]["north"]["vfov"]
+        doc.update(settings)
+        policy_settings.apply_settings(doc)
+        matches = _landmark_matches("north", NORTH_LANDMARKS)
+        resp = client.post(
+            "/v1/push/map/landmark-solve",
+            json={"camera": "north", "matches": matches},
+        )
+        assert resp.status_code == 200, resp.text
+        report = resp.json()
+        assert abs(report["hfov_after"] - HFOV) < 2.0
+        assert len(report["residual_ft"]) == len(matches)
+        # Bad requests surface as 400s, not 500s.
+        assert client.post(
+            "/v1/push/map/landmark-solve",
+            json={"camera": "north", "matches": matches[:1]},
+        ).status_code == 400
+        assert client.post(
+            "/v1/push/map/landmark-solve",
+            json={"camera": "nope", "matches": matches},
+        ).status_code == 400
+    finally:
+        policy_settings.reset_for_tests()
