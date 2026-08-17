@@ -51,10 +51,15 @@
     return ((u - view.x) / view.w) * 100;
   }
   function clampView() {
-    view.w = Math.min(1, Math.max(1 / 8, view.w));
-    view.x = Math.min(1 - view.w, Math.max(0, view.x));
+    // 1/8 = 8x in; 3 = zoomed out to a third of window width — room to see
+    // the whole map small, not just fill-the-width.
+    view.w = Math.min(3, Math.max(1 / 8, view.w));
+    // On either axis: content larger than the window pans within bounds,
+    // smaller letterboxes centered.
+    view.x = view.w >= 1
+      ? (1 - view.w) / 2
+      : Math.min(1 - view.w, Math.max(0, view.x));
     var h = viewH();
-    // Content shorter than the window centers; taller pans within [0, 1-h].
     view.y = h >= 1 ? (1 - h) / 2 : Math.min(1 - h, Math.max(0, view.y));
   }
   function resetView() {
@@ -1298,7 +1303,7 @@
   var viewResetBtn = document.getElementById("view-reset");
 
   function syncViewReset() {
-    viewResetBtn.style.display = view.w < 1 ? "inline-block" : "none";
+    viewResetBtn.style.display = view.w !== 1 ? "inline-block" : "none";
   }
 
   mapEl.addEventListener("wheel", function (ev) {
