@@ -1227,10 +1227,65 @@
     };
   }
 
+  // ---- Zoom + pan -----------------------------------------------------
+
+  var viewResetBtn = document.getElementById("view-reset");
+
+  function syncViewReset() {
+    viewResetBtn.style.display = view.w < 1 ? "inline-block" : "none";
+  }
+
+  mapEl.addEventListener("wheel", function (ev) {
+    ev.preventDefault();
+    var p = clientToUnit(ev);
+    var oldW = view.w;
+    view.w = view.w * (ev.deltaY > 0 ? 1.15 : 1 / 1.15);
+    clampView();
+    // Keep the point under the cursor stationary.
+    view.x = p.x - (p.x - view.x) * (view.w / oldW);
+    view.y = p.y - (p.y - view.y) * (view.w / oldW);
+    clampView();
+    syncViewReset();
+    renderMap();
+  }, { passive: false });
+
+  mapEl.addEventListener("dblclick", function () {
+    resetView();
+    syncViewReset();
+  });
+  viewResetBtn.addEventListener("click", function () {
+    resetView();
+    syncViewReset();
+  });
+
+  function startPan(ev) {
+    ev.preventDefault();
+    var last = { x: ev.clientX, y: ev.clientY };
+    var rect = null;
+    function move(mv) {
+      rect = mapEl.getBoundingClientRect(); // fresh: layout can shift
+      view.x -= ((mv.clientX - last.x) / rect.width) * view.w;
+      view.y -= ((mv.clientY - last.y) / rect.height) * view.w;
+      last = { x: mv.clientX, y: mv.clientY };
+      clampView();
+      renderMap();
+    }
+    function up() {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
   // Drawing the secure area: a drag that STARTS on empty map background
   // (not a dot, wedge, or arrow) sketches the rectangle corner-to-corner.
   // Landmark, place, and scale-calibration modes claim the click first.
   mapEl.addEventListener("pointerdown", function (ev) {
+    if (ev.button === 1) { // middle-button pan works in every layer/mode
+      startPan(ev);
+      return;
+    }
     if (landmarkMode) {
       handleLandmarkMapClick(mapUnit(ev));
       return;
