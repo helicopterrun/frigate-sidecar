@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse
 
 from frigate_sidecar.analysis import motion_active, motion_compare
 from frigate_sidecar.frigate_api import FrigateAPIError
+from frigate_sidecar.routes._cache import ttl_page_cache
 
 router = APIRouter(tags=["motion"])
 
@@ -43,6 +44,7 @@ def _delta_css(label: str) -> str:
 
 
 @router.get("/motion", response_class=HTMLResponse)
+@ttl_page_cache(seconds=60)
 def motion_view(
     request: Request,
     baseline: str = "",

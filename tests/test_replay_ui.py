@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -81,14 +82,28 @@ def test_run_unknown_scenario_rejected(client: TestClient) -> None:
     assert "nonexistent" in r.json()["detail"]
 
 
+def _poll_done(client: TestClient, run_id: str) -> dict:
+    """The run now executes in the background; poll status until it settles."""
+    for _ in range(200):
+        r = client.get("/replay/status")
+        run = r.json()["run"]
+        if run and run["run_id"] == run_id and run["state"] in ("done", "failed"):
+            return run
+        time.sleep(0.05)
+    raise AssertionError("replay run did not finish in time")
+
+
 def test_dry_run_publishes_nothing(client: TestClient) -> None:
-    r = client.post("/replay/run", json={
-        "scenarios": ["card-notify-resolve"],
-        "speed": 100,
-        "dry_run": True,
-    })
-    assert r.status_code == 200
-    run = r.json()
+    # `with` keeps one event loop alive across requests so the background
+    # replay task can actually run between our polls.
+    with client:
+        r = client.post("/replay/run", json={
+            "scenarios": ["card-notify-resolve"],
+            "speed": 100,
+            "dry_run": True,
+        })
+        assert r.status_code == 200
+        run = _poll_done(client, r.json()["run_id"])
     assert run["dry_run"] is True
     assert run["state"] == "done"
     assert len(run["decisions"]) > 0
@@ -131,14 +146,15 @@ def test_status_when_no_run(client: TestClient) -> None:
 
 
 def test_stacked_dry_run(client: TestClient) -> None:
-    r = client.post("/replay/run", json={
-        "scenarios": ["card-notify-resolve", "card-la-package"],
-        "speed": 100,
-        "dry_run": True,
-        "stagger": 0,
-    })
-    assert r.status_code == 200
-    run = r.json()
+    with client:
+        r = client.post("/replay/run", json={
+            "scenarios": ["card-notify-resolve", "card-la-package"],
+            "speed": 100,
+            "dry_run": True,
+            "stagger": 0,
+        })
+        assert r.status_code == 200
+        run = _poll_done(client, r.json()["run_id"])
     assert run["state"] == "done"
     assert len(run["scenarios"]) == 2
     assert len(run["decisions"]) > 3

@@ -1,9 +1,20 @@
 // Triage detail: label/clear keyboard shortcuts, prev/next nav, zone overlay toggle.
 SC.bindSessionInput();
+const sessionInput = document.getElementById('session');
 
 const eventId = document.body.dataset.eventId;
 const prevUrl = document.body.dataset.prevUrl;
 const nextUrl = document.body.dataset.nextUrl;
+
+// Warm the browser cache for the pages the triage loop is about to hit, so
+// the post-label navigation lands on an already-fetched document.
+[nextUrl, prevUrl].forEach((url) => {
+  if (!url) return;
+  const link = document.createElement('link');
+  link.rel = 'prefetch';
+  link.href = url;
+  document.head.appendChild(link);
+});
 
 // Frigate+ submit toggle: persisted opt-in across pages. Defaults to off so
 // the very first triage click can't surprise-submit to Plus.
@@ -25,6 +36,10 @@ function setPlusStatus(cls, text) {
 }
 
 async function applyLabel(label) {
+  // Instant feedback: light the chosen button before the round-trip.
+  document.querySelectorAll('[data-label]').forEach(b => {
+    b.classList.toggle('active', b.dataset.label === label);
+  });
   const note = document.getElementById('note').value;
   const session = sessionInput ? sessionInput.value : '';
   const submitPlus = !!(plusToggle && plusToggle.checked && !plusToggle.disabled);

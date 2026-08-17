@@ -2181,6 +2181,8 @@
       if (!cameras.length) showBanner("No cameras found in the Frigate config.", false);
     } catch (err) {
       showBanner(err.message, true);
+    } finally {
+      mapEl.classList.remove("skeleton");
     }
   })();
 })();

@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 
 from frigate_sidecar.analysis import score_histogram
 from frigate_sidecar.db import open_joined
+from frigate_sidecar.routes._cache import ttl_page_cache
 
 router = APIRouter(tags=["score-histogram"])
 
@@ -36,6 +37,7 @@ def _confidence_css(confidence: str) -> str:
 
 
 @router.get("/score-histogram", response_class=HTMLResponse)
+@ttl_page_cache(seconds=60)
 def score_histogram_view(
     request: Request,
     days: int = Query(default=14, ge=1, le=365),

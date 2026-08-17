@@ -501,6 +501,15 @@ a { color: var(--accent); }
 .mono-id { font-family: var(--font-mono); font-size: 11px; }
 .hotkey-list { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 
+/* ----- Skeleton loading placeholders ----- */
+@keyframes sc-shimmer { 50% { opacity: 0.45; } }
+.skeleton { animation: sc-shimmer 1.2s var(--ease) infinite; }
+.skeleton-row {
+  height: 52px; border-radius: var(--radius-md);
+  background: var(--surface); border: 1px solid var(--stroke-soft);
+  margin-bottom: var(--space-2);
+}
+
 /* ----- Toast (util.js SC.toast) ----- */
 .sc-toast {
   position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px));

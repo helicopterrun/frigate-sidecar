@@ -14,7 +14,12 @@
   <div id="zones-banner" class="help page-intro" style="display:none"></div> {# JS-toggled #}
 
   <h3 class="section-title first">Zones</h3>
-  <div id="zones-list" class="stat-row"></div>
+  <div id="zones-list" class="stat-row skeleton">
+    {# Skeletons: cleared when zones.js renders the real rows. #}
+    <div class="skeleton-row" style="flex:1 1 300px"></div>
+    <div class="skeleton-row" style="flex:1 1 300px"></div>
+    <div class="skeleton-row" style="flex:1 1 300px"></div>
+  </div>
 
   <h3 class="section-title">Camera neighbors</h3>
   <p class="help page-intro">
@@ -23,7 +28,10 @@
     <a href="/cameras" class="page-link">Arrange cameras visually</a> and use
     “Suggest neighbors”.
   </p>
-  <div id="neighbors-list"></div>
+  <div id="neighbors-list" class="skeleton">
+    <div class="skeleton-row"></div>
+    <div class="skeleton-row"></div>
+  </div>
 
   <div class="section-block">
     <button id="save-btn" class="btn-primary">Save</button>

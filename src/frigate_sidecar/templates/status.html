@@ -44,11 +44,11 @@
     </div>
     <div class="stat-card">
       <div class="stat-label">Sheets</div>
-      <div class="stat-value">{{ status.scrub.sheet_count | default('—') }}</div>
+      <div class="stat-value" data-k="sheets">{{ status.scrub.sheet_count | default('—') }}</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Cache size</div>
-      <div class="stat-value">{{ fmt_bytes(status.sizes.scrub_cache) }}</div>
+      <div class="stat-value" data-k="scrub-cache">{{ fmt_bytes(status.sizes.scrub_cache) }}</div>
     </div>
   </div>
   <table class="motion-table" id="scrub-cams">
@@ -74,19 +74,19 @@
   <div class="stat-row">
     <div class="stat-card">
       <div class="stat-label">MQTT</div>
-      <div class="stat-value cell-class {{ 'ok' if status.push.mqtt_connected else 'noise' }}">
+      <div class="stat-value cell-class {{ 'ok' if status.push.mqtt_connected else 'noise' }}" data-k="mqtt">
         {{ 'live' if status.push.mqtt_connected else 'stale' }}
       </div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Frigate (via MQTT)</div>
-      <div class="stat-value cell-class {{ 'ok' if status.push.frigate_online else 'noise' }}">
+      <div class="stat-value cell-class {{ 'ok' if status.push.frigate_online else 'noise' }}" data-k="frigate-online">
         {{ 'online' if status.push.frigate_online else 'offline' }}
       </div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Last broker traffic</div>
-      <div class="stat-value">{{ (status.push.last_event_s_ago ~ 's ago') if status.push.last_event_s_ago is not none else '—' }}</div>
+      <div class="stat-value" data-k="last-traffic">{{ (status.push.last_event_s_ago ~ 's ago') if status.push.last_event_s_ago is not none else '—' }}</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Transport</div>
@@ -99,11 +99,11 @@
   <div class="stat-row">
     <div class="stat-card">
       <div class="stat-label">Sidecar DB</div>
-      <div class="stat-value">{{ fmt_bytes(status.sizes.sidecar_db) }}</div>
+      <div class="stat-value" data-k="sidecar-db">{{ fmt_bytes(status.sizes.sidecar_db) }}</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Frigate DB</div>
-      <div class="stat-value">{{ fmt_bytes(status.sizes.frigate_db) }}</div>
+      <div class="stat-value" data-k="frigate-db">{{ fmt_bytes(status.sizes.frigate_db) }}</div>
     </div>
   </div>
 

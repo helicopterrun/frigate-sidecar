@@ -12,11 +12,13 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from frigate_sidecar.analysis import zone_hits
+from frigate_sidecar.routes._cache import ttl_page_cache
 
 router = APIRouter(tags=["zone-hits"])
 
 
 @router.get("/zone-hits", response_class=HTMLResponse)
+@ttl_page_cache(seconds=60)
 def zone_hits_view(
     request: Request, days: int = 30, camera: str | None = None
 ) -> Any:

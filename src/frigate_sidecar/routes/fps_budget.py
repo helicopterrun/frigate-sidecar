@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 
 from frigate_sidecar.analysis import fps_budget
 from frigate_sidecar.frigate_api import FrigateAPIError
+from frigate_sidecar.routes._cache import ttl_page_cache
 
 router = APIRouter(tags=["fps-budget"])
 
@@ -25,6 +26,7 @@ def _util_css(util_pct: float) -> str:
 
 
 @router.get("/fps-budget", response_class=HTMLResponse)
+@ttl_page_cache(seconds=60)
 def fps_budget_view(request: Request) -> Any:
     settings = request.app.state.settings
     templates = request.app.state.templates

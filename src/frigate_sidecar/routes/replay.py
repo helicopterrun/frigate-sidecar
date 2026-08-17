@@ -168,6 +168,7 @@ async def replay_run(body: RunRequest, request: Request) -> JSONResponse:
             dry_run=body.dry_run,
             push_settings=push_settings,
             stagger=body.stagger,
+            wait=False,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

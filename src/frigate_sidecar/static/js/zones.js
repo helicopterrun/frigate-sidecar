@@ -157,6 +157,7 @@
 
   function renderNeighbors(cameras) {
     neighborsList.textContent = "";
+    neighborsList.classList.remove("skeleton");
     cameras.forEach(function (camera) {
       var row = el("div", { style: "margin:0.35em 0" });
       row.appendChild(el("strong", { text: camera, style: "margin-right:0.6em" }));
@@ -282,6 +283,7 @@
       var data = await fetchJson("/v1/push/settings");
       doc = data.settings;
       zonesList.textContent = "";
+      zonesList.classList.remove("skeleton");
       (data.available_zones || []).forEach(function (zone) {
         zonesList.appendChild(renderZone(zone));
       });

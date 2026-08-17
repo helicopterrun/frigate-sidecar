@@ -385,6 +385,7 @@ class ReplayRun:
 
 
 _current_run: ReplayRun | None = None
+_run_task: asyncio.Task | None = None
 _run_lock = asyncio.Lock()
 
 
@@ -399,9 +400,17 @@ async def start_run(
     dry_run: bool = False,
     push_settings: PushSection | None = None,
     stagger: float = 8.0,
+    wait: bool = True,
 ) -> ReplayRun:
-    """Start a replay run. Blocks until complete."""
-    global _current_run
+    """Start a replay run.
+
+    With ``wait=True`` (the historical behavior, kept for tests) this blocks
+    until the run completes. With ``wait=False`` the run executes as a
+    background task and the caller polls ``get_current_run()`` — a 1x
+    scenario means minutes of wall clock, and holding an HTTP request open
+    that long is what made the replay page feel hung.
+    """
+    global _current_run, _run_task
 
     if _run_lock.locked():
         raise RuntimeError("a replay run is already in progress")
@@ -413,8 +422,16 @@ async def start_run(
         dry_run=dry_run,
     )
     _current_run = run
-    await _execute_run(run, speed=speed, dry_run=dry_run,
-                       push_settings=push_settings, stagger=stagger)
+    coro = _execute_run(run, speed=speed, dry_run=dry_run,
+                        push_settings=push_settings, stagger=stagger)
+    if wait:
+        await coro
+    else:
+        # Keep a reference so the task isn't garbage-collected mid-run.
+        _run_task = asyncio.create_task(coro)
+        # Let it enter _run_lock before we return, so an immediate second
+        # POST sees "already in progress" instead of racing.
+        await asyncio.sleep(0)
     return run
 
 
