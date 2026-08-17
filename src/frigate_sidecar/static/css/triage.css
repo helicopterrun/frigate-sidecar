@@ -586,6 +586,33 @@ body[data-layer="calibrate"] .layer-group[data-layer="calibrate"],
 }
 .map-compass svg { width: 22px; height: 22px; display: block; }
 
+/* Fullscreen toggle pinned opposite the compass. */
+.map-expand {
+  position: absolute; top: 8px; right: 8px; z-index: 3;
+  width: 32px; height: 32px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--surface-2) 82%, transparent);
+  border: 1px solid var(--stroke); border-radius: var(--radius-md);
+  color: var(--text); font-size: 15px; line-height: 1; cursor: pointer;
+}
+.cam-map.map-full {
+  position: fixed; inset: 0; z-index: 60;
+  width: 100vw; height: 100dvh; border: none; border-radius: 0;
+}
+body.map-full-open { overflow: hidden; }
+
+/* Camera visibility chips: view-only show/hide per camera. */
+.cam-vis { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 6px; }
+.vis-chip {
+  padding: 2px 10px; min-height: 24px;
+  background: var(--surface-2); color: var(--muted-3, var(--muted));
+  border: 1px solid var(--stroke); border-radius: 999px;
+  font-size: var(--text-xs); cursor: pointer;
+  text-decoration: line-through;
+}
+.vis-chip.on { color: var(--text); border-color: var(--accent); text-decoration: none; }
+.vis-chip.vis-all { text-decoration: none; color: var(--accent); }
+
 /* Cameras page: the map is a gesture surface — no browser scroll/zoom on it
    (pinch zooms the map, one-finger drags follow the active layer). */
 .cam-map { touch-action: none; }

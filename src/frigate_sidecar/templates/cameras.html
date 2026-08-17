@@ -38,6 +38,7 @@
     <button class="vbtn" data-layer="calibrate" title="Floorplan, scale line, landmark calibration">Calibrate</button>
     <button class="vbtn" data-layer="view" title="Observe: pan by dragging, measure, overlays">View</button>
   </div>
+  <div id="cam-vis" class="cam-vis"></div> {# per-camera show/hide chips (view-only) #}
   <div id="layout-map" class="cam-map skeleton"></div>
 
   <div class="layer-group" data-layer="view">
@@ -136,6 +137,11 @@
     <span id="floorplan-note" class="help inline-label"></span>
     <label class="inline-label-lg">Map width
       <input id="map-scale" type="number" min="10" max="100000" step="5" class="num-5e"> ft
+    </label>
+    <label class="inline-label-lg" id="floorplan-rotate-row" style="display:none"
+           title="Turn the floorplan image so its true north points up. Camera geometry always treats up as north — set this before placing cameras, or re-drag them after.">
+      Rotate plan
+      <input id="floorplan-rotate" type="number" min="-360" max="360" step="0.5" class="num-5e">°
     </label>
   </div>
 

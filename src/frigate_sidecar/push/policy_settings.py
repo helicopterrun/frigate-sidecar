@@ -562,6 +562,11 @@ def validate_settings(data: Any) -> list[str]:
                 v = floorplan.get(dim)
                 if not (isinstance(v, int) and 0 < v <= 20000):
                     errors.append(f"floorplan.{dim} must be a positive pixel count")
+            rot = floorplan.get("rotation_deg")
+            if rot is not None and not (
+                isinstance(rot, (int, float)) and -360 <= rot <= 360
+            ):
+                errors.append("floorplan.rotation_deg must be a number in -360..360")
             cal = floorplan.get("calibration")
             if cal is not None:
                 ok = isinstance(cal, dict) and all(
@@ -829,6 +834,9 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
             uploaded_at = floorplan.get("uploaded_at")
             if isinstance(uploaded_at, str) and uploaded_at:
                 fp["uploaded_at"] = uploaded_at
+            rot = floorplan.get("rotation_deg")
+            if isinstance(rot, (int, float)) and -360 <= rot <= 360 and rot % 360:
+                fp["rotation_deg"] = round(float(rot) % 360, 1)
             cal = floorplan.get("calibration")
             if isinstance(cal, dict):
                 vals = {

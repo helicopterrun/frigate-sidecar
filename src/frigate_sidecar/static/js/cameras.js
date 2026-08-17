@@ -20,6 +20,19 @@
   var calibrateStart = null; // first click of the scale reference line
   var calibrating = false;
 
+  // Per-camera visibility (view-only, never saved): a hidden camera vanishes
+  // from every layer's drawing — pies, pills, trails, footprints, zones —
+  // but its data is untouched, so hiding can never mess up a calibration.
+  var hiddenCams = {};
+  try {
+    JSON.parse(localStorage.getItem("cam_hidden") || "[]").forEach(function (c) {
+      hiddenCams[c] = true;
+    });
+  } catch (e) { hiddenCams = {}; } // corrupt store: show everything
+  function saveHiddenCams() {
+    localStorage.setItem("cam_hidden", JSON.stringify(Object.keys(hiddenCams)));
+  }
+
   // ---- View window (zoom/pan) ----------------------------------------
   // The visible window in unit map coords. The element is a fixed-height
   // WINDOW onto the map (controls stay on screen; the map pans inside), so
@@ -232,6 +245,8 @@
       img.setAttribute("width", 1); img.setAttribute("height", 1);
       img.setAttribute("preserveAspectRatio", "none");
       img.setAttribute("href", fpImg);
+      var rotT = floorplanTransform();
+      if (rotT) img.setAttribute("transform", rotT);
       svg.appendChild(img);
     }
     if (heatmapURL) {
@@ -291,6 +306,7 @@
     }
 
     cameras.forEach(function (camera, i) {
+      if (hiddenCams[camera]) return;
       // Unplaced cameras still get a ghost arrow at their default spot —
       // grabbing it both places and aims them in one motion.
       var entry = (doc.camera_layout || {})[camera] || layoutEntry(camera, i);
@@ -544,7 +560,20 @@
     north.title = "North is up";
     mapEl.appendChild(north);
 
+    // Fullscreen toggle in the opposite corner. stopPropagation on
+    // pointerdown so the tap can't fall through to the layer dispatcher
+    // (a pending landmark/measure click would otherwise land here).
+    var expand = document.createElement("button");
+    expand.type = "button";
+    expand.className = "map-expand";
+    expand.textContent = mapIsFull() ? "✕" : "⛶";
+    expand.title = mapIsFull() ? "Exit full screen (Esc)" : "Full screen map";
+    expand.addEventListener("pointerdown", function (ev) { ev.stopPropagation(); });
+    expand.addEventListener("click", toggleMapFull);
+    mapEl.appendChild(expand);
+
     cameras.forEach(function (camera, i) {
+      if (hiddenCams[camera]) return;
       var pos = layoutEntry(camera, i);
       var isSel = camera === selectedCamera;
       var dot = document.createElement("div");
@@ -616,11 +645,36 @@
   });
   coverageToggle.addEventListener("change", renderMap);
 
+  var rotateRow = document.getElementById("floorplan-rotate-row");
+  var rotateInput = document.getElementById("floorplan-rotate");
+  rotateInput.addEventListener("change", function () {
+    if (!doc || !doc.floorplan) return;
+    var v = ((parseFloat(rotateInput.value) || 0) % 360 + 360) % 360;
+    if (v) doc.floorplan.rotation_deg = +v.toFixed(1);
+    else delete doc.floorplan.rotation_deg;
+    rotateInput.value = v || "";
+    markDirty();
+    renderMap();
+  });
+
   // The map's height/width ratio: the floorplan's pixel aspect when one is
   // uploaded, 1 for the square default map. Mirror of ground.map_aspect.
   function mapAspect() {
     var fp = doc && doc.floorplan;
     return fp && fp.w && fp.h ? fp.h / fp.w : 1;
+  }
+
+  // Floorplan rotation (true-north correction): turns only the plan IMAGE.
+  // Geometry stays north-up, so azimuths, wedges and the compass keep their
+  // meaning. Rotation happens in aspect-corrected (real-world) space —
+  // rotating raw unit coords on a non-square map would shear the picture.
+  function floorplanTransform() {
+    var fp = doc && doc.floorplan;
+    var rot = fp && fp.rotation_deg;
+    if (!rot) return null;
+    var a = mapAspect();
+    return "translate(0.5 0.5) scale(1 " + 1 / a + ") rotate(" + rot +
+      ") scale(1 " + a + ") translate(-0.5 -0.5)";
   }
 
   // Mirror of ground.world_position: image point -> map coords, using the
@@ -674,6 +728,7 @@
     if (!trailTracks.length) return;
     var drawn = 0, skippedCams = {};
     trailTracks.forEach(function (track) {
+      if (hiddenCams[track.camera]) return;
       var pts = [];
       (track.points || []).forEach(function (p) {
         var w = worldPosition(track.camera, p[0], p[1]);
@@ -736,6 +791,7 @@
   function drawZoneOverlays(svg) {
     if (!zonesToggle || !zonesToggle.checked || !zoneOverlays) return;
     zoneOverlays.forEach(function (z) {
+      if (hiddenCams[z.camera]) return;
       var poly = document.createElementNS(SVG_NS, "polygon");
       poly.setAttribute("points", z.points.map(function (p) {
         return p[0] + "," + p[1];
@@ -782,6 +838,7 @@
   function drawFootprints(svg) {
     if (!footprintsToggle || !footprintsToggle.checked || !footprintData) return;
     footprintData.forEach(function (f) {
+      if (hiddenCams[f.camera]) return;
       var color = TRAIL_COLORS[cameras.indexOf(f.camera) % TRAIL_COLORS.length];
       var poly = document.createElementNS(SVG_NS, "polygon");
       poly.setAttribute("points", f.points.map(function (p) {
@@ -927,6 +984,10 @@
     liveLayer.textContent = "";
     var seen = {};
     objects.forEach(function (o) {
+      // A fused object stays visible while ANY of its source cameras is
+      // shown; it disappears only when every contributor is hidden.
+      var srcs = o.cameras || [];
+      if (srcs.length && srcs.every(function (c) { return hiddenCams[c]; })) return;
       var key = (o.track_ids || []).slice().sort().join("+");
       seen[key] = true;
       var trail = liveTrails[key] = liveTrails[key] || [];
@@ -1031,9 +1092,12 @@
     if (fp && fp.ext) {
       floorplanRemove.style.display = "inline-block";
       calibrateBtn.style.display = "inline-block";
+      rotateRow.style.display = "inline-block";
+      rotateInput.value = fp.rotation_deg || "";
     } else {
       floorplanRemove.style.display = "none";
       calibrateBtn.style.display = "none";
+      rotateRow.style.display = "none";
     }
   }
 
@@ -1306,6 +1370,59 @@
   // ---- Zoom + pan -----------------------------------------------------
 
   var viewResetBtn = document.getElementById("view-reset");
+
+  // ---- Camera visibility chips + fullscreen ---------------------------
+
+  var camVisEl = document.getElementById("cam-vis");
+
+  function setCamHidden(camera, hidden) {
+    if (hidden) hiddenCams[camera] = true;
+    else delete hiddenCams[camera];
+    if (hidden && selectedCamera === camera) selectedCamera = null;
+    saveHiddenCams();
+    renderCamVis();
+    renderMap();
+  }
+
+  function renderCamVis() {
+    if (!camVisEl) return;
+    camVisEl.textContent = "";
+    if (cameras.length < 2) return;
+    cameras.forEach(function (camera) {
+      var on = !hiddenCams[camera];
+      var chip = SC.el("button", {
+        class: "vis-chip" + (on ? " on" : ""),
+        type: "button",
+        text: camera,
+        title: (on ? "Hide " : "Show ") + camera + " on the map (display only — nothing is changed or saved)",
+      });
+      chip.addEventListener("click", function () { setCamHidden(camera, on); });
+      camVisEl.appendChild(chip);
+    });
+    var anyHidden = Object.keys(hiddenCams).length > 0;
+    var all = SC.el("button", {
+      class: "vis-chip vis-all",
+      type: "button",
+      text: anyHidden ? "All on" : "All off",
+    });
+    all.addEventListener("click", function () {
+      if (anyHidden) hiddenCams = {};
+      else cameras.forEach(function (c) { hiddenCams[c] = true; });
+      if (hiddenCams[selectedCamera]) selectedCamera = null;
+      saveHiddenCams();
+      renderCamVis();
+      renderMap();
+    });
+    camVisEl.appendChild(all);
+  }
+
+  function mapIsFull() { return mapEl.classList.contains("map-full"); }
+  function toggleMapFull() {
+    mapEl.classList.toggle("map-full");
+    document.body.classList.toggle("map-full-open", mapIsFull());
+    clampView(); // the window shape just changed — re-derive the view
+    renderMap();
+  }
 
   function syncViewReset() {
     viewResetBtn.style.display = view.w !== 1 ? "inline-block" : "none";
@@ -1673,6 +1790,7 @@
       }
     }
     if (ev.key !== "Escape") return;
+    if (mapIsFull()) { toggleMapFull(); return; }
     if (activeLayer === "cameras" && placeMode) { placeMode = null; renderMap(); return; }
     if (activeLayer === "areas" && secureDrawArmed) {
       secureDrawArmed = false;
@@ -2265,6 +2383,7 @@
       applyFloorplan();
       renderOnboarding();
       renderLandmarkPills();
+      renderCamVis();
       renderMap();
       if (!cameras.length) showBanner("No cameras found in the Frigate config.", false);
       // Deep link: /cameras?landmark=<camera> jumps straight into landmark

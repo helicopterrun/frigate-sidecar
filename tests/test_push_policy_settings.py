@@ -363,6 +363,19 @@ def test_normalize_floorplan_round_trips_and_clears():
     assert cleared["floorplan"] is None
 
 
+def test_normalize_floorplan_rotation():
+    doc = policy_settings.default_settings()
+    doc["floorplan"] = {"ext": "png", "w": 1600, "h": 1200, "rotation_deg": -14.5}
+    merged = policy_settings.normalize_settings(doc)
+    assert merged["floorplan"]["rotation_deg"] == 345.5  # normalized to 0..360
+    doc["floorplan"]["rotation_deg"] = 360  # a full turn is no rotation
+    assert "rotation_deg" not in policy_settings.normalize_settings(doc)["floorplan"]
+    doc["floorplan"]["rotation_deg"] = 999
+    assert policy_settings.validate_settings(doc)
+    doc["floorplan"]["rotation_deg"] = 90
+    assert not policy_settings.validate_settings(doc)
+
+
 def test_startup_seeds_camera_optics_when_key_absent(tmp_path: Path):
     path = tmp_path / "push_settings.json"
     settings = policy_settings.startup(path)
