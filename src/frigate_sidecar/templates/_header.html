@@ -1,10 +1,10 @@
 {# Shared header with cross-page nav, included by base.html's header block.
    Templates set `active_page` to one of: 'status', 'scrub', 'triage',
-   'cameras', 'zones', 'devices', 'replay', 'motion', 'faces',
+   'cameras', 'settings', 'replay', 'motion', 'faces',
    'score_histogram', 'fps_budget', 'placement', 'zone_hits', 'debug',
    'toybox'. #}
 {% set _active = active_page|default('') %}
-{% set _analysis_pages = ('motion', 'faces', 'score_histogram', 'fps_budget', 'placement', 'zone_hits', 'devices', 'replay') %}
+{% set _analysis_pages = ('motion', 'faces', 'score_histogram', 'fps_budget', 'placement', 'zone_hits', 'replay') %}
 {# Inline icon sprite: line icons on currentColor, echoing the app's SF
    Symbols vocabulary (server.rack, film.stack, checklist, video, map). #}
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
@@ -22,7 +22,6 @@
     <a href="/scrub" class="page-link{% if _active == 'scrub' %} active{% endif %}">Scrub</a>
     <a href="/triage" class="page-link{% if _active == 'triage' %} active{% endif %}">Triage</a>
     <a href="/cameras" class="page-link{% if _active == 'cameras' %} active{% endif %}">Cameras</a>
-    <a href="/zones" class="page-link{% if _active == 'zones' %} active{% endif %}">Zones</a>
     <details class="nav-group">
       <summary class="page-link{% if _active in _analysis_pages %} active{% endif %}">Analysis</summary>
       <div class="nav-drop">
@@ -32,10 +31,10 @@
         <a href="/fps-budget" class="page-link{% if _active == 'fps_budget' %} active{% endif %}">FPS budget</a>
         <a href="/placement" class="page-link{% if _active == 'placement' %} active{% endif %}">Placement</a>
         <a href="/zone-hits" class="page-link{% if _active == 'zone_hits' %} active{% endif %}">Zone hits</a>
-        <a href="/devices" class="page-link{% if _active == 'devices' %} active{% endif %}">Devices</a>
         <a href="/replay" class="page-link{% if _active == 'replay' %} active{% endif %}">Replay</a>
       </div>
     </details>
+    <a href="/settings" class="page-link{% if _active in ('settings', 'zones', 'devices') %} active{% endif %}">Settings</a>
   </nav>
   <span class="stats">{{ summary or '' }}
     {% if counts and (counts.get('tp') or counts.get('fp') or counts.get('skip')) %}
@@ -63,5 +62,5 @@
   <a href="/scrub" class="tab{% if _active == 'scrub' %} active{% endif %}"><svg><use href="#i-scrub"/></svg><span>Scrub</span></a>
   <a href="/triage" class="tab{% if _active == 'triage' %} active{% endif %}"><svg><use href="#i-triage"/></svg><span>Triage</span></a>
   <a href="/cameras" class="tab{% if _active == 'cameras' %} active{% endif %}"><svg><use href="#i-cameras"/></svg><span>Cameras</span></a>
-  <a href="/zones" class="tab{% if _active == 'zones' %} active{% endif %}"><svg><use href="#i-zones"/></svg><span>Zones</span></a>
+  <a href="/settings" class="tab{% if _active in ('settings', 'zones', 'devices') %} active{% endif %}"><svg><use href="#i-settings"/></svg><span>Settings</span></a>
 </nav>

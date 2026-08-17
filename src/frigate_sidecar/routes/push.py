@@ -609,6 +609,14 @@ async def get_decisions(limit: int = Query(default=50, ge=1)) -> dict[str, Any]:
 
 
 _ERR_INVALID_SETTINGS = "invalid_settings"
+_ERR_STALE_REV = "stale_settings_rev"
+
+# In-process revision counter for the settings document. Both /zones and
+# /cameras (and now /settings) PUT the whole document; without this, two tabs
+# silently clobber each other last-write-wins. A web client sends back the
+# rev it loaded and gets a 409 if someone else saved in between. Clients
+# that never send `rev` (the iOS app) keep the old behavior.
+_settings_rev = 1
 
 
 @router.get("/settings")
@@ -646,6 +654,7 @@ async def get_push_settings(request: Request) -> dict[str, Any]:
 
     return {
         "settings": active,
+        "rev": _settings_rev,
         "available_cameras": available_cameras,
         "derived_headings": derived_headings,
         # Response key predates the settings-backed optics table; kept so
@@ -675,7 +684,17 @@ async def put_push_settings(request: Request) -> dict[str, Any]:
     ignored (forward compat); an unknown subject/place/family key inside a
     known block, or an invalid level/place-class value, is a 400.
     """
+    global _settings_rev
     body = await request.json()
+    client_rev = body.pop("rev", None) if isinstance(body, dict) else None
+    if isinstance(client_rev, int) and client_rev != _settings_rev:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": _ERR_STALE_REV,
+                "detail": "Settings changed elsewhere — reload before saving.",
+            },
+        )
     errors = policy_settings.validate_settings(body)
     if errors:
         raise HTTPException(
@@ -710,7 +729,8 @@ async def put_push_settings(request: Request) -> dict[str, Any]:
             merged[nullable_key] = policy_settings.get_active().get(nullable_key)
     policy_settings.save_settings(settings.push.push_settings_path, merged)
     policy_settings.apply_settings(merged)
-    return {"ok": True}
+    _settings_rev += 1
+    return {"ok": True, "rev": _settings_rev}
 
 
 _ERR_CONFIG_REFRESH = "config_refresh_failed"

@@ -134,3 +134,23 @@ def test_analysis_api_degrades_without_frigate_db(db_less_client: TestClient) ->
     r = db_less_client.get("/analysis/zone-hits", params={"days": 7})
     assert r.status_code == 503
     assert "Frigate DB not found" in r.json()["detail"]
+
+
+def test_settings_page_unifies_surfaces(client: TestClient) -> None:
+    r = client.get("/settings")
+    assert r.status_code == 200
+    # One page, all the sections.
+    for anchor in ("Zones &amp; routing", "Camera neighbors", "Push &amp; devices",
+                   "Faces", "Data", "About"):
+        assert anchor in r.text, anchor
+    # Zones editor ids so zones.js drives the section unchanged.
+    for element_id in ("zones-list", "neighbors-list", "save-btn",
+                       "export-btn", "import-file"):
+        assert element_id in r.text, element_id
+
+
+def test_zones_and_devices_redirect_to_settings(client: TestClient) -> None:
+    for path, fragment in (("/zones", "#zones"), ("/devices", "#push")):
+        r = client.get(path, follow_redirects=False)
+        assert r.status_code == 308
+        assert r.headers["location"] == "/settings" + fragment

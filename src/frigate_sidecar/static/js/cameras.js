@@ -111,6 +111,7 @@
 
   var showBanner = SC.banner(banner);
   var fetchJson = SC.fetchJson;
+  var settingsRev = null; // stale PUTs 409 instead of clobbering another tab
 
   function markDirty() { saveState.textContent = "unsaved changes"; }
 
@@ -2174,11 +2175,12 @@
       doc.camera_layout = doc.camera_layout || {};
       doc.camera_neighbors = doc.camera_neighbors || {};
       doc.camera_optics = doc.camera_optics || {};
-      await fetchJson("/v1/push/settings", {
+      var resp = await fetchJson("/v1/push/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(doc),
+        body: JSON.stringify(Object.assign({ rev: settingsRev }, doc)),
       });
+      settingsRev = resp.rev;
       saveState.textContent = "saved ✓";
       footprintData = null; // rig facts may have changed; refetch on demand
       if (footprintsToggle.checked) {
@@ -2197,6 +2199,7 @@
     try {
       var data = await fetchJson("/v1/push/settings");
       doc = data.settings;
+      settingsRev = data.rev;
       cameras = data.available_cameras || [];
       doc.camera_optics = doc.camera_optics || data.placement_deployments || {};
       placements = doc.camera_optics;

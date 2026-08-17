@@ -106,7 +106,9 @@ def test_put_persists_and_is_reflected_in_subsequent_get(client: TestClient, tmp
 
     put_resp = client.put("/v1/push/settings", json=new_settings)
     assert put_resp.status_code == 200
-    assert put_resp.json() == {"ok": True}
+    body = put_resp.json()
+    assert body["ok"] is True
+    assert isinstance(body["rev"], int)
 
     get_resp = client.get("/v1/push/settings")
     stored = get_resp.json()["settings"]
@@ -430,3 +432,23 @@ def test_config_refresh_propagates_upstream_denial(
     client = _refresh_client(frigate_db_path, sidecar_db_path, tmp_path, 401)
     resp = client.post("/v1/push/frigate-config/refresh")
     assert resp.status_code == 502
+
+
+def test_stale_rev_conflicts_instead_of_clobbering(client: TestClient):
+    """Two tabs edit the same document: the second save with the old rev must
+    409, not silently overwrite the first."""
+    rev = client.get("/v1/push/settings").json()["rev"]
+    doc = policy_settings.default_settings()
+
+    first = client.put("/v1/push/settings", json={**doc, "rev": rev})
+    assert first.status_code == 200
+    new_rev = first.json()["rev"]
+    assert new_rev != rev
+
+    second = client.put("/v1/push/settings", json={**doc, "rev": rev})
+    assert second.status_code == 409
+    assert second.json()["detail"]["error"] == "stale_settings_rev"
+
+    # A client that never sends rev (the iOS app) keeps working.
+    legacy = client.put("/v1/push/settings", json=doc)
+    assert legacy.status_code == 200

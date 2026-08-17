@@ -23,6 +23,7 @@
   var saveState = document.getElementById("save-state");
 
   var doc = null; // the settings document we mutate and PUT back
+  var rev = null; // settings revision — stale PUTs 409 instead of clobbering
   var dirty = false;
 
   var showBanner = SC.banner(banner);
@@ -186,11 +187,12 @@
       // Send the whole settings doc; camera_neighbors is sticky server-side
       // when absent, so it must always be sent explicitly (even empty).
       if (!doc.camera_neighbors) doc.camera_neighbors = {};
-      await fetchJson("/v1/push/settings", {
+      var resp = await fetchJson("/v1/push/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(doc),
+        body: JSON.stringify(Object.assign({ rev: rev }, doc)),
       });
+      rev = resp.rev;
       dirty = false;
       saveState.textContent = "saved ✓";
     } catch (err) {
@@ -282,6 +284,7 @@
     try {
       var data = await fetchJson("/v1/push/settings");
       doc = data.settings;
+      rev = data.rev;
       zonesList.textContent = "";
       zonesList.classList.remove("skeleton");
       (data.available_zones || []).forEach(function (zone) {
