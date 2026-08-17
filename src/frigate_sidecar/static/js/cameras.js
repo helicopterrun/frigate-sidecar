@@ -450,6 +450,41 @@
       pt.style.pointerEvents = "none";
       camGroup.appendChild(pt);
 
+      // The dot is the natural thing to grab to MOVE the camera — an
+      // invisible fat hit circle over it does exactly that (the pie
+      // underneath would otherwise swallow the drag and rotate instead).
+      var moveGrab = document.createElementNS(SVG_NS, "circle");
+      moveGrab.setAttribute("cx", entry.x); moveGrab.setAttribute("cy", entry.y);
+      moveGrab.setAttribute("r", "0.03");
+      moveGrab.setAttribute("fill", "transparent");
+      moveGrab.style.pointerEvents = "fill";
+      moveGrab.style.cursor = "move";
+      moveGrab.style.touchAction = "none";
+      moveGrab.setAttribute("aria-label", "move " + camera);
+      moveGrab.addEventListener("pointerdown", function (ev) {
+        ev.stopPropagation();
+        selectedCamera = camera;
+        moveGrab.setPointerCapture(ev.pointerId);
+        var movedPt = false;
+        function mm(mv) {
+          movedPt = true;
+          var rect = mapEl.getBoundingClientRect();
+          var e = ensureEntry(camera, i);
+          e.x = +Math.min(1, Math.max(0, (mv.clientX - rect.left) / rect.width)).toFixed(4);
+          e.y = +Math.min(1, Math.max(0, (mv.clientY - rect.top) / rect.height)).toFixed(4);
+          renderMap();
+        }
+        function uu() {
+          moveGrab.removeEventListener("pointermove", mm);
+          moveGrab.removeEventListener("pointerup", uu);
+          if (movedPt) markDirty();
+          renderMap();
+        }
+        moveGrab.addEventListener("pointermove", mm);
+        moveGrab.addEventListener("pointerup", uu);
+      });
+      camGroup.appendChild(moveGrab);
+
       // Rotation wheel: shown only for the selected camera, so "turn" has
       // its own visible control distinct from "move" (dragging the pill).
       // Drag anywhere on the ring — or its knob — to swing the azimuth.
