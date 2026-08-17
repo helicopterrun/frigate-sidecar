@@ -2,8 +2,10 @@
 (function () {
   var PLACES = ["street", "yard", "doors", "private", "off_limits"];
   var PLACE_LABELS = {
-    street: "Street / public",
-    yard: "Yard",
+    // Display names mirror the app's (AttentionSettingsModel.swift) so the
+    // two surfaces speak one vocabulary.
+    street: "Public",
+    yard: "Semi-private",
     doors: "Entry / exit",
     private: "Private",
     off_limits: "Restricted",
