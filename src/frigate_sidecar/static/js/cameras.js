@@ -1,7 +1,6 @@
 // Camera calibration: per-camera heading vectors + layout map.
 (function () {
   var banner = document.getElementById("cameras-banner");
-  var cardsEl = document.getElementById("camera-cards");
   var mapEl = document.getElementById("layout-map");
   var saveBtn = document.getElementById("save-btn");
   var saveState = document.getElementById("save-state");
@@ -134,177 +133,7 @@
     return data;
   }
 
-  // ---- Heading cards -------------------------------------------------
-
   var SVG_NS = "http://www.w3.org/2000/svg";
-  var cardRefs = {}; // camera -> {svg, status}
-
-  // Mirror of the sidecar's derived_camera_heading: world direction
-  // camera -> secure-area center, decomposed into the camera's view axis
-  // (ahead => up in frame) and right axis.
-  function derivedHeading(camera) {
-    var entry = (doc.camera_layout || {})[camera];
-    var area = doc.secure_area;
-    if (!entry || entry.azimuth === undefined || !area) return null;
-    var cx = (area.x0 + area.x1) / 2, cy = (area.y0 + area.y1) / 2;
-    var wx = cx - entry.x, wy = cy - entry.y;
-    if (Math.hypot(wx, wy) < 1e-6) return null;
-    var rad = (entry.azimuth * Math.PI) / 180;
-    var along = wx * Math.sin(rad) + wy * -Math.cos(rad);
-    var rightC = wx * Math.cos(rad) + wy * Math.sin(rad);
-    var n = Math.hypot(along, rightC);
-    if (n < 1e-6) return null;
-    return { dx: rightC / n, dy: -along / n };
-  }
-
-  function effectiveHeading(camera) {
-    var manual = (doc.camera_headings || {})[camera];
-    if (manual) return { vec: manual, auto: false };
-    var derived = derivedHeading(camera);
-    if (derived) return { vec: derived, auto: true };
-    return { vec: null, auto: false };
-  }
-
-  function drawArrow(svg, vec, isAuto) {
-    // vec: {dx, dy} unit vector; draw centered, length 0.18 in unit space.
-    while (svg.lastChild && svg.lastChild.tagName !== "defs") {
-      svg.removeChild(svg.lastChild);
-    }
-    if (!vec) return;
-    var cx = 0.5, cy = 0.5, len = 0.18;
-    var x2 = cx + vec.dx * len, y2 = cy + vec.dy * len;
-    var line = document.createElementNS(SVG_NS, "line");
-    line.setAttribute("x1", cx); line.setAttribute("y1", cy);
-    line.setAttribute("x2", x2); line.setAttribute("y2", y2);
-    line.setAttribute("stroke", "var(--accent, #ffb454)");
-    line.setAttribute("stroke-width", "0.012");
-    if (isAuto) {
-      line.setAttribute("stroke-dasharray", "0.03 0.018");
-      line.setAttribute("stroke-opacity", "0.8");
-    }
-    line.setAttribute("marker-end", "url(#arrowhead)");
-    svg.appendChild(line);
-    var dot = document.createElementNS(SVG_NS, "circle");
-    dot.setAttribute("cx", cx); dot.setAttribute("cy", cy);
-    dot.setAttribute("r", "0.015");
-    dot.setAttribute("fill", "var(--accent, #ffb454)");
-    svg.appendChild(dot);
-  }
-
-  function refreshCard(camera) {
-    var refs = cardRefs[camera];
-    if (!refs) return;
-    var eff = effectiveHeading(camera);
-    drawArrow(refs.svg, eff.vec, eff.auto);
-    refs.status.textContent = eff.vec
-      ? (eff.auto ? "auto — derived from map pie + secure area" : "manual arrow")
-      : "no direction — draw here, or aim its pie with a secure area drawn";
-  }
-
-  function refreshAllCards() {
-    Object.keys(cardRefs).forEach(refreshCard);
-  }
-
-  function renderCard(camera) {
-    var card = document.createElement("div");
-    card.className = "stat-card";
-    card.style.minWidth = "300px";
-
-    var label = document.createElement("div");
-    label.className = "stat-label";
-    label.textContent = camera;
-    card.appendChild(label);
-
-    var wrap = document.createElement("div");
-    wrap.style.cssText = "position:relative;margin-top:0.4em;touch-action:none";
-    var img = document.createElement("img");
-    img.src = "/api/" + encodeURIComponent(camera) + "/latest.jpg?h=270";
-    img.alt = camera;
-    img.style.cssText = "display:block;width:100%;border-radius:4px";
-    wrap.appendChild(img);
-
-    var svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("viewBox", "0 0 1 1");
-    svg.setAttribute("preserveAspectRatio", "none");
-    svg.style.cssText = "position:absolute;inset:0;width:100%;height:100%;cursor:crosshair";
-    if (heatmapURL) {
-      var heat = document.createElementNS(SVG_NS, "image");
-      heat.setAttribute("x", 0); heat.setAttribute("y", 0);
-      heat.setAttribute("width", 1); heat.setAttribute("height", 1);
-      heat.setAttribute("preserveAspectRatio", "none");
-      heat.setAttribute("href", heatmapURL);
-      svg.appendChild(heat);
-    }
-    var defs = document.createElementNS(SVG_NS, "defs");
-    var marker = document.createElementNS(SVG_NS, "marker");
-    marker.setAttribute("id", "arrowhead");
-    marker.setAttribute("viewBox", "0 0 10 10");
-    marker.setAttribute("refX", "8"); marker.setAttribute("refY", "5");
-    marker.setAttribute("markerWidth", "5"); marker.setAttribute("markerHeight", "5");
-    marker.setAttribute("orient", "auto-start-reverse");
-    var tip = document.createElementNS(SVG_NS, "path");
-    tip.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
-    tip.setAttribute("fill", "var(--accent, #ffb454)");
-    marker.appendChild(tip);
-    defs.appendChild(marker);
-    svg.appendChild(defs);
-    wrap.appendChild(svg);
-    card.appendChild(wrap);
-
-    var status = document.createElement("div");
-    status.className = "help";
-    status.style.margin = "0.3em 0 0";
-    card.appendChild(status);
-    cardRefs[camera] = { svg: svg, status: status };
-    refreshCard(camera);
-
-    var dragStart = null;
-    function toUnit(ev) {
-      var rect = wrap.getBoundingClientRect();
-      return {
-        x: Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width)),
-        y: Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height)),
-      };
-    }
-    svg.addEventListener("pointerdown", function (ev) {
-      dragStart = toUnit(ev);
-      svg.setPointerCapture(ev.pointerId);
-    });
-    svg.addEventListener("pointermove", function (ev) {
-      if (!dragStart) return;
-      var p = toUnit(ev);
-      var dx = p.x - dragStart.x, dy = p.y - dragStart.y;
-      var len = Math.hypot(dx, dy);
-      if (len > 0.02) drawArrow(svg, { dx: dx / len, dy: dy / len });
-    });
-    svg.addEventListener("pointerup", function (ev) {
-      if (!dragStart) return;
-      var p = toUnit(ev);
-      var dx = p.x - dragStart.x, dy = p.y - dragStart.y;
-      var len = Math.hypot(dx, dy);
-      dragStart = null;
-      if (len <= 0.02) return; // a click, not a drag
-      if (!doc.camera_headings) doc.camera_headings = {};
-      doc.camera_headings[camera] = {
-        dx: +(dx / len).toFixed(4), dy: +(dy / len).toFixed(4),
-      };
-      refreshCard(camera);
-      markDirty();
-    });
-
-    var clear = document.createElement("button");
-    clear.textContent = "Clear";
-    clear.title = "Remove the manual arrow (falls back to the map-derived one if available)";
-    clear.className = "btn-primary";
-    clear.style.marginTop = "0.4em";
-    clear.addEventListener("click", function () {
-      if (doc.camera_headings) delete doc.camera_headings[camera];
-      refreshCard(camera);
-      markDirty();
-    });
-    card.appendChild(clear);
-    return card;
-  }
 
   // ---- Layout map (top-down, north = up) -----------------------------
 
@@ -400,6 +229,14 @@
       img.setAttribute("preserveAspectRatio", "none");
       img.setAttribute("href", fpImg);
       svg.appendChild(img);
+    }
+    if (heatmapURL) {
+      var heat = document.createElementNS(SVG_NS, "image");
+      heat.setAttribute("x", 0); heat.setAttribute("y", 0);
+      heat.setAttribute("width", 1); heat.setAttribute("height", 1);
+      heat.setAttribute("preserveAspectRatio", "none");
+      heat.setAttribute("href", heatmapURL);
+      svg.appendChild(heat);
     }
     var defs = document.createElementNS(SVG_NS, "defs");
     var marker = document.createElementNS(SVG_NS, "marker");
@@ -664,7 +501,6 @@
     mapEl.style.backgroundColor = (coverageToggle && coverageToggle.checked)
       ? "var(--deep, #0a0e14)" : "var(--surface)";
     mapEl.appendChild(svg);
-    refreshAllCards(); // pie/secure edits change the derived arrows live
 
     // Secure area rectangle (drawn by dragging empty map space).
     if (doc.secure_area) {
@@ -2258,10 +2094,6 @@
       doc.camera_optics = doc.camera_optics || data.placement_deployments || {};
       placements = doc.camera_optics;
       mapScaleInput.value = doc.map_scale_ft || "";
-      cardsEl.textContent = "";
-      cameras.forEach(function (camera) {
-        cardsEl.appendChild(renderCard(camera));
-      });
       applyFloorplan();
       renderOnboarding();
       renderMap();

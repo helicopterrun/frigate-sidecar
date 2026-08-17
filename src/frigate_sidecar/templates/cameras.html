@@ -5,11 +5,9 @@
 {% block body %}
 <main>
   <p class="help page-intro">
-    <strong>Direction:</strong> aim each camera's pie on the map below and
-    draw the secure area — arrows appear here automatically (dashed = derived
-    from the map). Drag on a snapshot to override with a manual arrow;
-    Clear reverts to the derived one. Movement along the arrow reads as
-    “approaching”, against it as “leaving”.
+    Aim each camera's pie on the map and draw the secure area — movement
+    heading (“approaching” / “leaving”) derives from that geometry
+    automatically.
   </p>
 
   <div id="cameras-banner" class="help page-intro" style="display:none"></div> {# JS-toggled #}
@@ -24,8 +22,6 @@
     </p>
     <div id="onboard-cards" class="stat-row"></div>
   </div>
-
-  <div id="camera-cards" class="stat-row"></div>
 
   <h3 class="section-title">Layout <span class="help">— top-down, north is up</span></h3>
   <p class="help page-intro">
