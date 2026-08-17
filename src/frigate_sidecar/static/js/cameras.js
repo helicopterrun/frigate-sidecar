@@ -27,9 +27,13 @@
   // keeps its own aspect on screen whatever shape the window is. Lives
   // outside renderMap so redraws never reset the view.
   var view = { x: 0, y: 0, w: 1 };
-  // Screen-constant size: a stroke/font/radius expressed as a viewBox
-  // fraction must shrink as the window narrows or it balloons on zoom.
-  function sz(v) { return v * view.w; }
+  // Marker/stroke/font size in viewBox units. Fixed in MAP space (markers
+  // grow as you zoom in, shrink as you zoom out), normalized to the old
+  // 560px-wide map so everything keeps its familiar size at 1x no matter
+  // how wide the window is. mapElW is cached per render — sz() runs in
+  // tight loops.
+  var mapElW = 560;
+  function sz(v) { return v * (560 / mapElW); }
   // Visible unit-height: window shape over content shape. At w=1 a map
   // taller than the window pans vertically; a shorter one letterboxes.
   function winAspect() {
@@ -210,6 +214,7 @@
 
   function renderMap() {
     mapEl.textContent = "";
+    mapElW = mapEl.clientWidth || mapElW;
 
     // Wedge layer + compass rose. The direction arrow and the two wedge
     // edges are the manipulation surfaces — same feel as drawing the
