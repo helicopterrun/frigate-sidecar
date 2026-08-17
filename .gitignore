@@ -54,3 +54,4 @@ config/floorplan.*
 src/frigate_sidecar/static/triage_batch*.html
 config/mqtt-capture.jsonl*
 config/push_settings.json
+config/push_settings.json.bak*
