@@ -12,7 +12,9 @@
   };
   var SUBJECTS = ["person", "vehicle", "animal", "thing"];
   var LEVELS = ["log", "quiet", "notify", "urgent"];
-  var LEVEL_LABELS = { log: "Logged", quiet: "Noted", notify: "Announced", urgent: "Urgent" };
+  // Override values are routing *levels*, displayed in the app's outcome
+  // vocabulary (Log/Glance/Notify/Alarm — glance ⇄ quiet, alarm ⇄ urgent).
+  var LEVEL_LABELS = { log: "Log", quiet: "Glance", notify: "Notify", urgent: "Alarm" };
 
   var banner = document.getElementById("zones-banner");
   var zonesList = document.getElementById("zones-list");
