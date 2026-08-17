@@ -329,11 +329,12 @@
       el.style.touchAction = "none";
       el.addEventListener("pointerdown", function (ev) {
         ev.stopPropagation();
-        // Select WITHOUT re-rendering: renderMap() here would detach the
-        // element mid-gesture and kill the drag. The move/up handlers
-        // re-render, which also paints the new selection.
+        ev.preventDefault();
+        // Select WITHOUT re-rendering here, and track the gesture on
+        // window: renderMap() rebuilds the SVG mid-drag, so listeners on
+        // the (detached) element itself would go silent after the first
+        // frame — the "moves a tiny bit then stops" bug.
         selectedCamera = camera;
-        el.setPointerCapture(ev.pointerId);
         function move(mv) {
           var e = ensureEntry(camera, i);
           var az = pointerAzimuth(mv, e);
@@ -342,13 +343,13 @@
           renderMap();
         }
         function up() {
-          el.removeEventListener("pointermove", move);
-          el.removeEventListener("pointerup", up);
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
           markDirty();
           renderMap();
         }
-        el.addEventListener("pointermove", move);
-        el.addEventListener("pointerup", up);
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
       });
     }
 
@@ -463,8 +464,8 @@
       moveGrab.setAttribute("aria-label", "move " + camera);
       moveGrab.addEventListener("pointerdown", function (ev) {
         ev.stopPropagation();
+        ev.preventDefault();
         selectedCamera = camera;
-        moveGrab.setPointerCapture(ev.pointerId);
         var movedPt = false;
         function mm(mv) {
           movedPt = true;
@@ -475,13 +476,13 @@
           renderMap();
         }
         function uu() {
-          moveGrab.removeEventListener("pointermove", mm);
-          moveGrab.removeEventListener("pointerup", uu);
+          window.removeEventListener("pointermove", mm);
+          window.removeEventListener("pointerup", uu);
           if (movedPt) markDirty();
           renderMap();
         }
-        moveGrab.addEventListener("pointermove", mm);
-        moveGrab.addEventListener("pointerup", uu);
+        window.addEventListener("pointermove", mm);
+        window.addEventListener("pointerup", uu);
       });
       camGroup.appendChild(moveGrab);
 
@@ -608,10 +609,11 @@
       dot.style.left = pos.x * 100 + "%";
       dot.style.top = pos.y * 100 + "%";
       dot.addEventListener("pointerdown", function (ev) {
-        // No renderMap() here — rebuilding would detach this pill and kill
-        // the drag before it starts. Selection paints on pointerup.
+        // Gesture tracked on window — the pill survives (no mid-drag
+        // rebuild here), but window listeners are the uniform, un-killable
+        // pattern all three drags share.
+        ev.preventDefault();
         selectedCamera = camera;
-        dot.setPointerCapture(ev.pointerId);
         var moved = false;
         function move(mv) {
           moved = true;
@@ -625,13 +627,13 @@
           dot.style.top = y * 100 + "%";
         }
         function up() {
-          dot.removeEventListener("pointermove", move);
-          dot.removeEventListener("pointerup", up);
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
           if (moved) markDirty();
           renderMap();
         }
-        dot.addEventListener("pointermove", move);
-        dot.addEventListener("pointerup", up);
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
       });
       mapEl.appendChild(dot);
     });
