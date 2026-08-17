@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -203,31 +202,10 @@ def _get_filter_options(frigate_db: str | Path, sidecar_db: str | Path) -> dict[
     }
 
 
-def _format_ts(ts: float | None) -> str:
-    if not ts:
-        return "—"
-    try:
-        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
-    except (TypeError, ValueError):
-        return str(ts)
 
 
-def _format_score(s: float | None) -> str:
-    if s is None:
-        return "—"
-    try:
-        return f"{float(s):.3f}"
-    except (TypeError, ValueError):
-        return str(s)
 
 
-def _format_duration(start: float | None, end: float | None) -> str:
-    if not start or not end:
-        return "—"
-    try:
-        return f"{float(end) - float(start):.1f}s"
-    except (TypeError, ValueError):
-        return "—"
 
 
 def _zone_overlay(
@@ -293,9 +271,6 @@ def list_view(
             "counts": opts["counts"],
             "filters": filters,
             "frigate_base": s.frigate.base_url,
-            "fmt_ts": _format_ts,
-            "fmt_score": _format_score,
-            "fmt_duration": _format_duration,
         },
     )
 
@@ -355,9 +330,6 @@ def detail_view(
             "zone_polygons": polygons,
             "zone_legend": zone_legend,
             "filters_qs": filters_qs,
-            "fmt_ts": _format_ts,
-            "fmt_score": _format_score,
-            "fmt_duration": _format_duration,
         },
     )
 

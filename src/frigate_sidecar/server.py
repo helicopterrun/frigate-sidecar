@@ -12,11 +12,12 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from frigate_sidecar import __version__
+from frigate_sidecar import __version__, fmt
 from frigate_sidecar.auth import FrigateAuthMiddleware
 from frigate_sidecar.config import Settings, load_settings
 from frigate_sidecar.db import FrigateDBMissingError
@@ -51,6 +52,19 @@ from frigate_sidecar.routes import zones_page as zones_page_routes
 _PACKAGE_ROOT = Path(__file__).parent
 _TEMPLATES_DIR = _PACKAGE_ROOT / "templates"
 _STATIC_DIR = _PACKAGE_ROOT / "static"
+
+
+class _CachedStaticFiles(StaticFiles):
+    """StaticFiles with immutable caching.
+
+    Safe because every asset reference carries `?v={{ asset_v }}` — a deploy
+    changes the URL, so the browser never has to revalidate the old one.
+    """
+
+    def file_response(self, *args: object, **kwargs: object) -> Response:
+        response = super().file_response(*args, **kwargs)  # type: ignore[arg-type]
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
 # The proxy's catch-all: everything registered before it is a route the sidecar
 # owns and therefore gates behind a Frigate session (auth.py).
@@ -371,6 +385,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if _p.is_file():
             _asset_v = max(_asset_v, int(_p.stat().st_mtime))
     app.state.templates.env.globals["asset_v"] = _asset_v
+    app.state.templates.env.globals.update(
+        {
+            "fmt_ts": fmt.fmt_ts,
+            "fmt_score": fmt.fmt_score,
+            "fmt_duration": fmt.fmt_duration,
+            "fmt_bytes": fmt.fmt_bytes,
+        }
+    )
     app.state.plus_enabled = False
 
     @app.exception_handler(FrigateDBMissingError)
@@ -389,7 +411,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return JSONResponse(status_code=503, content={"detail": str(exc)})
 
-    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+    app.mount("/static", _CachedStaticFiles(directory=str(_STATIC_DIR)), name="static")
     app.include_router(health_routes.router)
     app.include_router(status_routes.router)
     app.include_router(scrub_ui_routes.router)
@@ -416,6 +438,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # auth and its 401 has to reach the client).
     owned_routes = [r for r in app.routes if getattr(r, "path", None) != _PROXY_CATCH_ALL]
     app.add_middleware(FrigateAuthMiddleware, owned_routes=owned_routes)
+    # Compress HTML/JSON responses (auth runs inside, gzip outside).
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     # Proxy is a catch-all (/{path:path}) and MUST be registered last so every
     # other route -- /v1/*, /static, /healthz, the sidecar's own pages -- wins

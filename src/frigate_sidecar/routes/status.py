@@ -31,17 +31,6 @@ def _file_size(path: object) -> int | None:
         return None
 
 
-def _fmt_bytes(n: int | None) -> str:
-    if n is None:
-        return "—"
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return f"{size:.0f} {unit}" if unit in ("B", "KB") else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{n} B"
-
-
 async def _probe_frigate(base_url: str) -> dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_S) as client:
@@ -164,5 +153,5 @@ async def status_page(request: Request) -> Any:
     return templates.TemplateResponse(
         request,
         "status.html",
-        {"status": status, "fmt_bytes": _fmt_bytes, "counts": {}},
+        {"status": status, "counts": {}},
     )
