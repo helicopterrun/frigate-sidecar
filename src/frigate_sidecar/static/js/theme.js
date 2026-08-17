@@ -4,6 +4,24 @@
 // picker.
 (function () {
   var KEY = "sidecar.theme";
+
+  // Keep the browser-chrome color (iOS Safari toolbar / status bar) in step
+  // with the active theme's --surface.
+  var SURFACES = {
+    "": "#1C1D24",
+    "kronborg-signal": "#0A2845",
+    "moss-terracotta": "#27362A",
+    "oresund-harbor": "#11324D",
+    "midnight-fjord": "#0C2335",
+  };
+  function syncThemeColor() {
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (!meta) return;
+    var theme = document.documentElement.getAttribute("data-theme") || "";
+    meta.setAttribute("content", SURFACES[theme] || SURFACES[""]);
+  }
+  syncThemeColor();
+
   var picker = document.getElementById("theme-picker");
   if (!picker) return;
   // Elsinore became the default (value "") on 2026-08-15; migrate the old
@@ -21,5 +39,6 @@
       localStorage.removeItem(KEY);
       document.documentElement.removeAttribute("data-theme");
     }
+    syncThemeColor();
   });
 })();

@@ -97,9 +97,17 @@ button, a, select, input, summary { transition: background-color var(--dur-fast)
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 }
+/* iOS Safari: no grey tap flash (buttons have their own :active states),
+   and rubber-band overscroll shows panel, not white. */
+html { background: var(--panel); -webkit-tap-highlight-color: transparent; }
 /* Monospaced everywhere, like the app: "an instrument, not a document". */
 body { font-family: var(--font-mono); font-variant-numeric: tabular-nums; margin: 0; background: var(--panel); color: var(--text); }
-header { padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--stroke); display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+/* Pressed-state feedback where hover can't exist (touch). */
+button:active, .btn:active, .page-link:active, .tabbar .tab:active { opacity: 0.75; }
+/* Safe-area aware: in home-screen (standalone) mode the status bar overlays
+   the page, so the header pads itself down past it; landscape notches pad
+   the sides. All zero in a regular desktop browser. */
+header { padding: calc(12px + env(safe-area-inset-top, 0px)) max(20px, env(safe-area-inset-right, 0px)) 12px max(20px, env(safe-area-inset-left, 0px)); background: var(--surface); border-bottom: 1px solid var(--stroke); display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
 header h1 { margin: 0; font-size: 16px; font-weight: 600; }
 header .stats { font-size: 12px; color: var(--muted); }
 header .session { font-size: 12px; }
@@ -131,7 +139,9 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
     display: flex; justify-content: space-around;
     background: var(--surface); border-top: 1px solid var(--stroke);
-    padding: 6px 0 calc(6px + env(safe-area-inset-bottom, 0px));
+    padding: 6px env(safe-area-inset-right, 0px)
+             calc(6px + env(safe-area-inset-bottom, 0px))
+             env(safe-area-inset-left, 0px);
   }
   .tabbar .tab {
     display: flex; flex-direction: column; align-items: center; gap: 2px;
@@ -227,7 +237,11 @@ details.advanced summary:hover { color: var(--text); }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
 .card { background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); overflow: hidden; cursor: pointer; transition: transform 0.1s, border-color 0.1s; text-decoration: none; color: inherit; display: block; }
-.card:hover { transform: translateY(-2px); border-color: var(--accent); }
+/* Hover lift only where hover exists — on touch it sticks after the tap. */
+@media (hover: hover) {
+  .card:hover { transform: translateY(-2px); border-color: var(--accent); }
+}
+.card:active { border-color: var(--accent); }
 .card .thumb { width: 100%; aspect-ratio: 16/9; background: var(--deep); display: block; object-fit: cover; }
 .card .thumb-missing { display: flex; align-items: center; justify-content: center; color: var(--muted-3); font-size: 12px; }
 .card .meta { padding: 8px 10px; font-size: 12px; }
@@ -305,9 +319,22 @@ a { color: var(--accent); }
 
 /* --- Mobile / narrow-window layout (phones in portrait) --- */
 @media (max-width: 720px) {
-  main { padding: 12px; }
-  header { padding: 10px 12px; gap: 10px; }
+  main { padding: 12px max(12px, env(safe-area-inset-right, 0px)) 12px max(12px, env(safe-area-inset-left, 0px)); }
+  header { padding: calc(10px + env(safe-area-inset-top, 0px)) 12px 10px; gap: 10px; }
   header h1 { font-size: 15px; }
+
+  /* iOS Safari zooms the page when a focused control's font-size is under
+     16px. Keep controls at 16px on phones so focusing a field never zooms. */
+  input[type=text], input[type=number], input[type=search], select, textarea {
+    font-size: 16px;
+  }
+
+  /* Wide data tables scroll inside themselves instead of stretching the
+     page sideways. */
+  .motion-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+
+  /* Toast must clear the bottom tab bar. */
+  .sc-toast { bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
   /* Push session input back into the main row instead of margin-left:auto
      so it doesn't get pinned to the right edge on a narrow header. */
   header .session { margin-left: 0; width: 100%; }
