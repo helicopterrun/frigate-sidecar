@@ -16,6 +16,7 @@ try { var t = localStorage.getItem("sidecar.theme");
 <body{% block body_attrs %}{% endblock %}>
 {% block header %}{% include "_header.html" %}{% endblock %}
 {% block body %}{% endblock %}
+<script src="/static/js/util.js?v={{ asset_v }}"></script>
 <script src="/static/js/theme.js?v={{ asset_v }}"></script>
 {% block scripts %}{% endblock %}
 </body>

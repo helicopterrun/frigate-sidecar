@@ -25,48 +25,15 @@
   var doc = null; // the settings document we mutate and PUT back
   var dirty = false;
 
-  function showBanner(text, isError) {
-    banner.textContent = text;
-    banner.style.display = "block";
-    banner.style.color = isError ? "var(--warn, #e8a735)" : "var(--muted)";
-  }
+  var showBanner = SC.banner(banner);
+  var fetchJson = SC.fetchJson;
+  var el = SC.el;
 
   function markDirty() {
     dirty = true;
     saveState.textContent = "unsaved changes";
   }
 
-  async function fetchJson(url, opts) {
-    var resp = await fetch(url, opts);
-    // Text first: an HTML error page must surface readably, not as a
-    // SyntaxError (same idiom as replay.js).
-    var raw = await resp.text();
-    var data;
-    try {
-      data = JSON.parse(raw);
-    } catch (e) {
-      throw new Error("HTTP " + resp.status + " — " + raw.slice(0, 200));
-    }
-    if (resp.status === 401) {
-      throw new Error("Not authorized — open Frigate and log in first, then reload this page.");
-    }
-    if (!resp.ok) {
-      var detail = data && data.detail;
-      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail || data));
-    }
-    return data;
-  }
-
-  function el(tag, attrs, children) {
-    var node = document.createElement(tag);
-    Object.keys(attrs || {}).forEach(function (k) {
-      if (k === "text") node.textContent = attrs[k];
-      else if (k === "class") node.className = attrs[k];
-      else node.setAttribute(k, attrs[k]);
-    });
-    (children || []).forEach(function (c) { node.appendChild(c); });
-    return node;
-  }
 
   function renderZone(zone) {
     var card = el("div", { class: "stat-card", style: "min-width:280px" });

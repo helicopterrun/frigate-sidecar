@@ -1,5 +1,5 @@
 // Test-push buttons on the devices page.
-document.querySelectorAll(".btn-primary").forEach(function (btn) {
+document.querySelectorAll("button[data-token]").forEach(function (btn) {
   btn.addEventListener("click", async function () {
     btn.disabled = true;
     var original = btn.textContent;

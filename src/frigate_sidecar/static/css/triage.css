@@ -474,6 +474,18 @@ a { color: var(--accent); }
 .mono-id { font-family: var(--font-mono); font-size: 11px; }
 .hotkey-list { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 
+/* ----- Toast (util.js SC.toast) ----- */
+.sc-toast {
+  position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  transform: translate(-50%, 8px); z-index: 100;
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--stroke);
+  border-radius: var(--radius-md); padding: 10px 16px; font-size: var(--text-base);
+  max-width: min(90vw, 480px); opacity: 0; pointer-events: none;
+  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.sc-toast.show { opacity: 1; transform: translate(-50%, 0); }
+.sc-toast.error { border-color: var(--danger); color: var(--danger-text); }
+
 /* ----- Debug page ----- */
 .debug-json { margin: 0; font-size: 12px; overflow-x: auto; }
 

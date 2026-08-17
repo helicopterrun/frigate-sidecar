@@ -1,11 +1,5 @@
 // Triage detail: label/clear keyboard shortcuts, prev/next nav, zone overlay toggle.
-const sessionInput = document.getElementById('session');
-if (sessionInput) {
-  sessionInput.value = localStorage.getItem('triage_session') || '';
-  sessionInput.addEventListener('change', () => {
-    localStorage.setItem('triage_session', sessionInput.value);
-  });
-}
+SC.bindSessionInput();
 
 const eventId = document.body.dataset.eventId;
 const prevUrl = document.body.dataset.prevUrl;
@@ -39,7 +33,7 @@ async function applyLabel(label) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({event_id: eventId, label, note, session, submit_plus: submitPlus})
   });
-  if (!res.ok) { alert('Save failed: ' + await res.text()); return; }
+  if (!res.ok) { SC.toast('Save failed: ' + await res.text(), true); return; }
   const result = await res.json();
   const plus = result.plus || {status: 'not_requested'};
 
@@ -63,7 +57,7 @@ async function clearLabel() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({event_id: eventId})
   });
-  if (!res.ok) { alert('Clear failed: ' + await res.text()); return; }
+  if (!res.ok) { SC.toast('Clear failed: ' + await res.text(), true); return; }
   window.location.reload();
 }
 

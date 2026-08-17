@@ -109,29 +109,10 @@
       ? CARDINAL_DEG[p.faces] : 0;
   }
 
-  function showBanner(text, isError) {
-    banner.textContent = text;
-    banner.style.display = "block";
-    banner.style.color = isError ? "var(--warn, #e8a735)" : "var(--muted)";
-  }
+  var showBanner = SC.banner(banner);
+  var fetchJson = SC.fetchJson;
 
   function markDirty() { saveState.textContent = "unsaved changes"; }
-
-  async function fetchJson(url, opts) {
-    var resp = await fetch(url, opts);
-    var raw = await resp.text();
-    var data;
-    try { data = JSON.parse(raw); }
-    catch (e) { throw new Error("HTTP " + resp.status + " — " + raw.slice(0, 200)); }
-    if (resp.status === 401) {
-      throw new Error("Not authorized — open Frigate and log in first, then reload this page.");
-    }
-    if (!resp.ok) {
-      var detail = data && data.detail;
-      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail || data));
-    }
-    return data;
-  }
 
   var SVG_NS = "http://www.w3.org/2000/svg";
 

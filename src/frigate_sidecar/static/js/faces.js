@@ -5,7 +5,7 @@ async function decide(card, action) {
   const body = { filename, action };
   if (action === 'promote') {
     const name = card.querySelector('.name').value.trim();
-    if (!name) { alert('Enter a name to promote into.'); return; }
+    if (!name) { SC.toast('Enter a name to promote into.', true); return; }
     body.name = name;
   }
   const res = await fetch('/faces/decide', {
@@ -16,7 +16,7 @@ async function decide(card, action) {
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (e) { /* ignore */ }
-    alert(action + ' failed: ' + detail);
+    SC.toast(action + ' failed: ' + detail, true);
     return;
   }
   card.remove();
@@ -37,7 +37,7 @@ if (rescan) {
       if (!res.ok) {
         let detail = res.statusText;
         try { detail = (await res.json()).detail || detail; } catch (e) { /* ignore */ }
-        alert('Scan failed: ' + detail);
+        SC.toast('Scan failed: ' + detail, true);
         return;
       }
       window.location.reload();
