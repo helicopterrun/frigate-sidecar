@@ -10,13 +10,13 @@
 try { var t = localStorage.getItem("sidecar.theme");
       if (t) document.documentElement.setAttribute("data-theme", t); } catch (e) {}
 </script>
-<link rel="stylesheet" href="/static/css/triage.css">
+<link rel="stylesheet" href="/static/css/triage.css?v={{ asset_v }}">
 {% block head %}{% endblock %}
 </head>
 <body{% block body_attrs %}{% endblock %}>
 {% block header %}{% include "_header.html" %}{% endblock %}
 {% block body %}{% endblock %}
-<script src="/static/js/theme.js"></script>
+<script src="/static/js/theme.js?v={{ asset_v }}"></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

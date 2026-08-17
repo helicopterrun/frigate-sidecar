@@ -170,5 +170,5 @@
 
 {% block scripts %}
 <script>window.LENS_PRESETS = {{ lens_presets_json | safe }};</script>
-<script src="/static/js/cameras.js"></script>
+<script src="/static/js/cameras.js?v={{ asset_v }}"></script>
 {% endblock %}

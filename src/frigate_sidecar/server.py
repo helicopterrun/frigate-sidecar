@@ -362,6 +362,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    # Cache-buster for /static assets: the newest mtime under static/.
+    # Safari heuristically caches JS/CSS (no Cache-Control on StaticFiles),
+    # so a deploy could leave phones running old JS against new HTML —
+    # `?v=` makes every deploy a brand-new URL.
+    _asset_v = 0
+    for _p in _STATIC_DIR.rglob("*"):
+        if _p.is_file():
+            _asset_v = max(_asset_v, int(_p.stat().st_mtime))
+    app.state.templates.env.globals["asset_v"] = _asset_v
     app.state.plus_enabled = False
 
     @app.exception_handler(FrigateDBMissingError)
