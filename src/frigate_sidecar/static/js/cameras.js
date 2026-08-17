@@ -21,33 +21,45 @@
   var calibrating = false;
 
   // ---- View window (zoom/pan) ----------------------------------------
-  // The visible window in unit map coords; h == w because the viewBox is
-  // a unit square stretched by the container's CSS aspect-ratio (map
-  // aspect lives in the scale math, never in the viewBox). Lives outside
-  // renderMap so redraws never reset the view.
+  // The visible window in unit map coords. The element is a fixed-height
+  // WINDOW onto the map (controls stay on screen; the map pans inside), so
+  // the viewBox is rectangular: its height is derived so the floorplan
+  // keeps its own aspect on screen whatever shape the window is. Lives
+  // outside renderMap so redraws never reset the view.
   var view = { x: 0, y: 0, w: 1 };
   // Screen-constant size: a stroke/font/radius expressed as a viewBox
   // fraction must shrink as the window narrows or it balloons on zoom.
   function sz(v) { return v * view.w; }
+  // Visible unit-height: window shape over content shape. At w=1 a map
+  // taller than the window pans vertically; a shorter one letterboxes.
+  function winAspect() {
+    var r = mapEl.getBoundingClientRect();
+    return r.width ? r.height / r.width : 1;
+  }
+  function viewH() { return (view.w * winAspect()) / mapAspect(); }
   // THE client->unit mapping. Every map gesture goes through here so
   // zoom/pan can never desync a drag.
   function clientToUnit(ev) {
     var r = mapEl.getBoundingClientRect();
     return {
       x: view.x + ((ev.clientX - r.left) / r.width) * view.w,
-      y: view.y + ((ev.clientY - r.top) / r.height) * view.w,
+      y: view.y + ((ev.clientY - r.top) / r.height) * viewH(),
     };
   }
   function unitToPct(u, axis) {
-    return ((u - (axis === "y" ? view.y : view.x)) / view.w) * 100;
+    if (axis === "y") return ((u - view.y) / viewH()) * 100;
+    return ((u - view.x) / view.w) * 100;
   }
   function clampView() {
     view.w = Math.min(1, Math.max(1 / 8, view.w));
     view.x = Math.min(1 - view.w, Math.max(0, view.x));
-    view.y = Math.min(1 - view.w, Math.max(0, view.y));
+    var h = viewH();
+    // Content shorter than the window centers; taller pans within [0, 1-h].
+    view.y = h >= 1 ? (1 - h) / 2 : Math.min(1 - h, Math.max(0, view.y));
   }
   function resetView() {
     view = { x: 0, y: 0, w: 1 };
+    clampView();
     renderMap();
   }
 
@@ -198,7 +210,7 @@
     // edges are the manipulation surfaces — same feel as drawing the
     // snapshot arrows: grab the arrow to aim, grab an edge to widen.
     var svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("viewBox", view.x + " " + view.y + " " + view.w + " " + view.w);
+    svg.setAttribute("viewBox", view.x + " " + view.y + " " + view.w + " " + viewH());
     svg.setAttribute("preserveAspectRatio", "none");
     svg.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none";
     // Floorplan as the first SVG child (not a CSS background) so it pans
@@ -512,9 +524,14 @@
     syncSecureControls();
 
     var north = document.createElement("div");
-    north.textContent = "N ↑";
-    north.className = "help";
-    north.style.cssText = "position:absolute;top:4px;left:8px;font-weight:bold";
+    // Compass badge: pinned to the window corner, unaffected by pan/zoom.
+    north.className = "map-compass";
+    north.innerHTML =
+      '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+      '<path d="M12 3 L15.5 13 L12 10.8 L8.5 13 Z" fill="var(--accent, #ffb454)"/>' +
+      '<path d="M12 21 L15.5 13 L12 15.2 L8.5 13 Z" fill="var(--muted-3, #5c646d)"/>' +
+      "</svg><span>N</span>";
+    north.title = "North is up";
     mapEl.appendChild(north);
 
     cameras.forEach(function (camera, i) {
@@ -536,7 +553,7 @@
       dot.style.left = unitToPct(pos.x, "x") + "%";
       dot.style.top = unitToPct(pos.y, "y") + "%";
       if (pos.x < view.x || pos.x > view.x + view.w ||
-          pos.y < view.y || pos.y > view.y + view.w) {
+          pos.y < view.y || pos.y > view.y + viewH()) {
         dot.style.display = "none";
       }
       dot.addEventListener("pointerdown", function (ev) {
@@ -789,12 +806,12 @@
     g.setAttribute("pointer-events", "none");
     var x, y;
     for (x = Math.ceil(view.x / stepX) * stepX; x <= view.x + view.w; x += stepX) {
-      svgLine(g, x, view.y, x, view.y + view.w, {
+      svgLine(g, x, view.y, x, view.y + viewH(), {
         stroke: "var(--muted, #8f9fb8)", "stroke-opacity": "0.12",
         "stroke-width": sz(0.0015),
       });
     }
-    for (y = Math.ceil(view.y / stepY) * stepY; y <= view.y + view.w; y += stepY) {
+    for (y = Math.ceil(view.y / stepY) * stepY; y <= view.y + viewH(); y += stepY) {
       svgLine(g, view.x, y, view.x + view.w, y, {
         stroke: "var(--muted, #8f9fb8)", "stroke-opacity": "0.12",
         "stroke-width": sz(0.0015),
@@ -802,7 +819,7 @@
     }
     var gLabel = document.createElementNS(SVG_NS, "text");
     gLabel.setAttribute("x", view.x + sz(0.012));
-    gLabel.setAttribute("y", view.y + view.w - sz(0.015));
+    gLabel.setAttribute("y", view.y + viewH() - sz(0.015));
     gLabel.setAttribute("font-size", sz(0.02));
     gLabel.setAttribute("fill", "var(--muted, #8f9fb8)");
     gLabel.textContent = "grid " + gridFt + " ft";
@@ -999,12 +1016,12 @@
 
   function applyFloorplan() {
     var fp = doc.floorplan;
+    // The element is a fixed-height window (CSS); the floorplan's aspect
+    // lives in the viewBox math (viewH), not the element shape.
     if (fp && fp.ext) {
-      mapEl.style.aspectRatio = fp.w + " / " + fp.h;
       floorplanRemove.style.display = "inline-block";
       calibrateBtn.style.display = "inline-block";
     } else {
-      mapEl.style.aspectRatio = "";
       floorplanRemove.style.display = "none";
       calibrateBtn.style.display = "none";
     }
@@ -1315,7 +1332,7 @@
       if (pinchActive) return; // second finger landed: pinch owns the view
       rect = mapEl.getBoundingClientRect(); // fresh: layout can shift
       view.x -= ((mv.clientX - last.x) / rect.width) * view.w;
-      view.y -= ((mv.clientY - last.y) / rect.height) * view.w;
+      view.y -= ((mv.clientY - last.y) / rect.height) * viewH();
       last = { x: mv.clientX, y: mv.clientY };
       clampView();
       renderMap();
@@ -1351,7 +1368,7 @@
         w: view.w,
         mid: {
           x: view.x + (((a.x + b.x) / 2 - rect.left) / rect.width) * view.w,
-          y: view.y + (((a.y + b.y) / 2 - rect.top) / rect.height) * view.w,
+          y: view.y + (((a.y + b.y) / 2 - rect.top) / rect.height) * viewH(),
         },
       };
       ev.stopPropagation();
@@ -1376,7 +1393,7 @@
       y: ((a.y + b.y) / 2 - rect.top) / rect.height,
     };
     view.x = pinchStart.mid.x - midClient.x * view.w;
-    view.y = pinchStart.mid.y - midClient.y * view.w;
+    view.y = pinchStart.mid.y - midClient.y * viewH();
     clampView();
     syncViewReset();
     renderMap();
@@ -1392,6 +1409,16 @@
   }
   window.addEventListener("pointerup", endTouch);
   window.addEventListener("pointercancel", endTouch);
+
+  // The window's shape feeds the viewBox (viewH) — re-derive on resize.
+  var resizeTimer = null;
+  window.addEventListener("resize", function () {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () {
+      clampView();
+      renderMap();
+    }, 100);
+  });
 
   // ---- Measure tool (View layer) --------------------------------------
 

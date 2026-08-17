@@ -558,9 +558,11 @@ a { color: var(--accent); }
 .replay-output { max-height: 60vh; overflow: auto; font-size: 0.85em; padding: 0.5em; background: var(--deep); border-radius: var(--radius-sm); }
 
 /* ----- Cameras page ----- */
-/* Full page width, capped so the square still fits on screen with the
-   layer bar above and some controls below. */
-.cam-map { position: relative; width: min(100%, calc(100dvh - 220px)); min-width: min(560px, 100%); aspect-ratio: 1; background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); }
+/* A full-width, fixed-height WINDOW onto the map: the layer bar and
+   controls stay on screen and the map pans/zooms inside (cameras.js viewH
+   derives the rectangular viewBox; content centers when it's shorter than
+   the window). */
+.cam-map { position: relative; width: 100%; height: clamp(320px, calc(100dvh - 380px), 820px); background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); overflow: hidden; }
 .section-title .help { font-weight: normal; }
 .plus-toggle { font-size: 12px; }
 
@@ -573,13 +575,25 @@ body[data-layer="calibrate"] .layer-group[data-layer="calibrate"],
 .layer-group[data-layer="view"] { display: block; }
 #layer-seg { margin: 6px 0; }
 
+/* Compass badge in the map window's corner. */
+.map-compass {
+  position: absolute; top: 8px; left: 8px; z-index: 3;
+  display: flex; flex-direction: column; align-items: center;
+  width: 40px; padding: 4px 0 2px; pointer-events: none;
+  background: color-mix(in srgb, var(--surface-2) 82%, transparent);
+  border: 1px solid var(--stroke); border-radius: var(--radius-md);
+  font-size: 11px; font-weight: 700; color: var(--text); letter-spacing: 1px;
+}
+.map-compass svg { width: 22px; height: 22px; display: block; }
+
 /* Cameras page: the map is a gesture surface — no browser scroll/zoom on it
    (pinch zooms the map, one-finger drags follow the active layer). */
 .cam-map { touch-action: none; }
 
 @media (max-width: 720px) {
-  /* Thumb-sized controls on the cameras page. */
-  .cam-map { width: 100%; }
+  /* Thumb-sized controls on the cameras page; shorter window so the layer
+     bar and the active layer's controls share the screen with the map. */
+  .cam-map { width: 100%; height: clamp(280px, 45dvh, 520px); }
   .inline-label, .inline-label-lg { display: inline-block; margin: 4px 10px 4px 0; }
   .inline-label-lg input[type=checkbox] { width: 20px; height: 20px; vertical-align: middle; }
   .num-4e, .num-5e { min-height: 36px; }
