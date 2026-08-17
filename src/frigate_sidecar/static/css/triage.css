@@ -558,7 +558,9 @@ a { color: var(--accent); }
 .replay-output { max-height: 60vh; overflow: auto; font-size: 0.85em; padding: 0.5em; background: var(--deep); border-radius: var(--radius-sm); }
 
 /* ----- Cameras page ----- */
-.cam-map { position: relative; width: min(560px, 100%); aspect-ratio: 1; background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); }
+/* Full page width, capped so the square still fits on screen with the
+   layer bar above and some controls below. */
+.cam-map { position: relative; width: min(100%, calc(100dvh - 220px)); min-width: min(560px, 100%); aspect-ratio: 1; background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); }
 .section-title .help { font-weight: normal; }
 .plus-toggle { font-size: 12px; }
 
