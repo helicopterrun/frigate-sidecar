@@ -37,24 +37,24 @@ def replay_scenarios() -> JSONResponse:
     return JSONResponse({"scenarios": replay.list_scenarios()})
 
 
-@router.get("/replay/capture-window")
-def replay_capture_window(
-    request: Request, minutes: float = 15.0, camera: str | None = None,
-) -> JSONResponse:
-    """Recent tracks from the MQTT flight recorder, shaped for map trails:
-    per (camera, track_id) -> label + (x, y, t) path points, newest tracks
-    first, capped so a busy ring can't flood the browser."""
-    import time as _time
+def _capture_paths(settings) -> list:
     from pathlib import Path
 
-    from frigate_sidecar.push import capture
-
-    settings = request.app.state.settings
     capture_path = settings.push.capture_path or str(
         Path(settings.push.push_settings_path).parent / "mqtt-capture.jsonl"
     )
-    paths = [Path(capture_path + ".1"), Path(capture_path)]
-    start_ts = _time.time() - max(1.0, min(minutes, 24 * 60)) * 60.0
+    return [Path(capture_path + ".1"), Path(capture_path)]
+
+
+def _capture_tracks(
+    paths: list, start_ts: float, camera: str | None = None,
+    max_points: int = 400, max_tracks: int = 500,
+) -> list[dict]:
+    """Capture rows -> track list shaped for map trails / calibration:
+    per (camera, track_id) -> label + (x, y, t) path points, newest tracks
+    first, capped so a busy ring can't flood the consumer."""
+    from frigate_sidecar.push import capture
+
     rows = capture.read_window(paths, start_ts=start_ts, camera=camera)
 
     tracks: dict[tuple[str, str], dict] = {}
@@ -88,10 +88,62 @@ def replay_capture_window(
             continue
         out.append({
             "camera": entry["camera"], "track_id": entry["track_id"],
-            "label": entry["label"], "points": points[:400],
+            "label": entry["label"], "points": points[:max_points],
         })
     out.sort(key=lambda e: e["points"][-1][2], reverse=True)
-    return JSONResponse({"tracks": out[:500]})
+    return out[:max_tracks]
+
+
+@router.get("/replay/capture-window")
+def replay_capture_window(
+    request: Request, minutes: float = 15.0, camera: str | None = None,
+) -> JSONResponse:
+    """Recent tracks from the MQTT flight recorder, for the map trails UI."""
+    import time as _time
+
+    start_ts = _time.time() - max(1.0, min(minutes, 24 * 60)) * 60.0
+    tracks = _capture_tracks(
+        _capture_paths(request.app.state.settings), start_ts, camera=camera,
+    )
+    return JSONResponse({"tracks": tracks})
+
+
+@router.post("/v1/push/map/autotune")
+def map_autotune(request: Request, minutes: float = 240.0) -> JSONResponse:
+    """Auto-tune camera azimuth/tilt from replayed capture history.
+
+    Pure preview: mines same-instant cross-camera observation pairs from
+    the flight recorder and fits aim corrections against the CURRENT
+    policy, returning a before/after report. Nothing is written — the
+    /cameras page applies accepted values through the normal Save flow.
+    """
+    import time as _time
+
+    from frigate_sidecar.push import calibrate, policy_settings
+
+    t0 = _time.time()
+    start_ts = t0 - max(1.0, min(minutes, 24 * 60)) * 60.0
+    tracks = _capture_tracks(
+        _capture_paths(request.app.state.settings), start_ts, max_tracks=1000,
+    )
+    active = policy_settings.get_active()
+    pairs, counts, warnings = calibrate.mine_pairs(tracks, active)
+    if not pairs:
+        raise HTTPException(
+            status_code=400,
+            detail="no overlapping cross-camera tracks in the capture window — "
+                   "walk the property through two-camera coverage and retry"
+                   + ("; " + "; ".join(warnings) if warnings else ""),
+        )
+    # Bound optimizer runtime: a busy day can mine far more constraints
+    # than the fit needs.
+    if len(pairs) > 2000:
+        stride = len(pairs) / 2000
+        pairs = [pairs[int(k * stride)] for k in range(2000)]
+    report = calibrate.fit(pairs, active)
+    report["pair_counts"] = counts
+    report["warnings"] = warnings
+    return JSONResponse({"report": report, "elapsed_s": round(_time.time() - t0, 2)})
 
 
 @router.post("/replay/run")

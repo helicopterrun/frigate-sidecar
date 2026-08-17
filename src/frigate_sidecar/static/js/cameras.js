@@ -1418,6 +1418,72 @@
     renderMap(); // wedges are drawn at view-reach radius
   });
 
+  // ---- Auto-tune aim from capture history ----------------------------
+
+  var autotuneBtn = document.getElementById("autotune-btn");
+  var autotuneDiff = document.getElementById("autotune-diff");
+
+  autotuneBtn.addEventListener("click", async function () {
+    autotuneBtn.disabled = true;
+    autotuneDiff.textContent = "tuning... (replaying the capture window)";
+    try {
+      var body = await fetchJson("/v1/push/map/autotune?minutes=240", { method: "POST" });
+      var report = body.report;
+      var totalPairs = Object.keys(report.pair_counts || {}).reduce(function (n, k) {
+        return n + report.pair_counts[k];
+      }, 0);
+      autotuneDiff.textContent =
+        "RMS " + report.rms_before_ft + " → " + report.rms_after_ft +
+        " ft over " + totalPairs + " pairs (" + body.elapsed_s + "s). ";
+      var changed = [];
+      Object.keys(report.cameras).sort().forEach(function (cam) {
+        var c = report.cameras[cam];
+        var dAz = Math.abs(((c.azimuth_after - c.azimuth_before + 540) % 360) - 180);
+        var dTilt = Math.abs(c.tilt_after - c.tilt_before);
+        if (dAz < 0.2 && dTilt < 0.2) return;
+        changed.push(cam);
+        var line = document.createElement("div");
+        line.textContent = cam + ": azimuth " + c.azimuth_before + "° → " +
+          c.azimuth_after + "°, tilt " + c.tilt_before + "° → " +
+          c.tilt_after + "° (" + c.pairs + " pairs)";
+        autotuneDiff.appendChild(line);
+      });
+      (report.warnings || []).forEach(function (w) {
+        var line = document.createElement("div");
+        line.textContent = "⚠ " + w;
+        autotuneDiff.appendChild(line);
+      });
+      if (!changed.length) {
+        autotuneDiff.appendChild(document.createTextNode(
+          "no meaningful corrections — aim already agrees with the data."
+        ));
+      } else {
+        var apply = document.createElement("button");
+        apply.textContent = "Apply";
+        apply.className = "btn-primary";
+        apply.style.marginLeft = "0.6em";
+        apply.addEventListener("click", function () {
+          changed.forEach(function (cam) {
+            var c = report.cameras[cam];
+            if ((doc.camera_layout || {})[cam]) {
+              doc.camera_layout[cam].azimuth = c.azimuth_after;
+            }
+            if ((doc.camera_optics || {})[cam]) {
+              doc.camera_optics[cam].tilt_deg = c.tilt_after;
+            }
+          });
+          autotuneDiff.textContent = "applied — remember to Save.";
+          markDirty();
+          renderMap();
+        });
+        autotuneDiff.appendChild(apply);
+      }
+    } catch (err) {
+      autotuneDiff.textContent = "auto-tune error: " + err.message;
+    }
+    autotuneBtn.disabled = false;
+  });
+
   // ---- Reload Frigate config -----------------------------------------
 
   var configRefreshBtn = document.getElementById("config-refresh-btn");
