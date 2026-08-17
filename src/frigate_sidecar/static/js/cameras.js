@@ -329,7 +329,10 @@
       el.style.touchAction = "none";
       el.addEventListener("pointerdown", function (ev) {
         ev.stopPropagation();
-        selectCamera(camera);
+        // Select WITHOUT re-rendering: renderMap() here would detach the
+        // element mid-gesture and kill the drag. The move/up handlers
+        // re-render, which also paints the new selection.
+        selectedCamera = camera;
         el.setPointerCapture(ev.pointerId);
         function move(mv) {
           var e = ensureEntry(camera, i);
@@ -342,6 +345,7 @@
           el.removeEventListener("pointermove", move);
           el.removeEventListener("pointerup", up);
           markDirty();
+          renderMap();
         }
         el.addEventListener("pointermove", move);
         el.addEventListener("pointerup", up);
@@ -466,7 +470,7 @@
         ringGrab.setAttribute("r", rw);
         ringGrab.setAttribute("fill", "none");
         ringGrab.setAttribute("stroke", "transparent");
-        ringGrab.setAttribute("stroke-width", "0.045");
+        ringGrab.setAttribute("stroke-width", "0.025");
         ringGrab.style.cursor = "grab";
         ringGrab.setAttribute("aria-label", "aim " + camera);
         dragOn(ringGrab, camera, i, function (e, pointerAz) {
@@ -569,7 +573,9 @@
       dot.style.left = pos.x * 100 + "%";
       dot.style.top = pos.y * 100 + "%";
       dot.addEventListener("pointerdown", function (ev) {
-        selectCamera(camera);
+        // No renderMap() here — rebuilding would detach this pill and kill
+        // the drag before it starts. Selection paints on pointerup.
+        selectedCamera = camera;
         dot.setPointerCapture(ev.pointerId);
         var moved = false;
         function move(mv) {
@@ -586,7 +592,8 @@
         function up() {
           dot.removeEventListener("pointermove", move);
           dot.removeEventListener("pointerup", up);
-          if (moved) { markDirty(); renderMap(); }
+          if (moved) markDirty();
+          renderMap();
         }
         dot.addEventListener("pointermove", move);
         dot.addEventListener("pointerup", up);
@@ -594,13 +601,6 @@
       mapEl.appendChild(dot);
     });
     syncDetailPanel();
-  }
-
-  function selectCamera(camera) {
-    if (selectedCamera !== camera) {
-      selectedCamera = camera;
-      renderMap();
-    }
   }
 
   // ---- Map scale, coverage view, walk trails --------------------------
@@ -963,11 +963,17 @@
         doc.camera_optics[camera] = entry;
         placements = doc.camera_optics;
         if (!doc.camera_layout) doc.camera_layout = {};
-        doc.camera_layout[camera] = doc.camera_layout[camera] || {
-          x: 0.5, y: 0.5,
-          azimuth: CARDINAL_DEG[faces.value],
-          fov: +h.toFixed(1),
-        };
+        if (!doc.camera_layout[camera]) {
+          // Start at the camera's spread-out ghost spot, not map center —
+          // center would stack every onboarded-but-unplaced camera on the
+          // same pixel.
+          var ghost = layoutEntry(camera, cameras.indexOf(camera));
+          doc.camera_layout[camera] = {
+            x: +ghost.x.toFixed(4), y: +ghost.y.toFixed(4),
+            azimuth: CARDINAL_DEG[faces.value],
+            fov: +h.toFixed(1),
+          };
+        }
         placeMode = camera;
         showBanner("Click the map where " + camera + " is mounted.", false);
         markDirty();
