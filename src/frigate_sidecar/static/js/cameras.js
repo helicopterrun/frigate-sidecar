@@ -1494,8 +1494,47 @@
     if (isMapBackground(ev)) startPan(ev);
   });
 
-  // Escape cancels whatever the active layer is doing.
+  function typingInField() {
+    var el = document.activeElement;
+    if (!el) return false;
+    return el.tagName === "INPUT" || el.tagName === "TEXTAREA" ||
+      el.tagName === "SELECT" || el.isContentEditable;
+  }
+
+  // Escape cancels the active layer's mode; arrows/brackets fine-tune the
+  // selected camera (Cameras layer only, never while typing in a field).
   document.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Escape" && activeLayer === "cameras" && selectedCamera &&
+        doc && !typingInField()) {
+      var nudgeFt = ev.shiftKey ? 1.0 : 0.1;
+      var scale = doc.map_scale_ft;
+      var e, i;
+      if (scale &&
+          ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].indexOf(ev.key) !== -1) {
+        ev.preventDefault();
+        i = cameras.indexOf(selectedCamera);
+        e = ensureEntry(selectedCamera, i);
+        var dx = ev.key === "ArrowLeft" ? -1 : ev.key === "ArrowRight" ? 1 : 0;
+        var dy = ev.key === "ArrowUp" ? -1 : ev.key === "ArrowDown" ? 1 : 0;
+        e.x = +Math.min(1, Math.max(0, e.x + (dx * nudgeFt) / scale)).toFixed(4);
+        e.y = +Math.min(1, Math.max(
+          0, e.y + (dy * nudgeFt) / (scale * mapAspect()))).toFixed(4);
+        markDirty();
+        renderMap();
+        return;
+      }
+      if (ev.key === "[" || ev.key === "]") {
+        ev.preventDefault();
+        i = cameras.indexOf(selectedCamera);
+        e = ensureEntry(selectedCamera, i);
+        var step = (ev.shiftKey ? 5 : 0.5) * (ev.key === "[" ? -1 : 1);
+        e.azimuth = +(((e.azimuth || 0) + step + 360) % 360).toFixed(1);
+        if (e.fov === undefined) e.fov = defaultFov(selectedCamera);
+        markDirty();
+        renderMap();
+        return;
+      }
+    }
     if (ev.key !== "Escape") return;
     if (activeLayer === "cameras" && placeMode) { placeMode = null; renderMap(); return; }
     if (activeLayer === "calibrate") {
@@ -1556,7 +1595,34 @@
     document.getElementById("detail-placement").textContent = p
       ? (p.faces ? "faces " + p.faces : "")
       : "not onboarded — no rig facts";
+    // Position in feet from the map's top-left (x -> east, y -> south).
+    var scale = doc.map_scale_ft;
+    var haveFt = entry && scale;
+    detailX.disabled = detailY.disabled = !haveFt;
+    detailX.value = haveFt ? (entry.x * scale).toFixed(1) : "";
+    detailY.value = haveFt ? (entry.y * scale * mapAspect()).toFixed(1) : "";
+    detailX.title = detailY.title = haveFt
+      ? "feet from the map's top-left corner"
+      : "set the map scale to edit position in feet";
   }
+
+  var detailX = document.getElementById("detail-x");
+  var detailY = document.getElementById("detail-y");
+  detailX.addEventListener("change", function () {
+    if (!selectedCamera || !doc.map_scale_ft) return;
+    var e = ensureEntry(selectedCamera, cameras.indexOf(selectedCamera));
+    e.x = +Math.min(1, Math.max(0, (parseFloat(detailX.value) || 0) / doc.map_scale_ft)).toFixed(4);
+    markDirty();
+    renderMap();
+  });
+  detailY.addEventListener("change", function () {
+    if (!selectedCamera || !doc.map_scale_ft) return;
+    var e = ensureEntry(selectedCamera, cameras.indexOf(selectedCamera));
+    var ftPerUnit = doc.map_scale_ft * mapAspect();
+    e.y = +Math.min(1, Math.max(0, (parseFloat(detailY.value) || 0) / ftPerUnit)).toFixed(4);
+    markDirty();
+    renderMap();
+  })
 
   var detailHfov = document.getElementById("detail-hfov");
   var detailMount = document.getElementById("detail-mount");
