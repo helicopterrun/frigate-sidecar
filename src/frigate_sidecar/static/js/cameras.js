@@ -21,6 +21,37 @@
   var calibrateStart = null; // first click of the scale reference line
   var calibrating = false;
 
+  // ---- View window (zoom/pan) ----------------------------------------
+  // The visible window in unit map coords; h == w because the viewBox is
+  // a unit square stretched by the container's CSS aspect-ratio (map
+  // aspect lives in the scale math, never in the viewBox). Lives outside
+  // renderMap so redraws never reset the view.
+  var view = { x: 0, y: 0, w: 1 };
+  // Screen-constant size: a stroke/font/radius expressed as a viewBox
+  // fraction must shrink as the window narrows or it balloons on zoom.
+  function sz(v) { return v * view.w; }
+  // THE client->unit mapping. Every map gesture goes through here so
+  // zoom/pan can never desync a drag.
+  function clientToUnit(ev) {
+    var r = mapEl.getBoundingClientRect();
+    return {
+      x: view.x + ((ev.clientX - r.left) / r.width) * view.w,
+      y: view.y + ((ev.clientY - r.top) / r.height) * view.w,
+    };
+  }
+  function unitToPct(u, axis) {
+    return ((u - (axis === "y" ? view.y : view.x)) / view.w) * 100;
+  }
+  function clampView() {
+    view.w = Math.min(1, Math.max(1 / 8, view.w));
+    view.x = Math.min(1 - view.w, Math.max(0, view.x));
+    view.y = Math.min(1 - view.w, Math.max(0, view.y));
+  }
+  function resetView() {
+    view = { x: 0, y: 0, w: 1 };
+    renderMap();
+  }
+
   var CARDINAL_DEG = {
     N: 0, NNE: 22.5, NE: 45, ENE: 67.5, E: 90, ESE: 112.5, SE: 135, SSE: 157.5,
     S: 180, SSW: 202.5, SW: 225, WSW: 247.5, W: 270, WNW: 292.5, NW: 315, NNW: 337.5,
@@ -283,11 +314,9 @@
   }
 
   function pointerAzimuth(ev, entry) {
-    var rect = mapEl.getBoundingClientRect();
-    var px = (ev.clientX - rect.left) / rect.width;
-    var py = (ev.clientY - rect.top) / rect.height;
-    var dx = px - entry.x, dy = py - entry.y;
-    if (Math.hypot(dx, dy) < 0.01) return null;
+    var p = clientToUnit(ev);
+    var dx = p.x - entry.x, dy = p.y - entry.y;
+    if (Math.hypot(dx, dy) < sz(0.01)) return null;
     return ((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360;
   }
 
@@ -307,9 +336,20 @@
     // edges are the manipulation surfaces — same feel as drawing the
     // snapshot arrows: grab the arrow to aim, grab an edge to widen.
     var svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("viewBox", "0 0 1 1");
+    svg.setAttribute("viewBox", view.x + " " + view.y + " " + view.w + " " + view.w);
     svg.setAttribute("preserveAspectRatio", "none");
     svg.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none";
+    // Floorplan as the first SVG child (not a CSS background) so it pans
+    // and zooms with the geometry.
+    var fpImg = floorplanHref();
+    if (fpImg) {
+      var img = document.createElementNS(SVG_NS, "image");
+      img.setAttribute("x", 0); img.setAttribute("y", 0);
+      img.setAttribute("width", 1); img.setAttribute("height", 1);
+      img.setAttribute("preserveAspectRatio", "none");
+      img.setAttribute("href", fpImg);
+      svg.appendChild(img);
+    }
     var defs = document.createElementNS(SVG_NS, "defs");
     var marker = document.createElementNS(SVG_NS, "marker");
     marker.setAttribute("id", "map-arrowhead");
@@ -426,10 +466,10 @@
           var ex = entry.x + d.x * r, ey = entry.y + d.y * r;
           svgLine(camGroup, entry.x, entry.y, ex, ey, {
             stroke: "var(--accent, #ffb454)", "stroke-opacity": "0.55",
-            "stroke-width": "0.004", "stroke-dasharray": "0.012 0.008",
+            "stroke-width": sz(0.004), "stroke-dasharray": sz(0.012) + " " + sz(0.008),
           });
           var grab = svgLine(camGroup, entry.x, entry.y, ex, ey, {
-            stroke: "transparent", "stroke-width": "0.035",
+            stroke: "transparent", "stroke-width": sz(0.035),
           });
           grab.style.cursor = "col-resize";
           dragOn(grab, camera, i, function (e, pointerAz) {
@@ -445,10 +485,10 @@
       // Selected = accent, others = muted. The label pill hangs below it.
       var pt = document.createElementNS(SVG_NS, "circle");
       pt.setAttribute("cx", entry.x); pt.setAttribute("cy", entry.y);
-      pt.setAttribute("r", selected ? "0.014" : "0.010");
+      pt.setAttribute("r", sz(selected ? 0.014 : 0.010));
       pt.setAttribute("fill", selected ? "var(--accent, #ffb454)" : "var(--muted, #8f9fb8)");
       pt.setAttribute("stroke", "var(--surface, #111)");
-      pt.setAttribute("stroke-width", "0.004");
+      pt.setAttribute("stroke-width", sz(0.004));
       pt.style.pointerEvents = "none";
       camGroup.appendChild(pt);
 
@@ -457,7 +497,7 @@
       // underneath would otherwise swallow the drag and rotate instead).
       var moveGrab = document.createElementNS(SVG_NS, "circle");
       moveGrab.setAttribute("cx", entry.x); moveGrab.setAttribute("cy", entry.y);
-      moveGrab.setAttribute("r", "0.03");
+      moveGrab.setAttribute("r", sz(0.03));
       moveGrab.setAttribute("fill", "transparent");
       moveGrab.style.pointerEvents = "fill";
       moveGrab.style.cursor = "move";
@@ -470,10 +510,10 @@
         var movedPt = false;
         function mm(mv) {
           movedPt = true;
-          var rect = mapEl.getBoundingClientRect();
+          var p = clientToUnit(mv);
           var e = ensureEntry(camera, i);
-          e.x = +Math.min(1, Math.max(0, (mv.clientX - rect.left) / rect.width)).toFixed(4);
-          e.y = +Math.min(1, Math.max(0, (mv.clientY - rect.top) / rect.height)).toFixed(4);
+          e.x = +Math.min(1, Math.max(0, p.x)).toFixed(4);
+          e.y = +Math.min(1, Math.max(0, p.y)).toFixed(4);
           renderMap();
         }
         function uu() {
@@ -491,15 +531,15 @@
       // its own visible control distinct from "move" (dragging the pill).
       // Drag anywhere on the ring — or its knob — to swing the azimuth.
       if (selected) {
-        var rw = 0.055;
+        var rw = sz(0.055);
         var ring = document.createElementNS(SVG_NS, "circle");
         ring.setAttribute("cx", entry.x); ring.setAttribute("cy", entry.y);
         ring.setAttribute("r", rw);
         ring.setAttribute("fill", "none");
         ring.setAttribute("stroke", "var(--accent, #ffb454)");
         ring.setAttribute("stroke-opacity", "0.7");
-        ring.setAttribute("stroke-width", "0.005");
-        ring.setAttribute("stroke-dasharray", "0.01 0.008");
+        ring.setAttribute("stroke-width", sz(0.005));
+        ring.setAttribute("stroke-dasharray", sz(0.01) + " " + sz(0.008));
         ring.style.pointerEvents = "none";
         camGroup.appendChild(ring);
         var ringGrab = document.createElementNS(SVG_NS, "circle");
@@ -507,7 +547,7 @@
         ringGrab.setAttribute("r", rw);
         ringGrab.setAttribute("fill", "none");
         ringGrab.setAttribute("stroke", "transparent");
-        ringGrab.setAttribute("stroke-width", "0.025");
+        ringGrab.setAttribute("stroke-width", sz(0.025));
         ringGrab.style.cursor = "grab";
         ringGrab.setAttribute("aria-label", "aim " + camera);
         dragOn(ringGrab, camera, i, function (e, pointerAz) {
@@ -519,10 +559,10 @@
         var knob = document.createElementNS(SVG_NS, "circle");
         knob.setAttribute("cx", entry.x + dir.x * rw);
         knob.setAttribute("cy", entry.y + dir.y * rw);
-        knob.setAttribute("r", "0.013");
+        knob.setAttribute("r", sz(0.013));
         knob.setAttribute("fill", "var(--accent, #ffb454)");
         knob.setAttribute("stroke", "var(--surface, #111)");
-        knob.setAttribute("stroke-width", "0.004");
+        knob.setAttribute("stroke-width", sz(0.004));
         knob.style.pointerEvents = "fill";
         knob.style.cursor = "grab";
         dragOn(knob, camera, i, function (e, pointerAz) {
@@ -534,17 +574,17 @@
 
       if (hasAim && selected) {
         // Cardinal readout floats just outside the wheel: "SW 225°".
-        var lx = entry.x + dir.x * 0.11;
-        var ly = entry.y + dir.y * 0.11;
+        var lx = entry.x + dir.x * sz(0.11);
+        var ly = entry.y + dir.y * sz(0.11);
         var text = document.createElementNS(SVG_NS, "text");
         text.setAttribute("x", lx);
         text.setAttribute("y", ly);
         text.setAttribute("text-anchor", "middle");
         text.setAttribute("dominant-baseline", "middle");
-        text.setAttribute("font-size", "0.028");
+        text.setAttribute("font-size", sz(0.028));
         text.setAttribute("fill", "var(--accent, #ffb454)");
         text.setAttribute("stroke", "var(--surface, #111)");
-        text.setAttribute("stroke-width", "0.006");
+        text.setAttribute("stroke-width", sz(0.006));
         text.setAttribute("paint-order", "stroke");
         text.textContent = cardinalOf(az) + " " + Math.round(az) + "°";
         camGroup.appendChild(text);
@@ -577,13 +617,13 @@
       rect.setAttribute("fill", "var(--ok, #4caf82)");
       rect.setAttribute("fill-opacity", "0.10");
       rect.setAttribute("stroke", "var(--ok, #4caf82)");
-      rect.setAttribute("stroke-width", "0.004");
-      rect.setAttribute("stroke-dasharray", "0.015 0.01");
+      rect.setAttribute("stroke-width", sz(0.004));
+      rect.setAttribute("stroke-dasharray", sz(0.015) + " " + sz(0.01));
       svg.appendChild(rect);
       var saLabel = document.createElementNS(SVG_NS, "text");
-      saLabel.setAttribute("x", Math.min(sa.x0, sa.x1) + 0.012);
-      saLabel.setAttribute("y", Math.min(sa.y0, sa.y1) + 0.035);
-      saLabel.setAttribute("font-size", "0.026");
+      saLabel.setAttribute("x", Math.min(sa.x0, sa.x1) + sz(0.012));
+      saLabel.setAttribute("y", Math.min(sa.y0, sa.y1) + sz(0.035));
+      saLabel.setAttribute("font-size", sz(0.026));
       saLabel.setAttribute("fill", "var(--ok, #4caf82)");
       saLabel.textContent = "secure area";
       svg.appendChild(saLabel);
@@ -612,8 +652,12 @@
         (isSel
           ? "box-shadow:0 0 10px var(--accent, #ffb454);z-index:2;"
           : selectedCamera ? "opacity:0.35;" : "");
-      dot.style.left = pos.x * 100 + "%";
-      dot.style.top = pos.y * 100 + "%";
+      dot.style.left = unitToPct(pos.x, "x") + "%";
+      dot.style.top = unitToPct(pos.y, "y") + "%";
+      if (pos.x < view.x || pos.x > view.x + view.w ||
+          pos.y < view.y || pos.y > view.y + view.w) {
+        dot.style.display = "none";
+      }
       dot.addEventListener("pointerdown", function (ev) {
         // Gesture tracked on window — the pill survives (no mid-drag
         // rebuild here), but window listeners are the uniform, un-killable
@@ -623,14 +667,14 @@
         var moved = false;
         function move(mv) {
           moved = true;
-          var rect = mapEl.getBoundingClientRect();
-          var x = Math.min(1, Math.max(0, (mv.clientX - rect.left) / rect.width));
-          var y = Math.min(1, Math.max(0, (mv.clientY - rect.top) / rect.height));
+          var p = clientToUnit(mv);
+          var x = Math.min(1, Math.max(0, p.x));
+          var y = Math.min(1, Math.max(0, p.y));
           var entry = ensureEntry(camera, i);
           entry.x = +x.toFixed(4);
           entry.y = +y.toFixed(4);
-          dot.style.left = x * 100 + "%";
-          dot.style.top = y * 100 + "%";
+          dot.style.left = unitToPct(x, "x") + "%";
+          dot.style.top = unitToPct(y, "y") + "%";
         }
         function up() {
           window.removeEventListener("pointermove", move);
@@ -736,7 +780,7 @@
       poly.setAttribute("fill", "none");
       var color = TRAIL_COLORS[cameras.indexOf(track.camera) % TRAIL_COLORS.length];
       poly.setAttribute("stroke", color);
-      poly.setAttribute("stroke-width", track.label === "person" ? "0.006" : "0.003");
+      poly.setAttribute("stroke-width", sz(track.label === "person" ? 0.006 : 0.003));
       poly.setAttribute("stroke-opacity", track.label === "person" ? "0.9" : "0.35");
       poly.setAttribute("stroke-linejoin", "round");
       svg.appendChild(poly);
@@ -789,7 +833,7 @@
       poly.setAttribute("fill-opacity", "0.12");
       poly.setAttribute("stroke", z.color);
       poly.setAttribute("stroke-opacity", "0.5");
-      poly.setAttribute("stroke-width", "0.003");
+      poly.setAttribute("stroke-width", sz(0.003));
       poly.setAttribute("stroke-linejoin", "round");
       var title = document.createElementNS(SVG_NS, "title");
       title.textContent = z.name + " (" + z.camera + ")" +
@@ -823,24 +867,24 @@
         tp.setAttribute("fill", "none");
         tp.setAttribute("stroke", color);
         tp.setAttribute("stroke-opacity", "0.45");
-        tp.setAttribute("stroke-width", "0.004");
+        tp.setAttribute("stroke-width", sz(0.004));
         tp.setAttribute("stroke-linejoin", "round");
         liveLayer.appendChild(tp);
       }
       var dot = document.createElementNS(SVG_NS, "circle");
       dot.setAttribute("cx", o.x); dot.setAttribute("cy", o.y);
-      dot.setAttribute("r", "0.009");
+      dot.setAttribute("r", sz(0.009));
       dot.setAttribute("fill", color);
       dot.setAttribute("stroke", "var(--surface, #111)");
-      dot.setAttribute("stroke-width", "0.003");
+      dot.setAttribute("stroke-width", sz(0.003));
       liveLayer.appendChild(dot);
       var text = document.createElementNS(SVG_NS, "text");
-      text.setAttribute("x", o.x); text.setAttribute("y", o.y + 0.032);
+      text.setAttribute("x", o.x); text.setAttribute("y", o.y + sz(0.032));
       text.setAttribute("text-anchor", "middle");
-      text.setAttribute("font-size", "0.022");
+      text.setAttribute("font-size", sz(0.022));
       text.setAttribute("fill", color);
       text.setAttribute("stroke", "var(--surface, #111)");
-      text.setAttribute("stroke-width", "0.005");
+      text.setAttribute("stroke-width", sz(0.005));
       text.setAttribute("paint-order", "stroke");
       // >1 camera = geometry fused these sightings into one object.
       text.textContent = (o.label || "object") +
@@ -897,17 +941,21 @@
   var floorplanNote = document.getElementById("floorplan-note");
   var calibrateBtn = document.getElementById("calibrate-btn");
 
+  function floorplanHref() {
+    // The floorplan renders as the SVG's first <image> (renderMap), not a
+    // CSS background, so it pans/zooms with the geometry.
+    var fp = doc && doc.floorplan;
+    if (!fp || !fp.ext) return null;
+    return "/v1/push/floorplan?ts=" + encodeURIComponent(fp.uploaded_at || "");
+  }
+
   function applyFloorplan() {
     var fp = doc.floorplan;
     if (fp && fp.ext) {
-      mapEl.style.backgroundImage = "url(/v1/push/floorplan?ts=" +
-        encodeURIComponent(fp.uploaded_at || "") + ")";
-      mapEl.style.backgroundSize = "100% 100%";
       mapEl.style.aspectRatio = fp.w + " / " + fp.h;
       floorplanRemove.style.display = "inline-block";
       calibrateBtn.style.display = "inline-block";
     } else {
-      mapEl.style.backgroundImage = "";
       mapEl.style.aspectRatio = "";
       floorplanRemove.style.display = "none";
       calibrateBtn.style.display = "none";
@@ -1008,7 +1056,7 @@
     label.setAttribute("x", (cal.x0 + cal.x1) / 2);
     label.setAttribute("y", (cal.y0 + cal.y1) / 2 - 0.012);
     label.setAttribute("text-anchor", "middle");
-    label.setAttribute("font-size", "0.024");
+    label.setAttribute("font-size", sz(0.024));
     label.setAttribute("fill", "var(--ok, #4caf82)");
     label.textContent = cal.length_ft + " ft";
     svg.appendChild(label);
@@ -1172,10 +1220,10 @@
   }
 
   function mapUnit(ev) {
-    var rect = mapEl.getBoundingClientRect();
+    var p = clientToUnit(ev);
     return {
-      x: Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width)),
-      y: Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height)),
+      x: Math.min(1, Math.max(0, p.x)),
+      y: Math.min(1, Math.max(0, p.y)),
     };
   }
 
@@ -1206,20 +1254,16 @@
       handleCalibrateClick(mapUnit(ev));
       return;
     }
-    if (ev.target !== mapEl) return;
-    var rect = mapEl.getBoundingClientRect();
-    function unit(e) {
-      return {
-        x: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)),
-        y: Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height)),
-      };
-    }
-    var start = unit(ev);
+    if (ev.target !== mapEl && ev.target.tagName !== "svg" &&
+        ev.target.tagName !== "image") return;
+    // mapUnit per move (never a cached rect): a pan/zoom mid-drag must not
+    // un-anchor the rectangle.
+    var start = mapUnit(ev);
     var moved = false;
     mapEl.setPointerCapture(ev.pointerId);
     function move(mv) {
-      var p = unit(mv);
-      if (Math.hypot(p.x - start.x, p.y - start.y) < 0.02) return;
+      var p = mapUnit(mv);
+      if (Math.hypot(p.x - start.x, p.y - start.y) < sz(0.02)) return;
       moved = true;
       doc.secure_area = {
         x0: +start.x.toFixed(4), y0: +start.y.toFixed(4),
@@ -1541,15 +1585,15 @@
       if (m.mx === undefined) return;
       var c = document.createElementNS(SVG_NS, "circle");
       c.setAttribute("cx", m.mx); c.setAttribute("cy", m.my);
-      c.setAttribute("r", "0.010");
+      c.setAttribute("r", sz(0.010));
       c.setAttribute("fill", "var(--accent, #ffb454)");
       c.setAttribute("stroke", "#000");
-      c.setAttribute("stroke-width", "0.002");
+      c.setAttribute("stroke-width", sz(0.002));
       landmarkLayer.appendChild(c);
       var t = document.createElementNS(SVG_NS, "text");
-      t.setAttribute("x", m.mx); t.setAttribute("y", m.my + 0.005);
+      t.setAttribute("x", m.mx); t.setAttribute("y", m.my + sz(0.005));
       t.setAttribute("text-anchor", "middle");
-      t.setAttribute("font-size", "0.018");
+      t.setAttribute("font-size", sz(0.018));
       t.setAttribute("fill", "#000");
       t.textContent = i + 1;
       landmarkLayer.appendChild(t);
