@@ -1324,12 +1324,18 @@
     syncViewReset();
   });
 
-  function startPan(ev) {
+  // Drag pans; a drag that never left the tap threshold calls onTap on
+  // release, so "drag = pan, tap = click" can share one gesture.
+  function startPan(ev, onTap) {
     ev.preventDefault();
     var last = { x: ev.clientX, y: ev.clientY };
+    var moved = false;
     var rect = null;
     function move(mv) {
       if (pinchActive) return; // second finger landed: pinch owns the view
+      if (!moved &&
+          Math.hypot(mv.clientX - last.x, mv.clientY - last.y) < 6) return;
+      moved = true;
       rect = mapEl.getBoundingClientRect(); // fresh: layout can shift
       view.x -= ((mv.clientX - last.x) / rect.width) * view.w;
       view.y -= ((mv.clientY - last.y) / rect.height) * viewH();
@@ -1340,6 +1346,7 @@
     function up() {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      if (!moved && onTap) onTap();
     }
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -1584,15 +1591,19 @@
         renderMap();
         return;
       }
-      if (isMapBackground(ev) && selectedCamera) {
-        selectedCamera = null;
-        renderMap();
+      // Background drag pans (the map is bigger than its window now);
+      // a stationary tap keeps meaning "deselect".
+      if (isMapBackground(ev)) {
+        startPan(ev, function () {
+          if (selectedCamera) { selectedCamera = null; renderMap(); }
+        });
       }
       return;
     }
     if (activeLayer === "calibrate") {
       if (landmarkMode) { handleLandmarkMapClick(mapUnit(ev)); return; }
       if (calibrating) { handleCalibrateClick(mapUnit(ev)); return; }
+      if (isMapBackground(ev)) startPan(ev);
       return;
     }
     if (activeLayer === "areas") {
@@ -1600,7 +1611,9 @@
       // explicit "Redraw" (accidental drags kept wrecking it).
       if (isMapBackground(ev) && (!doc.secure_area || secureDrawArmed)) {
         secureAreaDrag(ev);
+        return;
       }
+      if (isMapBackground(ev)) startPan(ev);
       return;
     }
     // View layer: measure when armed, else drag pans.
