@@ -966,6 +966,39 @@ async def map_zones(request: Request) -> dict[str, Any]:
     return {"t": _time.time(), "aspect": aspect, "zones": zones}
 
 
+@router.get("/map/footprints")
+async def map_footprints(request: Request) -> dict[str, Any]:
+    """Each placed camera's true projected ground footprint: the full
+    image frame pushed through its optics onto the floorplan, densified
+    and clipped at the horizon/range limit — the honest coverage view.
+    Cameras without layout/optics/scale are omitted."""
+    import time as _time
+
+    from frigate_sidecar.push import fusion, ground
+
+    active = policy_settings.get_active()
+    layout_table = active.get("camera_layout") or {}
+    scale_ft = active.get("map_scale_ft")
+    aspect = ground.map_aspect(active)
+    frame = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    footprints: list[dict[str, Any]] = []
+    if scale_ft and scale_ft > 0:
+        for camera in sorted(layout_table):
+            layout = layout_table[camera]
+            pts = fusion.project_polygon(
+                frame, camera=camera, layout_entry=layout,
+                scale_ft=scale_ft, aspect_h_over_w=aspect,
+            )
+            if pts is None:
+                continue
+            footprints.append({
+                "camera": camera,
+                "points": [[round(x, 4), round(y, 4)] for x, y in pts],
+                "clipped": len(pts) != len(frame),
+            })
+    return {"t": _time.time(), "aspect": aspect, "footprints": footprints}
+
+
 @router.get("/map/live")
 async def map_live(request: Request, debug: int = Query(default=0)) -> dict[str, Any]:
     """Current fused object positions on the floorplan map, for the /cameras

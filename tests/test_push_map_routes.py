@@ -119,3 +119,23 @@ def test_map_live_serves_fused_tracks(
     assert obj["label"] == "person"
     assert obj["cameras"] == ["cam"]
     assert obj["members"][0]["forward_ft"] > 0
+
+
+def test_map_footprints_projects_placed_cameras(
+    tmp_path: Path, frigate_db_path: Path, sidecar_db_path: Path,
+):
+    client = _make_client(tmp_path, frigate_db_path, sidecar_db_path)
+    _apply_map_policy()
+    body = client.get("/v1/push/map/footprints").json()
+    cams = [f["camera"] for f in body["footprints"]]
+    assert cams == ["cam", "gate"]  # placed+optics only; sorted
+    fp = body["footprints"][0]
+    assert len(fp["points"]) >= 3
+    assert fp["clipped"] is True  # frame top is sky at 12 deg tilt
+
+
+def test_map_footprints_without_scale_is_empty(
+    tmp_path: Path, frigate_db_path: Path, sidecar_db_path: Path,
+):
+    client = _make_client(tmp_path, frigate_db_path, sidecar_db_path)
+    assert client.get("/v1/push/map/footprints").json()["footprints"] == []
