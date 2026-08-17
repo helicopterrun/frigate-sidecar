@@ -357,7 +357,7 @@ a { color: var(--accent); }
    variants. Legacy selectors (.filters button, .faces-bar button, .presets
    .preset) are grandfathered onto the same rules so every page shares one
    button. */
-.btn, .btn-primary, .filters button, .faces-bar button {
+.btn, .btn-primary, .btn-neutral, .btn-danger, .filters button, .faces-bar button {
   display: inline-block; border: 0; cursor: pointer;
   padding: 6px 14px; border-radius: var(--radius-sm); font-size: var(--text-sm);
   font-family: inherit; background: var(--accent); color: var(--on-accent);

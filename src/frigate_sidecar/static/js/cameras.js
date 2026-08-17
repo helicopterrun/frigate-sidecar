@@ -2006,9 +2006,8 @@
     drawLandmarkMarkers();
   }
 
-  landmarkBtn.addEventListener("click", function () {
-    if (!selectedCamera) return;
-    var entry = (doc.camera_layout || {})[selectedCamera];
+  function startLandmark(camera) {
+    var entry = (doc.camera_layout || {})[camera];
     if (!entry || entry.azimuth === undefined || !doc.map_scale_ft) {
       landmarkResult.textContent = "";
       showBanner(
@@ -2017,7 +2016,7 @@
       );
       return;
     }
-    var lmCam = selectedCamera;
+    var lmCam = camera;
     setLayer("calibrate"); // landmark clicks live on the Calibrate layer
     selectedCamera = lmCam;
     landmarkMode = lmCam;
@@ -2031,7 +2030,34 @@
     drawLandmarkMarkers();
     landmarkStatus();
     landmarkSection.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  landmarkBtn.addEventListener("click", function () {
+    if (!selectedCamera) return;
+    startLandmark(selectedCamera);
   });
+
+  // Per-camera entry pills on the Calibrate layer — the natural place to
+  // look for calibration; the detail-panel button stays as the contextual
+  // route.
+  var landmarkCams = document.getElementById("landmark-cams");
+  function renderLandmarkPills() {
+    if (!landmarkCams) return;
+    landmarkCams.textContent = "";
+    cameras.forEach(function (cam) {
+      var pill = SC.el("button", {
+        class: "btn-neutral inline-label",
+        type: "button",
+        text: cam,
+        title: "Landmark-calibrate " + cam,
+      });
+      pill.addEventListener("click", function () { startLandmark(cam); });
+      landmarkCams.appendChild(pill);
+    });
+    if (!cameras.length) {
+      landmarkCams.appendChild(SC.el("span", { text: "no cameras" }));
+    }
+  }
 
   landmarkSnap.addEventListener("pointerdown", function (ev) {
     if (!landmarkMode || landmarkPending) return;
@@ -2177,8 +2203,13 @@
       mapScaleInput.value = doc.map_scale_ft || "";
       applyFloorplan();
       renderOnboarding();
+      renderLandmarkPills();
       renderMap();
       if (!cameras.length) showBanner("No cameras found in the Frigate config.", false);
+      // Deep link: /cameras?landmark=<camera> jumps straight into landmark
+      // calibration for that camera (used by the settings page).
+      var lmParam = new URLSearchParams(location.search).get("landmark");
+      if (lmParam && cameras.indexOf(lmParam) !== -1) startLandmark(lmParam);
     } catch (err) {
       showBanner(err.message, true);
     } finally {
