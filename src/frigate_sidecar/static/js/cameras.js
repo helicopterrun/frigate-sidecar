@@ -2061,15 +2061,21 @@
   }
 
   landmarkSnap.addEventListener("pointerdown", function (ev) {
-    if (!landmarkMode || landmarkPending) return;
+    if (!landmarkMode) return;
     ev.preventDefault();
     var rect = landmarkSnap.getBoundingClientRect();
+    // A tap while a point is already pending MOVES the pending point — a
+    // silent ignore here read as "the second point won't place" on phones,
+    // where the map (the actual next step) sits scrolled out of view.
     landmarkPending = {
       u: Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width)),
       v: Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height)),
     };
     drawLandmarkMarkers();
     landmarkStatus();
+    // The pair completes on the map — bring it into view so the required
+    // next tap is visible (no-op when it already is).
+    mapEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
   });
 
   function handleLandmarkMapClick(p) {
@@ -2080,6 +2086,8 @@
     landmarkPending = null;
     drawLandmarkMarkers();
     landmarkStatus();
+    // Back to the snapshot for the next pair (no-op when already visible).
+    landmarkSection.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 
   landmarkUndoBtn.addEventListener("click", function () {
