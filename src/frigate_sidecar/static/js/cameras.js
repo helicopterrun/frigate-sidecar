@@ -1685,9 +1685,13 @@
   function secureAreaDrag(ev) {
     // mapUnit per move (never a cached rect): a pan/zoom mid-drag must not
     // un-anchor the rectangle.
+    // Gesture tracked on WINDOW like every other map drag: renderMap()
+    // rebuilds the SVG each move, and iOS Safari drops a captured pointer
+    // stream when the touched element is removed — mapEl-scoped listeners
+    // froze the rectangle at the start point on phones.
+    ev.preventDefault();
     var start = mapUnit(ev);
     var moved = false;
-    mapEl.setPointerCapture(ev.pointerId);
     function move(mv) {
       if (pinchActive) return;
       var p = mapUnit(mv);
@@ -1700,8 +1704,8 @@
       renderMap();
     }
     function up() {
-      mapEl.removeEventListener("pointermove", move);
-      mapEl.removeEventListener("pointerup", up);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
       if (moved) {
         markDirty();
         secureDrawArmed = false; // one redraw per arm — then locked again
@@ -1709,8 +1713,8 @@
         syncSecureControls();
       }
     }
-    mapEl.addEventListener("pointermove", move);
-    mapEl.addEventListener("pointerup", up);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   }
 
   // The per-layer map dispatcher. Per-element camera drags (pie, ring,
