@@ -161,7 +161,10 @@ export class Renderer {
     const t = floorplanTransform(doc);
     if (t) this.fpImage.setAttribute("transform", t);
     else this.fpImage.removeAttribute("transform");
-    this.fpImage.setAttribute("height", mapAspect(doc));
+    // Content is ALWAYS the unit square: y 0..1 spans the plan's full height
+    // (layout coords, secure_area and the server's ground math all assume
+    // this); the viewBox height (view.viewH) is what corrects the aspect.
+    this.fpImage.setAttribute("height", 1);
     // Dim = how much the plan recedes so overlays read on light drawings.
     this.fpImage.setAttribute("opacity", String(1 - this.dimFloorplan));
   }
@@ -189,13 +192,14 @@ export class Renderer {
     const w = this.view.sz(0.0012);
     for (let x = 0; x <= 1 + 1e-9; x += stepX) {
       make("line", {
-        x1: x, y1: 0, x2: x, y2: aspect,
+        x1: x, y1: 0, x2: x, y2: 1,
         stroke: "var(--muted, #9AA3AB)", "stroke-opacity": "0.25",
         "stroke-width": w,
       }, this.gGrid);
     }
-    const stepY = stepX; // square feet: unit-y step equals unit-x step
-    for (let y = 0; y <= aspect + 1e-9; y += stepY) {
+    // Square feet: a unit-y step covers scale·aspect ft, so divide it out.
+    const stepY = stepX / aspect;
+    for (let y = 0; y <= 1 + 1e-9; y += stepY) {
       make("line", {
         x1: 0, y1: y, x2: 1, y2: y,
         stroke: "var(--muted, #9AA3AB)", "stroke-opacity": "0.25",
