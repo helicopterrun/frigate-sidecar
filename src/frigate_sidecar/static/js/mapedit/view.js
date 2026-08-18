@@ -105,7 +105,15 @@ export class MapView {
 
     el.addEventListener("wheel", (ev) => {
       ev.preventDefault();
-      this.zoom(ev.deltaY > 0 ? 1.15 : 1 / 1.15, this.clientToUnit(ev));
+      // Proportional to the actual wheel delta, not a fixed step per event:
+      // trackpads fire dozens of small events per flick and a fixed 1.15×
+      // each made zoom unusably fast. Line/page delta modes normalize to
+      // ~pixels; the exponent caps any single event at ~1.09×.
+      let dy = ev.deltaY;
+      if (ev.deltaMode === 1) dy *= 16;
+      else if (ev.deltaMode === 2) dy *= 160;
+      dy = Math.max(-45, Math.min(45, dy));
+      this.zoom(Math.exp(dy * 0.0019), this.clientToUnit(ev));
     }, { passive: false });
 
     el.addEventListener("dblclick", () => this.fit());
