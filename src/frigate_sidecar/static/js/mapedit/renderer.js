@@ -58,6 +58,16 @@ export class Renderer {
     this.selection = sel;
     for (const name of this.camNodes.keys()) this._updateCamera(name);
     this._updateSecure();
+    // Raise the selected camera above its neighbors: an overlapping wedge
+    // later in the DOM would otherwise swallow the selected camera's drag
+    // handles. Safe here — selection changes only from a completed tap,
+    // never mid-drag (moving a node under an active pointer kills the
+    // pointer stream on iOS).
+    const name = this.selectedCamera();
+    const n = name && this.camNodes.get(name);
+    if (n && n.g.parentNode === this.gCameras && this.gCameras.lastChild !== n.g) {
+      this.gCameras.appendChild(n.g);
+    }
   }
 
   selectedCamera() {
