@@ -647,3 +647,5 @@ body.map-full-open { overflow: hidden; }
 .live-stage { border: 1px solid var(--stroke); border-radius: var(--radius-md); overflow: hidden; background: var(--deep); }
 .live-stage img { display: block; width: 100%; max-height: 82vh; object-fit: contain; }
 .live-cam-switch .vis-chip { text-decoration: none; }
+.live-stage video-stream { display: block; width: 100%; }
+.live-stage video { display: block; width: 100%; max-height: 82vh; object-fit: contain; }

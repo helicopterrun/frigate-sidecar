@@ -11,10 +11,22 @@
     {% endfor %}
   </div>
   <div class="live-stage">
-    {# Frigate's MJPEG debug feed, served through the sidecar's proxy. #}
-    <img id="live-stream" src="/api/{{ camera }}" alt="{{ camera }} live stream">
+    {# go2rtc web component (vendored, v1.9.10 to match the NVR): WebRTC with
+       automatic MSE/MJPEG fallback, signaled over the sidecar proxy →
+       Frigate → go2rtc websocket. #}
+    <video-stream id="live-stream" mode="webrtc,mse,mjpeg"></video-stream>
   </div>
-  <p class="help">MJPEG feed from Frigate via the sidecar proxy — a few seconds
-    of latency is normal. <a href="/">Back to status</a>.</p>
+  <p class="help">go2rtc stream (WebRTC, falls back to MSE/MJPEG) via the
+    sidecar proxy. <a href="/">Back to status</a>.</p>
 </main>
+{% endblock %}
+
+{% block scripts %}
+<script type="module">
+  import "/static/js/video-stream.js?v={{ asset_v }}";
+  var el = document.getElementById("live-stream");
+  var proto = location.protocol === "https:" ? "wss:" : "ws:";
+  el.src = proto + "//" + location.host +
+    "/live/webrtc/api/ws?src={{ camera | urlencode }}";
+</script>
 {% endblock %}
