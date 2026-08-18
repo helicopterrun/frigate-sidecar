@@ -64,6 +64,34 @@ export class Renderer {
     return this.selection?.kind === "camera" ? this.selection.camera : null;
   }
 
+  // Numbered map pins for the landmark tool (transient, live in g#tool).
+  setToolPins(pins) {
+    this._toolPins = pins || [];
+    this._updateToolPins();
+  }
+
+  _updateToolPins() {
+    if (!this._pinsG) {
+      this._pinsG = make("g", {}, this.gTool);
+      this._pinsG.style.pointerEvents = "none";
+    }
+    this._pinsG.textContent = "";
+    const sz = (v) => this.view.sz(v);
+    for (const p of this._toolPins || []) {
+      make("circle", {
+        cx: p.x, cy: p.y, r: sz(0.012),
+        fill: p.pending ? "var(--warn, #e3b341)" : "var(--ok, #4caf82)",
+        stroke: "var(--deep, #0B0C10)", "stroke-width": sz(0.003),
+      }, this._pinsG);
+      const t = make("text", {
+        x: p.x, y: p.y + sz(0.008), "text-anchor": "middle",
+        "font-size": sz(0.02), fill: "var(--deep, #0B0C10)",
+        "font-weight": "700",
+      }, this._pinsG);
+      t.textContent = String(p.label);
+    }
+  }
+
   // Overlay extension point for the later observer round.
   registerOverlay(ov) {
     const g = make("g", { "data-overlay": ov.id }, this.gOverlays);
@@ -99,6 +127,7 @@ export class Renderer {
     this._updateGrid();
     this._updateSecure();
     this._reconcileCameras();
+    this._updateToolPins();
   }
 
   setDim(v) {

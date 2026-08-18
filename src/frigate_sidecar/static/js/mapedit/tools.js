@@ -80,7 +80,13 @@ export class Tools {
 
     if (this.tool === "area") { this._startSecureDraw(ev); return; }
     if (this.tool === "scale") { this._startScaleDraw(ev); return; }
-    if (this.tool !== "select") return; // landmark handles its own clicks
+    if (this.tool === "landmark") {
+      // Pan still works while calibrating; a tap places the map half of a
+      // landmark pair.
+      this._startPanOrTap(ev, () => this.cb.onLandmarkMapClick(this.view.clientToUnit(ev)));
+      return;
+    }
+    if (this.tool !== "select") return;
 
     if (cam && hit === "body" && !this._locked(cam)) {
       this._startCameraMove(ev, cam); return;

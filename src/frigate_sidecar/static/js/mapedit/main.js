@@ -18,8 +18,12 @@ const renderer = new Renderer(stage, store, view);
 let inspector = null;
 const tools = new Tools(store, view, renderer, {
   onSelect: (sel) => inspector && inspector.setSelection(sel),
-  onToolChange: (name) => syncToolbar(name),
+  onToolChange: (name) => {
+    syncToolbar(name);
+    if (name !== "landmark" && inspector?.landmark) inspector.cancelLandmark();
+  },
   onScaleLine: (line) => inspector && inspector.scaleDialog(line),
+  onLandmarkMapClick: (p) => inspector && inspector.landmarkMapClick(p),
 });
 inspector = new Inspector(panel, store, view, renderer, tools);
 

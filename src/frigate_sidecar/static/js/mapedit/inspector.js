@@ -129,7 +129,8 @@ export class Inspector {
     this.detailEl.textContent = "";
     const doc = this.store.doc;
     if (!doc) return;
-    if (this.selection?.kind === "camera") this._cameraDetail(this.selection.camera);
+    if (this.landmark) this._landmarkDetail();
+    else if (this.selection?.kind === "camera") this._cameraDetail(this.selection.camera);
     else if (this.selection?.kind === "secure") this._secureDetail();
     else this._mapDetail();
   }
@@ -285,12 +286,188 @@ export class Inspector {
     }));
     d.appendChild(og);
 
+    const canLandmark = !locked && entry.azimuth !== undefined && doc.map_scale_ft;
+    const lmBtn = el("button", {
+      class: "btn-primary", text: "Landmark calibrate",
+      title: canLandmark
+        ? "Measure HFOV, azimuth and tilt by matching ground landmarks between the snapshot and the floorplan"
+        : "Needs the camera placed + aimed, the map scale set, and the camera unlocked",
+      onclick: () => this.startLandmark(cam),
+    });
+    if (!canLandmark) lmBtn.disabled = true;
     d.appendChild(el("div", { class: "me-actions" },
+      lmBtn,
       el("button", {
         class: "btn-neutral", text: "Remove from map", disabled: locked || undefined,
         onclick: () => this.store.edit(`remove ${cam} from map`, (dd) => {
           if (dd.camera_layout) delete dd.camera_layout[cam];
         }, ["camera_layout"]),
+      })));
+  }
+
+  // ---- Landmark calibration -------------------------------------------
+  // Pair clicks: snapshot (u,v) then map (mx,my); ≥2 pairs → Solve →
+  // before/after + residuals → Apply = one undoable command.
+
+  startLandmark(cam) {
+    this.landmark = { camera: cam, matches: [], pending: null, report: null };
+    this.tools.select({ kind: "camera", camera: cam });
+    this.tools.setTool("landmark");
+    this._syncLandmarkPins();
+    this.renderDetail();
+  }
+
+  cancelLandmark() {
+    if (!this.landmark) return;
+    this.landmark = null;
+    this.renderer.setToolPins([]);
+    if (this.tools.tool === "landmark") this.tools.setTool("select");
+    this.renderDetail();
+  }
+
+  landmarkMapClick(p) {
+    const lm = this.landmark;
+    if (!lm || !lm.pending) return;
+    lm.pending.mx = +p.x.toFixed(4);
+    lm.pending.my = +p.y.toFixed(4);
+    lm.matches.push(lm.pending);
+    lm.pending = null;
+    lm.report = null;
+    this._syncLandmarkPins();
+    this.renderDetail();
+  }
+
+  _syncLandmarkPins() {
+    const lm = this.landmark;
+    if (!lm) { this.renderer.setToolPins([]); return; }
+    this.renderer.setToolPins(
+      lm.matches.map((m, i) => ({ x: m.mx, y: m.my, label: i + 1 })));
+  }
+
+  _landmarkDetail() {
+    const lm = this.landmark;
+    const d = this.detailEl;
+    d.appendChild(el("div", { class: "me-sec-title" },
+      el("span", { text: `Landmark · ${lm.camera}` }),
+      el("button", { class: "btn-neutral", text: "Cancel", onclick: () => this.cancelLandmark() })));
+
+    const n = lm.matches.length;
+    d.appendChild(el("p", {
+      class: "help",
+      text: lm.pending
+        ? `Now tap the SAME spot on the map (pair ${n + 1}).`
+        : `Tap a ground landmark in the snapshot (gate post, path corner…) — ${n} pair${n === 1 ? "" : "s"} so far, 2–12 needed.`,
+    }));
+
+    const wrap = el("div", { class: "me-lmwrap" });
+    const img = el("img", {
+      class: "me-snap", alt: lm.camera,
+      src: `/api/${encodeURIComponent(lm.camera)}/latest.jpg?h=720&cache=${lm.cacheKey || (lm.cacheKey = Date.now())}`,
+    });
+    img.style.cursor = "crosshair";
+    img.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      const rect = img.getBoundingClientRect();
+      // Clicking again while pending MOVES the pending point.
+      lm.pending = {
+        u: Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width)),
+        v: Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height)),
+      };
+      this.renderDetail();
+    });
+    wrap.appendChild(img);
+    const all = lm.matches.concat(lm.pending ? [lm.pending] : []);
+    all.forEach((m, i) => {
+      const dot = el("span", {
+        class: "me-lmdot" + (m.mx === undefined ? " pending" : ""),
+        text: String(i + 1),
+      });
+      dot.style.left = (m.u * 100) + "%";
+      dot.style.top = (m.v * 100) + "%";
+      wrap.appendChild(dot);
+    });
+    d.appendChild(wrap);
+
+    const actions = el("div", { class: "me-actions" });
+    const undoBtn = el("button", {
+      class: "btn-neutral", text: lm.pending ? "Drop pending" : "Undo pair",
+      onclick: () => {
+        if (lm.pending) lm.pending = null;
+        else lm.matches.pop();
+        lm.report = null;
+        this._syncLandmarkPins();
+        this.renderDetail();
+      },
+    });
+    if (!lm.pending && !n) undoBtn.disabled = true;
+    actions.appendChild(undoBtn);
+    const solveBtn = el("button", {
+      class: "btn-primary", text: lm.solving ? "Solving…" : "Solve",
+      onclick: () => this._landmarkSolve(),
+    });
+    if (n < 2 || lm.pending || lm.solving) solveBtn.disabled = true;
+    actions.appendChild(solveBtn);
+    d.appendChild(actions);
+
+    if (lm.error) d.appendChild(el("p", { class: "help", text: "⚠ " + lm.error }));
+    if (lm.report) this._landmarkReport(d, lm);
+  }
+
+  async _landmarkSolve() {
+    const lm = this.landmark;
+    lm.solving = true;
+    lm.error = null;
+    this.renderDetail();
+    try {
+      lm.report = await window.SC.fetchJson("/v1/push/map/landmark-solve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ camera: lm.camera, matches: lm.matches }),
+      });
+    } catch (e) {
+      lm.error = e.message;
+    }
+    lm.solving = false;
+    this.renderDetail();
+  }
+
+  _landmarkReport(d, lm) {
+    const r = lm.report;
+    d.appendChild(el("div", { class: "me-lmreport" },
+      el("div", { text: `HFOV ${r.hfov_before}° → ${r.hfov_after}°` }),
+      el("div", { text: `azimuth ${r.azimuth_before}° → ${r.azimuth_after}°` }),
+      el("div", { text: `tilt ${r.tilt_before}° → ${r.tilt_after}°` }),
+      el("div", { text: `fit error ${r.rms_ft} ft (per point: ${r.residual_ft.join(", ")})` })));
+    const worst = Math.max(...r.residual_ft);
+    if (worst > 8) {
+      d.appendChild(el("p", {
+        class: "help",
+        text: `⚠ point ${r.residual_ft.indexOf(worst) + 1} fits poorly (${worst} ft) — mismatched click? Undo it and re-add.`,
+      }));
+    }
+    d.appendChild(el("div", { class: "me-actions" },
+      el("button", {
+        class: "btn-primary", text: "Apply",
+        onclick: () => {
+          const cam = lm.camera;
+          this.store.edit(`landmark-calibrate ${cam}`, (dd) => {
+            if (!dd.camera_optics) dd.camera_optics = {};
+            if (!dd.camera_optics[cam]) dd.camera_optics[cam] = {};
+            const o = dd.camera_optics[cam];
+            o.hfov = r.hfov_after;
+            o.tilt_deg = r.tilt_after;
+            if (r.vfov_after !== null && r.vfov_after !== undefined && o.vfov) {
+              o.vfov = r.vfov_after;
+            }
+            const entry = (dd.camera_layout || {})[cam];
+            if (entry) {
+              entry.azimuth = r.azimuth_after;
+              entry.fov = r.hfov_after; // keep the wedge honest too
+            }
+          }, ["camera_optics", "camera_layout"]);
+          this.cancelLandmark();
+          this.flash(`${lm.camera} calibrated — Save to keep it.`);
+        },
       })));
   }
 
@@ -392,6 +569,11 @@ export class Inspector {
         }, ["floorplan"]),
       }) : null,
       el("button", {
+        class: "btn-neutral", text: "Auto-tune aim",
+        title: "Replay the capture history: where two cameras saw the same object at the same instant, tune azimuth/tilt so their projections agree",
+        onclick: (ev) => this._autotune(ev.target),
+      }),
+      el("button", {
         class: "btn-neutral", text: "Reload Frigate config",
         title: "Re-sync camera and zone names from Frigate",
         onclick: async (ev) => {
@@ -411,6 +593,67 @@ export class Inspector {
       text: "Select a camera to edit it. Drag its dot to move, the knob to aim, " +
         "a wedge edge to widen. Shift bypasses grid snap, Alt bypasses angle snap.",
     }));
+  }
+
+  async _autotune(btn) {
+    btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = "Tuning…";
+    let body;
+    try {
+      body = await window.SC.fetchJson("/v1/push/map/autotune?minutes=240", { method: "POST" });
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = prev;
+      this.flash("auto-tune: " + e.message);
+      return;
+    }
+    btn.disabled = false;
+    btn.textContent = prev;
+    const r = body.report;
+    const changed = Object.keys(r.cameras || {}).sort().filter((cam) => {
+      const c = r.cameras[cam];
+      const dAz = Math.abs(((c.azimuth_after - c.azimuth_before + 540) % 360) - 180);
+      return dAz >= 0.2 || Math.abs(c.tilt_after - c.tilt_before) >= 0.2;
+    });
+    const overlay = el("div", { class: "me-overlay" });
+    const lines = el("div", { class: "me-lmreport" },
+      el("div", { text: `RMS ${r.rms_before_ft} → ${r.rms_after_ft} ft (${body.elapsed_s}s)` }),
+      ...changed.map((cam) => {
+        const c = r.cameras[cam];
+        return el("div", {
+          text: `${cam}: azimuth ${c.azimuth_before}° → ${c.azimuth_after}°, ` +
+            `tilt ${c.tilt_before}° → ${c.tilt_after}° (${c.pairs} pairs)`,
+        });
+      }),
+      ...(r.warnings || []).map((w) => el("div", { text: "⚠ " + w })),
+      changed.length ? null
+        : el("div", { text: "No meaningful corrections — aim already agrees with the data." }));
+    const actions = el("div", { class: "me-actions" },
+      changed.length ? el("button", {
+        class: "btn-primary", text: "Apply",
+        onclick: () => {
+          overlay.remove();
+          this.store.edit("auto-tune aim", (dd) => {
+            for (const cam of changed) {
+              const entry = (dd.camera_layout || {})[cam];
+              if (entry?.locked) continue; // bulk tools respect the lock
+              const c = r.cameras[cam];
+              if (entry) entry.azimuth = c.azimuth_after;
+              if ((dd.camera_optics || {})[cam]) {
+                dd.camera_optics[cam].tilt_deg = c.tilt_after;
+              }
+            }
+          }, ["camera_layout", "camera_optics"]);
+          this.flash("Auto-tune applied — Save to keep it.");
+        },
+      }) : null,
+      el("button", {
+        class: "btn-neutral", text: changed.length ? "Cancel" : "Close",
+        onclick: () => overlay.remove(),
+      }));
+    overlay.appendChild(el("div", { class: "me-dialog" }, lines, actions));
+    document.body.appendChild(overlay);
   }
 
   async _uploadFloorplan(fileInput) {
