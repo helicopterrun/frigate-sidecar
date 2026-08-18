@@ -649,3 +649,93 @@ body.map-full-open { overflow: hidden; }
 .live-cam-switch .vis-chip { text-decoration: none; }
 .live-stage video-stream { display: block; width: 100%; }
 .live-stage video { display: block; width: 100%; max-height: 82vh; object-fit: contain; }
+
+/* --- Map editor (/cameras2 rebuild) ------------------------------------ */
+.me-root { display: flex; flex-direction: column; }
+.me-frame {
+  display: grid; grid-template-columns: 44px 1fr 320px; gap: 8px;
+  height: calc(100dvh - 130px); min-height: 420px;
+}
+.me-toolbar {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 4px 0;
+}
+.me-toolbtn {
+  width: 40px; height: 40px; font-size: 16px; line-height: 1;
+  background: var(--surface); color: var(--muted);
+  border: 1px solid var(--stroke); border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.me-toolbtn:hover { color: var(--text); border-color: var(--accent); }
+.me-toolbtn.active { color: var(--accent); border-color: var(--accent); background: var(--surface-2); }
+.me-toolgap { flex: 0 0 12px; }
+.me-frame .me-stage { height: 100%; background: var(--deep); }
+.me-svg { width: 100%; height: 100%; display: block; }
+.me-panel {
+  overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+  background: var(--surface); border: 1px solid var(--stroke);
+  border-radius: var(--radius-md); padding: 10px;
+}
+.me-sec-title {
+  display: flex; align-items: center; justify-content: space-between;
+  font-weight: 600; font-size: 13px; color: var(--text);
+}
+.me-sec-sub { font-size: 11px; color: var(--muted); margin-top: 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+.me-camlist { display: flex; flex-direction: column; gap: 2px; }
+.me-camrow {
+  display: flex; align-items: center; gap: 8px; padding: 5px 6px;
+  border-radius: var(--radius-sm); cursor: pointer; font-size: 12px;
+  border: 1px solid transparent;
+}
+.me-camrow:hover { background: var(--surface-2); }
+.me-camrow.sel { border-color: var(--accent); background: var(--surface-2); }
+.me-camdot { color: var(--muted); font-size: 10px; width: 14px; text-align: center; }
+.me-camdot.placed { color: var(--ok, #4caf82); }
+.me-camname { flex: 1; color: var(--text); font-family: var(--mono, monospace); }
+.me-camaz { color: var(--muted); font-size: 11px; font-family: var(--mono, monospace); }
+.me-place { padding: 1px 8px; font-size: 11px; }
+.me-detail { display: flex; flex-direction: column; gap: 6px; }
+.me-snap { width: 100%; border-radius: var(--radius-sm); border: 1px solid var(--stroke); background: var(--deep); }
+.me-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; }
+.me-field { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); min-width: 0; }
+.me-field-label { flex: 0 0 auto; white-space: nowrap; }
+.me-field-unit { flex: 0 0 auto; }
+.me-field .me-num { width: 100%; min-width: 0; }
+.me-num {
+  background: var(--panel); color: var(--text); border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm); padding: 3px 5px; font-size: 12px;
+  font-family: var(--mono, monospace);
+}
+.me-dim input[type=range] { width: 100%; }
+.me-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.me-hint { margin-top: 8px; }
+.me-savebar {
+  margin-top: auto; position: sticky; bottom: 0; background: var(--surface);
+  padding-top: 8px; border-top: 1px solid var(--stroke-soft);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.me-savebar.dirty { border-top-color: var(--accent); }
+.me-undoredo { display: flex; gap: 6px; }
+.me-undo { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.me-saverow { display: flex; align-items: center; gap: 8px; }
+.me-dirtymark { color: var(--accent); font-size: 11px; flex: 1; }
+.me-savemsg { font-size: 11px; color: var(--muted); }
+.me-overlay {
+  position: fixed; inset: 0; z-index: 80; display: flex;
+  align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--deep) 60%, transparent);
+}
+.me-dialog {
+  background: var(--surface); border: 1px solid var(--stroke);
+  border-radius: var(--radius-lg); padding: 16px; max-width: 340px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+@media (max-width: 820px) {
+  .me-frame {
+    grid-template-columns: 1fr; grid-template-rows: auto 1fr auto;
+    height: calc(100dvh - 150px);
+  }
+  .me-toolbar { flex-direction: row; }
+  .me-panel { max-height: 42%; }
+  .me-frame .me-stage { height: 100%; }
+}

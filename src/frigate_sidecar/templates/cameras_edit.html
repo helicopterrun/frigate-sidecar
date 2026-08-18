@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% set active_page = 'cameras' %}
+{% block title %}Map editor · frigate-sidecar{% endblock %}
+
+{% block body %}
+<main class="me-root">
+  <div id="me-banner" class="help page-intro" style="display:none"></div>
+  <div class="me-frame">
+    <div id="me-toolbar" class="me-toolbar"></div>
+    <div id="me-stage" class="me-stage cam-map skeleton"></div>
+    <aside id="me-panel" class="me-panel"></aside>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>window.LENS_PRESETS = {{ lens_presets_json | safe }};</script>
+<script type="module" src="/static/js/mapedit/main.js"></script>
+{% endblock %}

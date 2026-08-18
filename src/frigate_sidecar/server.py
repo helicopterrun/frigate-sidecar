@@ -64,7 +64,15 @@ class _CachedStaticFiles(StaticFiles):
 
     def file_response(self, *args: object, **kwargs: object) -> Response:
         response = super().file_response(*args, **kwargs)  # type: ignore[arg-type]
-        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        # ES modules under js/mapedit/ import each other by bare relative path
+        # (no ?v= stamp possible on `import` specifiers), so they revalidate
+        # via ETag instead of caching immutably.
+        scope = args[2] if len(args) > 2 else kwargs.get("scope")
+        path = scope.get("path", "") if isinstance(scope, dict) else ""
+        if "/js/mapedit/" in path:
+            response.headers["Cache-Control"] = "no-cache"
+        else:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 
 # The proxy's catch-all: everything registered before it is a route the sidecar

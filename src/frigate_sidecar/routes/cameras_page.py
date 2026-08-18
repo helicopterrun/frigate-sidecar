@@ -27,3 +27,17 @@ def cameras_view(request: Request) -> Any:
         request, "cameras.html",
         {"lens_presets_json": json.dumps(presets["lenses"])},
     )
+
+
+@router.get("/cameras2", response_class=HTMLResponse)
+def cameras_edit_view(request: Request) -> Any:
+    """CAD-style rebuild of the map editor (docs/cameras-page-rebuild-notes.md).
+
+    Lives at /cameras2 while the rebuild is verified side-by-side; the final
+    commit points /cameras here and retires the legacy page."""
+    templates = request.app.state.templates
+    presets = optics.presets_payload()
+    return templates.TemplateResponse(
+        request, "cameras_edit.html",
+        {"lens_presets_json": json.dumps(presets["lenses"])},
+    )
