@@ -12,12 +12,15 @@
   </p>
   <form id="login-form">
     <label class="help" style="display:block;margin-top:0.8em">username
-      <input id="login-user" type="text" autocomplete="username" required
+      <input id="login-user" name="username" type="text" autocomplete="username" required
              style="display:block;width:100%;margin-top:0.2em">
     </label>
     <label class="help" style="display:block;margin-top:0.8em">password
-      <input id="login-password" type="password" autocomplete="current-password" required
+      <input id="login-password" name="password" type="password" autocomplete="current-password" required
              style="display:block;width:100%;margin-top:0.2em">
+    </label>
+    <label class="help" style="display:block;margin-top:0.8em">
+      <input id="login-remember" type="checkbox" checked> stay signed in for 30 days
     </label>
     <button type="submit" class="btn-primary" style="margin-top:1em">Log in</button>
     <span id="login-state" class="help" style="margin-left:0.6em"></span>
@@ -48,6 +51,13 @@
           ? "wrong username or password"
           : "login failed (HTTP " + resp.status + ")";
         return;
+      }
+      if (document.getElementById("login-remember").checked) {
+        // Mint the sidecar's long-lived remember-me cookie with the fresh
+        // Frigate session; a failure here just means a normal-length session.
+        try {
+          await fetch("/login/remember", { method: "POST", credentials: "same-origin" });
+        } catch (e2) { /* non-fatal */ }
       }
       // Only ever bounce to a same-origin path — a full URL or
       // protocol-relative value in ?next= must not become an open redirect.

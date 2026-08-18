@@ -31,7 +31,10 @@ proxy's streaming responses.
 from __future__ import annotations
 
 import hashlib
+import hmac
+import secrets
 import time
+from http.cookies import SimpleCookie
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -59,6 +62,63 @@ EXEMPT_PATHS = frozenset({"/healthz", "/version", "/v1/capabilities", "/login"})
 # any other `/v1/push/...` route (device registration, handle redemption,
 # snooze, etc. all stay gated).
 EXEMPT_PREFIXES = ("/static/", "/v1/push/thumbnail/")
+
+
+REMEMBER_COOKIE = "sidecar_remember"
+
+
+def session_secret(app: FastAPI) -> bytes:
+    """Per-install signing secret for the remember-me cookie.
+
+    Persisted next to the sidecar DB so tokens survive restarts; deleting the
+    file invalidates every outstanding remember-me cookie at once.
+    """
+    cached: bytes | None = getattr(app.state, "session_secret", None)
+    if cached is not None:
+        return cached
+    settings: Settings = app.state.settings
+    path = settings.sidecar.db_path.parent / ".session_secret"
+    try:
+        secret = path.read_bytes().strip()
+        if len(secret) < 32:
+            raise ValueError("secret too short")
+    except (OSError, ValueError):
+        secret = secrets.token_hex(32).encode()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(mode=0o600, exist_ok=True)
+            path.write_bytes(secret)
+        except OSError:
+            # Unwritable data dir: tokens still work until restart.
+            pass
+    app.state.session_secret = secret
+    return secret
+
+
+def mint_remember_token(app: FastAPI, ttl_s: float) -> str:
+    expiry = str(int(time.time() + ttl_s))
+    sig = hmac.new(session_secret(app), f"remember:{expiry}".encode(), hashlib.sha256).hexdigest()
+    return f"{expiry}.{sig}"
+
+
+def _remember_token_valid(app: FastAPI, token: str) -> bool:
+    expiry, _, sig = token.partition(".")
+    if not expiry.isdigit() or not sig:
+        return False
+    if int(expiry) <= time.time():
+        return False
+    want = hmac.new(session_secret(app), f"remember:{expiry}".encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(want, sig)
+
+
+def _cookie_value(cookie_header: str, name: str) -> str:
+    try:
+        jar = SimpleCookie()
+        jar.load(cookie_header)
+        morsel = jar.get(name)
+        return morsel.value if morsel else ""
+    except Exception:  # noqa: BLE001 -- malformed cookie header is just "absent"
+        return ""
 
 
 def _cache(app: FastAPI) -> dict[str, float]:
@@ -173,6 +233,13 @@ class FrigateAuthMiddleware:
             if name == b"cookie":
                 cookie = value.decode("latin-1")
                 break
+
+        # A valid remember-me cookie ("stay signed in" at /login) admits the
+        # request even after Frigate's own JWT has expired.
+        remember = _cookie_value(cookie, REMEMBER_COOKIE)
+        if remember and _remember_token_valid(app, remember):
+            await self.app(scope, receive, send)
+            return
 
         try:
             await validate_frigate_session(app, cookie)

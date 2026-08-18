@@ -15,6 +15,33 @@
         {{ status.frigate.version if status.frigate.reachable else 'unreachable' }}
       </div>
     </div>
+    {% if status.push.enabled %}
+    <div class="stat-card">
+      <div class="stat-label">MQTT</div>
+      <div class="stat-value cell-class {{ 'ok' if status.push.mqtt_connected else 'noise' }}" data-k="mqtt">
+        {{ 'live' if status.push.mqtt_connected else 'stale' }}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Frigate (via MQTT)</div>
+      <div class="stat-value cell-class {{ 'ok' if status.push.frigate_online else 'noise' }}" data-k="frigate-online">
+        {{ 'online' if status.push.frigate_online else 'offline' }}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Broker traffic</div>
+      <div class="stat-value" data-k="last-traffic">{{ (status.push.last_event_s_ago ~ 's ago') if status.push.last_event_s_ago is not none else '—' }}</div>
+    </div>
+    {% else %}
+    <div class="stat-card">
+      <div class="stat-label">Push</div>
+      <div class="stat-value cell-class muted" data-k="push">off</div>
+    </div>
+    {% endif %}
+    <div class="stat-card">
+      <div class="stat-label">Devices</div>
+      <div class="stat-value" data-k="devices">{{ status.push.device_count }}</div>
+    </div>
     <div class="stat-card">
       <div class="stat-label">Scrub cache</div>
       <div class="stat-value cell-class {{ 'ok' if status.scrub.enabled else 'muted' }}" data-k="scrub">
@@ -22,16 +49,29 @@
       </div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Push</div>
-      <div class="stat-value cell-class {{ 'ok' if status.push.enabled else 'muted' }}" data-k="push">
-        {{ 'on' if status.push.enabled else 'off' }}
-      </div>
+      <div class="stat-label">Sidecar DB</div>
+      <div class="stat-value" data-k="sidecar-db">{{ fmt_bytes(status.sizes.sidecar_db) }}</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Devices</div>
-      <div class="stat-value" data-k="devices">{{ status.push.device_count }}</div>
+      <div class="stat-label">Frigate DB</div>
+      <div class="stat-value" data-k="frigate-db">{{ fmt_bytes(status.sizes.frigate_db) }}</div>
     </div>
   </div>
+
+  {% if status.cameras %}
+  <h2 class="section-h">Cameras <span class="help">— tap a camera for its live stream</span></h2>
+  <div class="snap-grid">
+    {% for cam in status.cameras %}
+    <a class="snap-card" href="/live/{{ cam }}" title="Open {{ cam }} live stream">
+      <img data-cam-snap="{{ cam }}" src="/api/{{ cam }}/latest.jpg?h=270" alt="{{ cam }} latest frame" loading="lazy">
+      <span class="snap-name">{{ cam }}</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <h2 class="section-h">Recent activity <span class="help">— latest Frigate events</span></h2>
+  <div id="event-strip" class="event-strip"><span class="help">loading…</span></div>
 
   {% if status.scrub.enabled %}
   <h2 class="section-h">Scrub generator</h2>
@@ -69,45 +109,8 @@
   </table>
   {% endif %}
 
-  {% if status.push.enabled %}
-  <h2 class="section-h">Push engine</h2>
-  <div class="stat-row">
-    <div class="stat-card">
-      <div class="stat-label">MQTT</div>
-      <div class="stat-value cell-class {{ 'ok' if status.push.mqtt_connected else 'noise' }}" data-k="mqtt">
-        {{ 'live' if status.push.mqtt_connected else 'stale' }}
-      </div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Frigate (via MQTT)</div>
-      <div class="stat-value cell-class {{ 'ok' if status.push.frigate_online else 'noise' }}" data-k="frigate-online">
-        {{ 'online' if status.push.frigate_online else 'offline' }}
-      </div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Last broker traffic</div>
-      <div class="stat-value" data-k="last-traffic">{{ (status.push.last_event_s_ago ~ 's ago') if status.push.last_event_s_ago is not none else '—' }}</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Transport</div>
-      <div class="stat-value">{{ status.push.transport }}</div>
-    </div>
-  </div>
-  {% endif %}
-
-  <h2 class="section-h">Storage</h2>
-  <div class="stat-row">
-    <div class="stat-card">
-      <div class="stat-label">Sidecar DB</div>
-      <div class="stat-value" data-k="sidecar-db">{{ fmt_bytes(status.sizes.sidecar_db) }}</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Frigate DB</div>
-      <div class="stat-value" data-k="frigate-db">{{ fmt_bytes(status.sizes.frigate_db) }}</div>
-    </div>
-  </div>
-
-  <p class="help">Refreshes every 10s from <code>/status.json</code>.</p>
+  <p class="help">Refreshes every 10s from <code>/status.json</code>; snapshots
+    and events refresh every 30s.</p>
 </main>
 {% endblock %}
 

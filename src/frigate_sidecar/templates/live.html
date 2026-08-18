@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% set active_page = 'status' %}
+{% block title %}{{ camera }} · live · frigate-sidecar{% endblock %}
+
+{% block body %}
+<main>
+  <h2 class="section-h" style="margin-top:0">Live — {{ camera }}</h2>
+  <div class="live-cam-switch">
+    {% for c in cameras %}
+    <a class="vis-chip {{ 'on' if c == camera else '' }}" href="/live/{{ c }}">{{ c }}</a>
+    {% endfor %}
+  </div>
+  <div class="live-stage">
+    {# Frigate's MJPEG debug feed, served through the sidecar's proxy. #}
+    <img id="live-stream" src="/api/{{ camera }}" alt="{{ camera }} live stream">
+  </div>
+  <p class="help">MJPEG feed from Frigate via the sidecar proxy — a few seconds
+    of latency is normal. <a href="/">Back to status</a>.</p>
+</main>
+{% endblock %}

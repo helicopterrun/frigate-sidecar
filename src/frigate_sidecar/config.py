@@ -72,6 +72,11 @@ class SidecarSection(BaseModel):
     # Hard cap on remembered sessions (Frigate rotates its JWT, so the key
     # space is unbounded without one).
     auth_cache_max_entries: int = 1024
+    # "Stay signed in" lifetime for the sidecar's own remember-me cookie,
+    # minted by POST /login/remember after a successful Frigate login. The
+    # sidecar never stores the password — the cookie is a signed expiry
+    # token, so revocation is "wait for expiry or rotate the secret file".
+    remember_ttl_s: float = 30 * 86400.0
 
 
 class FaceSection(BaseModel):

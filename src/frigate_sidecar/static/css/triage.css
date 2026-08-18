@@ -629,3 +629,21 @@ body.map-full-open { overflow: hidden; }
   .layer-group .btn-primary, #layer-seg ~ * .btn-primary { min-height: 40px; }
   #landmark-snapshot { max-width: 100%; }
 }
+
+/* --- Status page: camera snapshot grid, event strip, live view ---------- */
+.snap-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; margin-bottom: 8px; }
+.snap-card { position: relative; display: block; border: 1px solid var(--stroke); border-radius: var(--radius-md); overflow: hidden; background: var(--surface); text-decoration: none; }
+.snap-card img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: var(--panel); }
+.snap-card:hover { border-color: var(--accent); }
+.snap-name { position: absolute; left: 0; right: 0; bottom: 0; padding: 3px 8px; font-size: 11px; color: var(--text); background: color-mix(in srgb, var(--deep) 72%, transparent); }
+.event-strip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 8px; }
+.event-card { flex: 0 0 auto; display: flex; flex-direction: column; width: 150px; border: 1px solid var(--stroke); border-radius: var(--radius-md); overflow: hidden; background: var(--surface); text-decoration: none; }
+.event-card img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; background: var(--panel); }
+.event-card:hover { border-color: var(--accent); }
+.event-card.live { border-color: var(--accent); }
+.event-meta { padding: 4px 6px; font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.event-card.live .event-meta { color: var(--accent); }
+.live-cam-switch { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 8px; }
+.live-stage { border: 1px solid var(--stroke); border-radius: var(--radius-md); overflow: hidden; background: var(--deep); }
+.live-stage img { display: block; width: 100%; max-height: 82vh; object-fit: contain; }
+.live-cam-switch .vis-chip { text-decoration: none; }

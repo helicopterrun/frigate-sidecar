@@ -14,7 +14,7 @@ import time
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from frigate_sidecar import __version__, db
@@ -118,6 +118,14 @@ def _push_status(app_state: Any, settings: Any) -> dict[str, Any]:
     return push
 
 
+def _camera_names(settings: Any) -> list[str]:
+    with contextlib.suppress(Exception):
+        from frigate_sidecar.zones import load_camera_zones
+
+        return sorted(load_camera_zones(settings.frigate.config_path).keys())
+    return []
+
+
 async def _gather_status(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     now = time.time()
@@ -129,6 +137,7 @@ async def _gather_status(request: Request) -> dict[str, Any]:
     return {
         "version": __version__,
         "time": now,
+        "cameras": _camera_names(settings),
         "frigate": await frigate_task,
         "proxy_enabled": settings.proxy.enabled,
         "scrub": scrub,
@@ -144,6 +153,19 @@ async def _gather_status(request: Request) -> dict[str, Any]:
 @router.get("/status.json")
 async def status_json(request: Request) -> dict[str, Any]:
     return await _gather_status(request)
+
+
+@router.get("/live/{camera}", response_class=HTMLResponse)
+def live_view(request: Request, camera: str) -> Any:
+    """Single-camera live view: Frigate's MJPEG feed through the proxy."""
+    settings = request.app.state.settings
+    cameras = _camera_names(settings)
+    if camera not in cameras:
+        raise HTTPException(status_code=404, detail="unknown camera")
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request, "live.html", {"camera": camera, "cameras": cameras}
+    )
 
 
 @router.get("/", response_class=HTMLResponse)

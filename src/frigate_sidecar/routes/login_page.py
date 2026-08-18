@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import HTMLResponse
+
+from frigate_sidecar.auth import REMEMBER_COOKIE, mint_remember_token
 
 router = APIRouter(tags=["auth"])
 
@@ -20,3 +22,24 @@ router = APIRouter(tags=["auth"])
 def login_view(request: Request) -> Any:
     templates = request.app.state.templates
     return templates.TemplateResponse(request, "login.html", {})
+
+
+@router.post("/login/remember", status_code=204)
+def login_remember(request: Request, response: Response) -> Response:
+    """Mint the "stay signed in" cookie.
+
+    Gated by FrigateAuthMiddleware like every owned route, so it only works
+    for a caller who *just* proved a live Frigate session — the cookie is a
+    signed expiry token, no credentials involved.
+    """
+    ttl = request.app.state.settings.sidecar.remember_ttl_s
+    response.set_cookie(
+        REMEMBER_COOKIE,
+        mint_remember_token(request.app, ttl),
+        max_age=int(ttl),
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    response.status_code = 204
+    return response

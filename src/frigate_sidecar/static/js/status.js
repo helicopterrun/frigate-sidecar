@@ -60,11 +60,81 @@
     });
   }
 
-  function start() { if (!timer) timer = setInterval(tick, INTERVAL_MS); }
-  function stop() { clearInterval(timer); timer = null; }
+  // --- Camera snapshots + recent Frigate events (30s cadence) -------------
+  var MEDIA_INTERVAL_MS = 30000;
+  var mediaTimer = null;
+
+  function refreshSnaps() {
+    var imgs = document.querySelectorAll("[data-cam-snap]");
+    var t = Date.now();
+    for (var i = 0; i < imgs.length; i++) {
+      var cam = imgs[i].getAttribute("data-cam-snap");
+      imgs[i].src = "/api/" + encodeURIComponent(cam) + "/latest.jpg?h=270&t=" + t;
+    }
+  }
+
+  function relTime(epoch) {
+    var s = Math.max(0, Math.round(Date.now() / 1000 - epoch));
+    if (s < 90) return s + "s ago";
+    if (s < 5400) return Math.round(s / 60) + "m ago";
+    if (s < 172800) return Math.round(s / 3600) + "h ago";
+    return Math.round(s / 86400) + "d ago";
+  }
+
+  async function refreshEvents() {
+    var strip = document.getElementById("event-strip");
+    if (!strip) return;
+    var events;
+    try {
+      events = await SC.fetchJson("/api/events?limit=8");
+    } catch (e) {
+      return; // transient — keep whatever is showing
+    }
+    if (!Array.isArray(events)) return;
+    strip.textContent = "";
+    if (!events.length) {
+      var none = document.createElement("span");
+      none.className = "help";
+      none.textContent = "no recent events";
+      strip.appendChild(none);
+      return;
+    }
+    events.forEach(function (ev) {
+      var a = document.createElement("a");
+      a.className = "event-card";
+      a.href = "/live/" + encodeURIComponent(ev.camera);
+      a.title = "Open " + ev.camera + " live stream";
+      var img = document.createElement("img");
+      img.src = "/api/events/" + encodeURIComponent(ev.id) + "/thumbnail.jpg";
+      img.alt = ev.label + " on " + ev.camera;
+      img.loading = "lazy";
+      var meta = document.createElement("span");
+      meta.className = "event-meta";
+      var label = ev.sub_label || ev.label || "?";
+      var live = !ev.end_time;
+      meta.textContent = label + " · " + ev.camera + " · " +
+        (live ? "live now" : relTime(ev.start_time));
+      if (live) a.className += " live";
+      a.appendChild(img);
+      a.appendChild(meta);
+      strip.appendChild(a);
+    });
+  }
+
+  function mediaTick() { refreshSnaps(); refreshEvents(); }
+
+  function start() {
+    if (!timer) timer = setInterval(tick, INTERVAL_MS);
+    if (!mediaTimer) mediaTimer = setInterval(mediaTick, MEDIA_INTERVAL_MS);
+  }
+  function stop() {
+    clearInterval(timer); timer = null;
+    clearInterval(mediaTimer); mediaTimer = null;
+  }
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) stop();
-    else { tick(); start(); }
+    else { tick(); mediaTick(); start(); }
   });
   start();
+  refreshEvents();
 })();

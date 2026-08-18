@@ -260,3 +260,49 @@ def test_login_page_is_exempt_and_renders(
     assert r.status_code == 200
     assert "/api/login" in r.text  # the form posts to Frigate via the proxy
     assert not upstream_calls
+
+
+def test_remember_cookie_survives_frigate_session_expiry(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+    upstream_calls: list[httpx.Request],
+) -> None:
+    # Mint with a live Frigate session…
+    client = _build(frigate_db_path, sidecar_db_path, tmp_path, _ok_handler(upstream_calls))
+    r = client.post("/login/remember", headers={"cookie": "frigate_token=live"})
+    assert r.status_code == 204
+    token = r.cookies.get(auth.REMEMBER_COOKIE)
+    assert token
+
+    # …then a fresh app (same data dir → same secret) with a *denying* Frigate:
+    # the remember cookie alone must admit the request without an upstream call.
+    calls2: list[httpx.Request] = []
+    client2 = _build(frigate_db_path, sidecar_db_path, tmp_path, _denied_handler(calls2))
+    r2 = client2.get(
+        "/", headers={"cookie": f"{auth.REMEMBER_COOKIE}={token}", "accept": "text/html"},
+    )
+    assert r2.status_code == 200
+
+
+def test_remember_cookie_requires_valid_signature(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+    upstream_calls: list[httpx.Request],
+) -> None:
+    client = _build(frigate_db_path, sidecar_db_path, tmp_path, _denied_handler(upstream_calls))
+    r = client.get(
+        "/",
+        headers={
+            "cookie": f"{auth.REMEMBER_COOKIE}=9999999999.deadbeef",
+            "accept": "text/html",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 302  # forged token falls through to the (failing) gate
+
+
+def test_remember_endpoint_itself_is_gated(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+    upstream_calls: list[httpx.Request],
+) -> None:
+    client = _build(frigate_db_path, sidecar_db_path, tmp_path, _denied_handler(upstream_calls))
+    r = client.post("/login/remember")
+    assert r.status_code == 401
