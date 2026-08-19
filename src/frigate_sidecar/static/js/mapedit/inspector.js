@@ -315,11 +315,13 @@ export class Inspector {
     this.tools.setTool("landmark");
     this._syncLandmarkPins();
     this.renderDetail();
+    this._openLmOverlay();
   }
 
   cancelLandmark() {
     if (!this.landmark) return;
     this.landmark = null;
+    this._closeLmOverlay();
     this.renderer.setToolPins([]);
     if (this.tools.tool === "landmark") this.tools.setTool("select");
     this.renderDetail();
@@ -335,6 +337,88 @@ export class Inspector {
     lm.report = null;
     this._syncLandmarkPins();
     this.renderDetail();
+    // Pair complete: bring the big snapshot back for the next one.
+    this._openLmOverlay();
+  }
+
+  // Large-snapshot overlay: marks are placed on a near-fullscreen image
+  // (the panel thumbnail is too small to be accurate), then the overlay
+  // closes so the map is clickable for the matching point, and reopens
+  // when the pair completes.
+  _openLmOverlay() {
+    this._closeLmOverlay();
+    const lm = this.landmark;
+    if (!lm) return;
+    const n = lm.matches.length;
+    const overlay = el("div", { class: "me-overlay me-lmoverlay" });
+    overlay.addEventListener("pointerdown", (ev) => {
+      if (ev.target === overlay) this._closeLmOverlay();
+    });
+    const solveBtn = el("button", {
+      class: "btn-primary",
+      text: n >= 2 ? `Solve (${n} pairs)` : `Solve (needs ${2 - n} more)`,
+      onclick: () => { this._closeLmOverlay(); this._landmarkSolve(); },
+    });
+    if (n < 2) solveBtn.disabled = true;
+    overlay.appendChild(el("div", { class: "me-dialog me-lmdialog" },
+      el("p", {
+        class: "help",
+        text: `Pair ${n + 1}: tap a ground landmark (gate post, path corner…). ` +
+          "This closes so you can tap the same spot on the map.",
+      }),
+      this._lmImageWrap(true),
+      el("div", { class: "me-actions" },
+        solveBtn,
+        el("button", {
+          class: "btn-neutral", text: "Hide snapshot",
+          onclick: () => this._closeLmOverlay(),
+        }),
+        el("button", {
+          class: "btn-neutral", text: "Cancel calibration",
+          onclick: () => this.cancelLandmark(),
+        }))));
+    document.body.appendChild(overlay);
+    this._lmOverlayEl = overlay;
+  }
+
+  _closeLmOverlay() {
+    if (this._lmOverlayEl) { this._lmOverlayEl.remove(); this._lmOverlayEl = null; }
+  }
+
+  // Snapshot + numbered dots; tapping places/moves the pending image mark.
+  // Used small in the panel and large in the overlay.
+  _lmImageWrap(large) {
+    const lm = this.landmark;
+    const wrap = el("div", { class: "me-lmwrap" + (large ? " me-lmwrap-lg" : "") });
+    const img = el("img", {
+      class: "me-snap", alt: lm.camera,
+      src: `/api/${encodeURIComponent(lm.camera)}/latest.jpg?h=${large ? 1080 : 720}` +
+        `&cache=${lm.cacheKey || (lm.cacheKey = Date.now())}`,
+    });
+    img.style.cursor = "crosshair";
+    img.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      const rect = img.getBoundingClientRect();
+      // Clicking again while pending MOVES the pending point.
+      lm.pending = {
+        u: Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width)),
+        v: Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height)),
+      };
+      if (large) this._closeLmOverlay();
+      this.renderDetail();
+    });
+    wrap.appendChild(img);
+    const all = lm.matches.concat(lm.pending ? [lm.pending] : []);
+    all.forEach((m, i) => {
+      const dot = el("span", {
+        class: "me-lmdot" + (m.mx === undefined ? " pending" : ""),
+        text: String(i + 1),
+      });
+      dot.style.left = (m.u * 100) + "%";
+      dot.style.top = (m.v * 100) + "%";
+      wrap.appendChild(dot);
+    });
+    return wrap;
   }
 
   _syncLandmarkPins() {
@@ -359,36 +443,13 @@ export class Inspector {
         : `Tap a ground landmark in the snapshot (gate post, path corner…) — ${n} pair${n === 1 ? "" : "s"} so far, 2–12 needed.`,
     }));
 
-    const wrap = el("div", { class: "me-lmwrap" });
-    const img = el("img", {
-      class: "me-snap", alt: lm.camera,
-      src: `/api/${encodeURIComponent(lm.camera)}/latest.jpg?h=720&cache=${lm.cacheKey || (lm.cacheKey = Date.now())}`,
-    });
-    img.style.cursor = "crosshair";
-    img.addEventListener("pointerdown", (ev) => {
-      ev.preventDefault();
-      const rect = img.getBoundingClientRect();
-      // Clicking again while pending MOVES the pending point.
-      lm.pending = {
-        u: Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width)),
-        v: Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height)),
-      };
-      this.renderDetail();
-    });
-    wrap.appendChild(img);
-    const all = lm.matches.concat(lm.pending ? [lm.pending] : []);
-    all.forEach((m, i) => {
-      const dot = el("span", {
-        class: "me-lmdot" + (m.mx === undefined ? " pending" : ""),
-        text: String(i + 1),
-      });
-      dot.style.left = (m.u * 100) + "%";
-      dot.style.top = (m.v * 100) + "%";
-      wrap.appendChild(dot);
-    });
-    d.appendChild(wrap);
+    d.appendChild(this._lmImageWrap(false));
 
     const actions = el("div", { class: "me-actions" });
+    actions.appendChild(el("button", {
+      class: "btn-neutral", text: "Enlarge snapshot",
+      onclick: () => this._openLmOverlay(),
+    }));
     const undoBtn = el("button", {
       class: "btn-neutral", text: lm.pending ? "Drop pending" : "Undo pair",
       onclick: () => {
