@@ -661,11 +661,13 @@ body.map-full-open { overflow: hidden; }
   padding: 4px 0;
 }
 .me-toolbtn {
-  width: 40px; height: 40px; font-size: 16px; line-height: 1;
+  width: 40px; height: 40px; line-height: 0;
+  display: flex; align-items: center; justify-content: center;
   background: var(--surface); color: var(--muted);
   border: 1px solid var(--stroke); border-radius: var(--radius-md);
   cursor: pointer;
 }
+.me-toolbtn svg { width: 20px; height: 20px; }
 .me-toolbtn:hover { color: var(--text); border-color: var(--accent); }
 .me-toolbtn.active { color: var(--accent); border-color: var(--accent); background: var(--surface-2); }
 .me-toolgap { flex: 0 0 12px; }

@@ -85,37 +85,49 @@ handle.addEventListener("pointerdown", (ev) => {
 
 // ---- Toolbar -----------------------------------------------------------
 
+// Stroke icons in the header-nav style (24-box, currentColor, 1.6 width).
+const icon = (paths) =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const ICONS = {
+  select: icon('<path d="M6.5 4.5 18 11.5l-5.4 1.2 2.3 5.4-2.5 1-2.3-5.4-3.6 3.3z"/>'),
+  area: icon('<rect x="4.5" y="6" width="15" height="12" rx="1" stroke-dasharray="3.4 2.4"/>'),
+  scale: icon('<path d="M4.5 7.5v9M19.5 7.5v9M4.5 12h15M8.5 10v4M12 10v4M15.5 10v4"/>'),
+  "zoom-in": icon('<circle cx="11" cy="11" r="6.2"/><path d="M15.6 15.6 20 20M11 8.6v4.8M8.6 11h4.8"/>'),
+  "zoom-out": icon('<circle cx="11" cy="11" r="6.2"/><path d="M15.6 15.6 20 20M8.6 11h4.8"/>'),
+  fit: icon('<path d="M4 8.5V5a1 1 0 0 1 1-1h3.5M20 8.5V5a1 1 0 0 0-1-1h-3.5M4 15.5V19a1 1 0 0 0 1 1h3.5M20 15.5V19a1 1 0 0 1-1 1h-3.5"/><rect x="9" y="9.5" width="6" height="5" rx="0.5"/>'),
+  full: icon('<path d="M13.5 4H20v6.5M20 4l-6.5 6.5M10.5 20H4v-6.5M4 20l6.5-6.5"/>'),
+};
+
 const TOOL_BUTTONS = [
-  { id: "select", label: "▲", title: "Select / move / aim (Esc)" },
-  { id: "area", label: "▢", title: "Draw secure area (drag once)" },
-  { id: "scale", label: "⇤⇥", title: "Calibrate scale: drag a line of known length" },
+  { id: "select", title: "Select / move / aim (Esc)" },
+  { id: "area", title: "Draw secure area (drag once)" },
+  { id: "scale", title: "Calibrate scale: drag a line of known length" },
 ];
 const ACTION_BUTTONS = [
-  { id: "zoom-in", label: "+", title: "Zoom in", run: () => view.zoom(1 / 1.3) },
-  { id: "zoom-out", label: "−", title: "Zoom out", run: () => view.zoom(1.3) },
-  { id: "fit", label: "⤢", title: "Fit to plan (F, double-click)", run: () => view.fit() },
-  { id: "full", label: "⛶", title: "Fullscreen map", run: () => view.toggleFull() },
+  { id: "zoom-in", title: "Zoom in", run: () => view.zoom(1 / 1.3) },
+  { id: "zoom-out", title: "Zoom out", run: () => view.zoom(1.3) },
+  { id: "fit", title: "Fit to plan (F, double-click)", run: () => view.fit() },
+  { id: "full", title: "Fullscreen map", run: () => view.toggleFull() },
 ];
+
+function toolButton(id, title, onClick) {
+  const b = document.createElement("button");
+  b.className = "me-toolbtn";
+  b.innerHTML = ICONS[id];
+  b.title = title;
+  b.setAttribute("aria-label", title);
+  b.addEventListener("click", onClick);
+  toolbarEl.appendChild(b);
+  return b;
+}
 
 const toolBtns = new Map();
 for (const t of TOOL_BUTTONS) {
-  const b = document.createElement("button");
-  b.className = "me-toolbtn";
-  b.textContent = t.label;
-  b.title = t.title;
-  b.addEventListener("click", () => tools.setTool(t.id));
-  toolbarEl.appendChild(b);
-  toolBtns.set(t.id, b);
+  toolBtns.set(t.id, toolButton(t.id, t.title, () => tools.setTool(t.id)));
 }
 toolbarEl.appendChild(Object.assign(document.createElement("div"), { className: "me-toolgap" }));
-for (const a of ACTION_BUTTONS) {
-  const b = document.createElement("button");
-  b.className = "me-toolbtn";
-  b.textContent = a.label;
-  b.title = a.title;
-  b.addEventListener("click", a.run);
-  toolbarEl.appendChild(b);
-}
+for (const a of ACTION_BUTTONS) toolButton(a.id, a.title, a.run);
 
 function syncToolbar(active) {
   for (const [id, b] of toolBtns) b.classList.toggle("active", id === active);
