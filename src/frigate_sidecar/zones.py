@@ -93,6 +93,30 @@ def zones_containing_box(
     }
 
 
+def configured_camera_names(config_path: str | Path) -> set[str] | None:
+    """Camera names in Frigate's config.yml, or None if it can't be read.
+
+    Auto-discovery from the recordings table alone resurrects renamed cameras:
+    rows under the old name outlive the rename by the retention window, so the
+    scrub generator ground through ghost cameras (and advertised them to
+    clients) for days after a rename. Callers intersect discovered names with
+    this set; None (missing/unparseable config) means "can't tell, don't
+    filter".
+    """
+    p = Path(config_path)
+    try:
+        with p.open() as f:
+            cfg = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    cams = cfg.get("cameras")
+    if not isinstance(cams, dict) or not cams:
+        return None
+    return set(cams.keys())
+
+
 def load_camera_zones(config_path: str | Path) -> dict[str, list[dict[str, Any]]]:
     """Return `{camera: [{name, coords, color, objects, inertia, loitering_time}, ...]}`.
 

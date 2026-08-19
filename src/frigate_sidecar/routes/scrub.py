@@ -23,7 +23,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
-from frigate_sidecar import __version__, db
+from frigate_sidecar import __version__, db, zones
 from frigate_sidecar.frigate_api import (
     FrigateAPIError,
     async_activity_motion,
@@ -133,6 +133,10 @@ async def capabilities(request: Request) -> dict[str, Any]:
             cams_with_data = {r["camera"] for r in rows}
         finally:
             conn.close()
+        # Cached buckets can outlive a camera rename; don't advertise ghosts.
+        configured = zones.configured_camera_names(settings.frigate.config_path)
+        if configured is not None:
+            cams_with_data &= configured
         if not generated_cameras:
             generated_cameras = sorted(cams_with_data)
         else:

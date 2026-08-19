@@ -1433,9 +1433,17 @@ async def generate_cycle(
 
     conn = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
     try:
-        cameras = scrub.cameras or [
+        cameras = list(scrub.cameras) or [
             r["camera"] for r in conn.execute("SELECT DISTINCT camera FROM recordings").fetchall()
         ]
+        if not scrub.cameras:
+            # Renamed cameras leave recordings rows under the old name for the
+            # whole retention window; don't generate for ghosts.
+            from frigate_sidecar.zones import configured_camera_names
+
+            configured = configured_camera_names(settings.frigate.config_path)
+            if configured is not None:
+                cameras = [c for c in cameras if c in configured]
         if not cameras:
             return []
 

@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from frigate_sidecar.zones import load_camera_zones, zones_containing_box
+from frigate_sidecar.zones import (
+    configured_camera_names,
+    load_camera_zones,
+    zones_containing_box,
+)
 
 # A square covering the bottom-left quadrant.
 BOTTOM_LEFT = {
@@ -75,3 +79,21 @@ def test_zones_are_parsed_from_a_real_config(tmp_path: Path) -> None:
     assert list(zones) == ["doorbell"]
     assert zones["doorbell"][0]["name"] == "porch"
     assert len(zones["doorbell"][0]["coords"]) == 4
+
+
+def test_configured_camera_names_from_a_real_config(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("cameras:\n  doorbell: {}\n  gate-face:\n    zones: {}\n")
+    assert configured_camera_names(cfg) == {"doorbell", "gate-face"}
+
+
+def test_configured_camera_names_unreadable_or_empty_means_no_filter(tmp_path: Path) -> None:
+    # Missing file, unparseable YAML, and an empty camera map all mean
+    # "can't tell" -- callers must not filter on those.
+    assert configured_camera_names(tmp_path / "nope.yml") is None
+    bad = tmp_path / "bad.yml"
+    bad.write_text("cameras: [unclosed\n")
+    assert configured_camera_names(bad) is None
+    empty = tmp_path / "empty.yml"
+    empty.write_text("cameras: {}\n")
+    assert configured_camera_names(empty) is None

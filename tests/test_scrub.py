@@ -944,3 +944,27 @@ def test_clustering_keeps_an_in_progress_destination_open(
     assert len(got) == 1 and got[0]["events"] == 2
     assert got[0]["end"] is None
     assert got[0]["score"] == pytest.approx(0.8)
+
+
+def test_capabilities_hides_renamed_camera_ghosts(
+    frigate_db_with_recordings: Path, sidecar_db_path: Path, tmp_path: Path
+) -> None:
+    # Buckets cached under a camera's pre-rename name must not be advertised:
+    # the app would list a dead camera and scrub against a frozen cache.
+    fake_config = tmp_path / "frigate-config.yml"
+    fake_config.write_text("cameras:\n  doorbell: {}\n")
+    settings = Settings(
+        frigate=FrigateSection(
+            base_url="http://frigate.test:5000",
+            config_path=fake_config,
+            db_path=frigate_db_with_recordings,
+        ),
+        sidecar=SidecarSection(db_path=sidecar_db_path, bind_port=5001),
+        scrub=ScrubSection(enabled=True, retention_days=4, cache_dir=tmp_path / "scrub"),
+    )
+    now = time.time()
+    _seed_bucket(sidecar_db_path, "doorbell", now - 600, now, 5.0)
+    _seed_bucket(sidecar_db_path, "old-name", now - 600, now, 5.0)
+    c = TestClient(create_app(settings))
+    body = c.get("/v1/capabilities").json()
+    assert body["scrub_cache"]["cameras"] == ["doorbell"]
