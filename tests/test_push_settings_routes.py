@@ -284,7 +284,9 @@ def test_put_rejects_malformed_camera_calibration(client: TestClient):
 def test_cameras_page_renders(client: TestClient):
     resp = client.get("/cameras")
     assert resp.status_code == 200
-    assert "/static/js/cameras.js" in resp.text
+    assert "/static/js/mapedit/main.js" in resp.text
+    # Transitional alias from the side-by-side rebuild period.
+    assert client.get("/cameras2", follow_redirects=False).status_code == 301
 
 
 def test_camera_layout_accepts_azimuth_and_fov(client: TestClient):

@@ -658,7 +658,7 @@ async def get_push_settings(request: Request) -> dict[str, Any]:
         "available_cameras": available_cameras,
         "derived_headings": derived_headings,
         # Response key predates the settings-backed optics table; kept so
-        # existing consumers (cameras.js trails, the app) need no change.
+        # existing consumers (the app) need no change.
         "placement_deployments": {
             cam: dict(entry)
             for cam, entry in active.get("camera_optics", {}).items()
