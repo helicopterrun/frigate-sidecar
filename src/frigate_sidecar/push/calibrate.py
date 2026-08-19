@@ -271,16 +271,20 @@ def solve_landmarks(
         return optics.vfov_from_hfov(hfov, *_DETECT_ASPECT)
 
     def residuals(hfov: float, az: float, tilt: float) -> list[float]:
-        vfov = vfov_of(hfov)
+        # Same pinhole ray/ground model as live projection (ground.project),
+        # so a solved aim reproduces exactly what the map will then show.
+        trial = {
+            "hfov": hfov, "vfov": vfov_of(hfov),
+            "tilt_deg": tilt, "mount_ft": mount,
+        }
         rad = math.radians(az)
         out = []
         for m, (tx, ty) in zip(matches, targets, strict=True):
-            depression = tilt + (m["v"] - 0.5) * vfov
-            if depression < 0.5:
+            g = ground.project(m["u"], m["v"], trial)
+            if g is None:
                 out.append(_OFFRANGE_MISS_FT * 2)
                 continue
-            forward = mount / math.tan(math.radians(depression))
-            lateral = (m["u"] - 0.5) * 2 * forward * math.tan(math.radians(hfov / 2))
+            forward, lateral = g
             wx = cam_x + forward * math.sin(rad) + lateral * math.cos(rad)
             wy = cam_y + forward * -math.cos(rad) + lateral * math.sin(rad)
             out.append(math.hypot(wx - tx, wy - ty))

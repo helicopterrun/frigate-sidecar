@@ -39,8 +39,11 @@ def test_project_above_horizon_is_none():
 def test_project_right_of_frame_is_positive_lateral():
     fwd, lat = ground.project(1.0, 0.5, FACTS)
     assert lat > 0
-    # At 90 deg HFOV the half-width equals the forward distance.
-    assert lat == pytest.approx(fwd, rel=1e-6)
+    # At 90 deg HFOV the frame's right edge sits 45 deg off the optical
+    # axis; on the tilted axis-row the ground offset is the slant distance
+    # to that row (forward / cos tilt), not the forward distance — the old
+    # first-order model claimed lat == fwd here and understated lateral.
+    assert lat == pytest.approx(fwd / math.cos(math.radians(12)), rel=1e-6)
 
 
 def test_speed_of_a_known_walk(monkeypatch):

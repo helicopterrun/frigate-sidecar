@@ -48,9 +48,16 @@ def _image_point(cam: str, wx_ft: float, wy_ft: float):
     lateral = dx * math.cos(rad) + dy * math.sin(rad)
     if forward <= 1.0:
         return None
-    depression = math.degrees(math.atan(MOUNT / forward))
-    y = 0.5 + (depression - t["tilt"]) / VFOV
-    x = 0.5 + lateral / (2 * forward * math.tan(math.radians(HFOV / 2)))
+    # True pinhole inverse (matches ground.project): the ray's depression is
+    # atan(mount/forward); its image-plane offsets are tangents of the angle
+    # off the optical axis, not linear fractions of the FOV.
+    depression = math.atan(MOUNT / forward)
+    tilt = math.radians(t["tilt"])
+    b = math.tan(depression - tilt)
+    s = MOUNT / (math.sin(tilt) + b * math.cos(tilt))
+    a = lateral / s
+    x = 0.5 + a / (2 * math.tan(math.radians(HFOV / 2)))
+    y = 0.5 + b / (2 * math.tan(math.radians(VFOV / 2)))
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
         return None
     return (x, y)

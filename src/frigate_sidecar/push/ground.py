@@ -62,15 +62,29 @@ def project(
     """Image point -> (forward_ft, lateral_ft) in the camera's ground frame.
     Forward is along the optical axis' ground projection; lateral is
     camera-right. None when the point sits at/above the effective horizon
-    or projects past _MAX_FORWARD_FT."""
-    depression = facts["tilt_deg"] + (y_norm - 0.5) * facts["vfov"]
+    or projects past _MAX_FORWARD_FT.
+
+    Full pinhole ray/ground intersection. The earlier first-order version
+    (depression linear in v, lateral scaled by ground forward) understated
+    lateral by a factor of ~1/cos(tilt) and bent rows near the frame edge —
+    at a 45° tilt that's a 30%+ error, which made landmark calibration
+    report large residuals on correct clicks."""
+    # Image-plane offsets, normalized to a focal length of 1.
+    a = (x_norm - 0.5) * 2.0 * math.tan(math.radians(facts["hfov"]) / 2.0)
+    b = (y_norm - 0.5) * 2.0 * math.tan(math.radians(facts["vfov"]) / 2.0)
+    t = math.radians(facts["tilt_deg"])
+    # Ray direction: down-component and horizontal forward-component of the
+    # optical axis tilted down by t, with the image offset rotated along.
+    down = math.sin(t) + b * math.cos(t)
+    horiz = math.cos(t) - b * math.sin(t)
+    depression = math.degrees(math.atan2(down, horiz))
     if depression < _MIN_DEPRESSION_DEG:
         return None
-    forward = facts["mount_ft"] / math.tan(math.radians(depression))
+    s = facts["mount_ft"] / down  # ray parameter where it meets the ground
+    forward = s * horiz
     if forward > _MAX_FORWARD_FT or forward < 0:
         return None
-    lateral = (x_norm - 0.5) * 2.0 * forward * math.tan(math.radians(facts["hfov"] / 2))
-    return (forward, lateral)
+    return (forward, s * a)
 
 
 def speed_ft_s(
