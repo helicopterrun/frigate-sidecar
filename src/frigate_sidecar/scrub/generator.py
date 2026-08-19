@@ -1547,11 +1547,16 @@ async def generate_cycle(
         # source is coarser generates at its own cadence, so filtering on
         # `recent_interval_s` would read its stale rows from before that and
         # report a lag that only ever grows.
+        # Only the cameras this cycle generates for: rows cached under a
+        # camera's pre-rename name freeze at the rename and would otherwise
+        # report a phantom ever-growing lag.
+        placeholders = ",".join("?" for _ in cameras)
         lag_row = conn.execute(
             "SELECT MIN(newest) AS furthest FROM ("
             "  SELECT camera, MAX(generated_through) AS newest FROM scrub_buckets"
-            "  GROUP BY camera"
-            ")"
+            f"  WHERE camera IN ({placeholders}) GROUP BY camera"
+            ")",
+            cameras,
         ).fetchone()
         # Against wall clock at log time, not the cycle's own `now`: a camera
         # serviced at the start of a 500s cycle is 500s stale by the end, and
