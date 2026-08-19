@@ -28,13 +28,13 @@ from frigate_sidecar.push.engine import PushEngine
 from frigate_sidecar.push.mqtt import MqttReviewSubscriber, compute_backoff
 from frigate_sidecar.push.transport import LogTransport, RelayTransport
 from frigate_sidecar.routes import analysis as analysis_routes
-from frigate_sidecar.routes import cameras_page as cameras_page_routes
 from frigate_sidecar.routes import debug as debug_routes
 from frigate_sidecar.routes import devices as devices_routes
 from frigate_sidecar.routes import faces as faces_routes
 from frigate_sidecar.routes import fps_budget as fps_budget_routes
 from frigate_sidecar.routes import health as health_routes
 from frigate_sidecar.routes import login_page as login_page_routes
+from frigate_sidecar.routes import map_page as map_page_routes
 from frigate_sidecar.routes import motion as motion_routes
 from frigate_sidecar.routes import placement as placement_routes
 from frigate_sidecar.routes import proxy as proxy_routes
@@ -440,7 +440,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(replay_routes.router)
     app.include_router(zones_page_routes.router)
     app.include_router(settings_page_routes.router)
-    app.include_router(cameras_page_routes.router)
+    app.include_router(map_page_routes.router)
     app.include_router(login_page_routes.router)
 
     # Everything registered so far is the sidecar's own surface and requires a

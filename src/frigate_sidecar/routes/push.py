@@ -814,8 +814,14 @@ def _sniff_image(data: bytes) -> tuple[str, int, int] | None:
     is trusted on its magic bytes, never its Content-Type. PNG/JPEG/WebP
     only; a tiny hand parse so Pillow doesn't become a dependency for one
     dimensions read."""
+    # byteorder is explicit everywhere: the "big" default only exists on
+    # Python 3.11+, and prod runs 3.10 (an omission here 500'd every PNG).
     if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
-        return ("png", int.from_bytes(data[16:20]), int.from_bytes(data[20:24]))
+        return (
+            "png",
+            int.from_bytes(data[16:20], "big"),
+            int.from_bytes(data[20:24], "big"),
+        )
     if data[:2] == b"\xff\xd8":
         i = 2
         while i + 9 < len(data):
@@ -826,12 +832,12 @@ def _sniff_image(data: bytes) -> tuple[str, int, int] | None:
             if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
                 i += 2
                 continue
-            length = int.from_bytes(data[i + 2:i + 4])
+            length = int.from_bytes(data[i + 2:i + 4], "big")
             if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
                 return (
                     "jpg",
-                    int.from_bytes(data[i + 7:i + 9]),
-                    int.from_bytes(data[i + 5:i + 7]),
+                    int.from_bytes(data[i + 7:i + 9], "big"),
+                    int.from_bytes(data[i + 5:i + 7], "big"),
                 )
             i += 2 + length
         return None
