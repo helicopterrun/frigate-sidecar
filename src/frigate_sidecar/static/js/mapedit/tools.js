@@ -139,6 +139,9 @@ export class Tools {
         window.removeEventListener("pointercancel", up);
         this.drag = null;
         if (label) this.store.cancelGesture();
+        // Aborts still need the cleanup half of onEnd (transient artwork:
+        // scale line, alignment guides) — moved=false keeps commits out.
+        if (onEnd) onEnd(false);
       },
     };
     window.addEventListener("pointermove", move);
@@ -172,17 +175,37 @@ export class Tools {
 
   _startCameraMove(ev, cam) {
     this.select({ kind: "camera", camera: cam });
+    // Other placed cameras' coordinates, for alignment magnets: when the
+    // dragged camera comes within ~1% of the view width of a neighbor's x
+    // or y, lock onto it and show a guide line (Shift bypasses, like grid).
+    const others = Object.entries(this.store.doc.camera_layout || {})
+      .filter(([name, e]) => name !== cam && e && e.x !== undefined)
+      .map(([, e]) => ({ x: e.x, y: e.y }));
     this._startDrag(ev, {
       label: `move ${cam}`,
       onMove: (mv) => {
         const p = this.view.clientToUnit(mv);
         const step = mv.shiftKey ? 0 : this._gridStep();
+        let x = clamp01(snap(p.x, step)), y = clamp01(snap(p.y, step));
+        const guides = [];
+        if (!mv.shiftKey) {
+          const tol = this.view.view.w * 0.01;
+          let bx = null, by = null;
+          for (const o of others) {
+            if (Math.abs(p.x - o.x) < (bx === null ? tol : Math.abs(p.x - bx))) bx = o.x;
+            if (Math.abs(p.y - o.y) < (by === null ? tol : Math.abs(p.y - by))) by = o.y;
+          }
+          if (bx !== null) { x = bx; guides.push({ axis: "x", at: bx }); }
+          if (by !== null) { y = by; guides.push({ axis: "y", at: by }); }
+        }
+        this.renderer.setGuides(guides);
         this.store.mutate((doc) => {
           const e = this._entry(doc, cam);
-          e.x = +clamp01(snap(p.x, step)).toFixed(4);
-          e.y = +clamp01(snap(p.y, step)).toFixed(4);
+          e.x = +x.toFixed(4);
+          e.y = +y.toFixed(4);
         }, ["camera_layout"]);
       },
+      onEnd: () => this.renderer.setGuides([]),
     });
   }
 

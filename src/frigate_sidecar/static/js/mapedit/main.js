@@ -17,7 +17,12 @@ const renderer = new Renderer(stage, store, view);
 
 let inspector = null;
 const tools = new Tools(store, view, renderer, {
-  onSelect: (sel) => inspector && inspector.setSelection(sel),
+  onSelect: (sel) => {
+    if (inspector) inspector.setSelection(sel);
+    // On a phone, selecting something on the map is a request to edit it:
+    // raise the sheet out of peek so the detail form is visible.
+    if (sel && isPhone() && sheetState === "peek") setSheet("half");
+  },
   onToolChange: (name) => {
     syncToolbar(name);
     if (name !== "landmark" && inspector?.landmark) inspector.cancelLandmark();
@@ -26,6 +31,57 @@ const tools = new Tools(store, view, renderer, {
   onLandmarkMapClick: (p) => inspector && inspector.landmarkMapClick(p),
 });
 inspector = new Inspector(panel, store, view, renderer, tools);
+
+// ---- Mobile bottom sheet -----------------------------------------------
+// Under 820px the inspector becomes a bottom sheet over the map with three
+// snap states. The handle drags it; a tap toggles peek <-> half. The classes
+// are inert on desktop (all sheet CSS lives inside the media query).
+
+const isPhone = () => window.matchMedia("(max-width: 820px)").matches;
+const SHEET_STATES = ["peek", "half", "full"];
+let sheetState = "half";
+
+function setSheet(s) {
+  sheetState = s;
+  for (const st of SHEET_STATES) panel.classList.toggle("me-sheet-" + st, st === s);
+}
+setSheet("half");
+
+const handle = document.createElement("div");
+handle.className = "me-sheet-handle";
+handle.appendChild(Object.assign(document.createElement("span"), { className: "me-sheet-pill" }));
+panel.prepend(handle);
+
+handle.addEventListener("pointerdown", (ev) => {
+  ev.preventDefault();
+  const frameH = panel.parentElement.getBoundingClientRect().height;
+  const startH = panel.getBoundingClientRect().height;
+  const startY = ev.clientY;
+  let moved = false;
+  panel.classList.add("me-sheet-dragging");
+  const move = (mv) => {
+    if (!moved && Math.abs(mv.clientY - startY) < 6) return;
+    moved = true;
+    const h = Math.min(frameH * 0.9, Math.max(64, startH + (startY - mv.clientY)));
+    panel.style.height = h + "px";
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", up);
+    panel.classList.remove("me-sheet-dragging");
+    if (!moved) {
+      setSheet(sheetState === "peek" ? "half" : "peek");
+      return;
+    }
+    const f = panel.getBoundingClientRect().height / frameH;
+    panel.style.height = "";
+    setSheet(f < 0.28 ? "peek" : f < 0.65 ? "half" : "full");
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
+});
 
 // ---- Toolbar -----------------------------------------------------------
 

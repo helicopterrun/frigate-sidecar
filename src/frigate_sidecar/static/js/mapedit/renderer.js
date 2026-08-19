@@ -12,7 +12,8 @@
 //   g#overlays    extension point for the later observer round
 //   g#cameras     one persistent <g data-cam> per camera
 //   g#tool        transient tool artwork (rubber bands, pins, ghosts)
-//   g#hud         (reserved) counter-scaled compass / scale bar
+//   g#hud         (reserved) — the north marker + scale bar HUD ended up as
+//                 HTML over the stage (screen-space needs no counter-scaling)
 
 import {
   azDir, cardinalOf, floorplanTransform, mapAspect, wedgePath,
@@ -49,6 +50,19 @@ export class Renderer {
     this.camNodes = new Map(); // name -> node bundle
     this.secureNodes = null;
     this._overlays = new Map();
+
+    // HUD lives in HTML over the stage (screen-space, so no counter-scaling):
+    // a north marker and a scale bar sized to a round number of feet.
+    this.hudNorth = document.createElement("div");
+    this.hudNorth.className = "me-hud-n";
+    this.hudNorth.textContent = "N";
+    stageEl.appendChild(this.hudNorth);
+    this.hudScale = document.createElement("div");
+    this.hudScale.className = "me-hud-scale";
+    this.hudScaleLabel = document.createElement("span");
+    this.hudScale.appendChild(this.hudScaleLabel);
+    this.hudScale.style.display = "none";
+    stageEl.appendChild(this.hudScale);
 
     view.onChange(() => this.updateViewBox());
     store.subscribe((keys) => this.update(keys));
@@ -102,6 +116,26 @@ export class Renderer {
     }
   }
 
+  // Alignment guides while dragging a camera: full-length dashed lines
+  // through the coordinate the drag just locked onto. Transient (g#tool).
+  setGuides(guides) {
+    if (!this._guidesG) {
+      this._guidesG = make("g", {}, this.gTool);
+      this._guidesG.style.pointerEvents = "none";
+    }
+    this._guidesG.textContent = "";
+    const sz = (v) => this.view.sz(v);
+    for (const g of guides || []) {
+      make("line", {
+        x1: g.axis === "x" ? g.at : 0, y1: g.axis === "x" ? 0 : g.at,
+        x2: g.axis === "x" ? g.at : 1, y2: g.axis === "x" ? 1 : g.at,
+        stroke: "var(--ok, #4caf82)", "stroke-opacity": "0.9",
+        "stroke-width": sz(0.0025),
+        "stroke-dasharray": `${sz(0.01)} ${sz(0.006)}`,
+      }, this._guidesG);
+    }
+  }
+
   // Overlay extension point for the later observer round.
   registerOverlay(ov) {
     const g = make("g", { "data-overlay": ov.id }, this.gOverlays);
@@ -122,6 +156,7 @@ export class Renderer {
     if (!keys || keys.has("floorplan") || keys.has("map_scale_ft")) {
       this._updateFloorplan();
       this._updateGrid();
+      this._updateHud();
     }
     if (!keys || keys.has("secure_area")) this._updateSecure();
     if (!keys || keys.has("camera_layout") || keys.has("camera_optics")) {
@@ -138,6 +173,23 @@ export class Renderer {
     this._updateSecure();
     this._reconcileCameras();
     this._updateToolPins();
+    this._updateHud();
+  }
+
+  // Scale bar: pick the round feet value whose on-screen bar lands nearest
+  // ~90px at the current zoom. Hidden until the map has a scale.
+  _updateHud() {
+    const doc = this.store.doc;
+    const scale = doc && doc.map_scale_ft;
+    const w = this.view.stageEl.clientWidth;
+    if (!scale || !w) { this.hudScale.style.display = "none"; return; }
+    const ftPerPx = (this.view.view.w * scale) / w;
+    const targetFt = ftPerPx * 90;
+    const NICE = [1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000, 2000, 5000];
+    const ft = NICE.find((v) => v >= targetFt) || NICE[NICE.length - 1];
+    this.hudScale.style.display = "";
+    this.hudScale.style.width = (ft / ftPerPx).toFixed(1) + "px";
+    this.hudScaleLabel.textContent = `${ft} ft`;
   }
 
   setDim(v) {
