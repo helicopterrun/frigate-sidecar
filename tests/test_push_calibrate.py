@@ -336,6 +336,14 @@ def test_solve_landmarks_recovers_hfov_azimuth_tilt():
     assert d_az < 1.0, report
     assert abs(report["tilt_after"] - TRUE["north"]["tilt"]) < 1.0, report
     assert report["rms_ft"] < 1.0, report
+    # Ground coverage span for the map wedge: wider than the lens HFOV
+    # whenever the camera is tilted (atan(tan(hfov/2)/cos(tilt)) per side).
+    expected_wedge = 2 * math.degrees(math.atan(
+        math.tan(math.radians(report["hfov_after"]) / 2)
+        / math.cos(math.radians(report["tilt_after"]))
+    ))
+    assert abs(report["wedge_fov_after"] - expected_wedge) < 0.1
+    assert report["wedge_fov_after"] > report["hfov_after"]
 
 
 def test_solve_landmarks_scales_vendor_vfov():

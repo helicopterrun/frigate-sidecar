@@ -498,6 +498,9 @@ export class Inspector {
       el("div", { text: `HFOV ${r.hfov_before}° → ${r.hfov_after}°` }),
       el("div", { text: `azimuth ${r.azimuth_before}° → ${r.azimuth_after}°` }),
       el("div", { text: `tilt ${r.tilt_before}° → ${r.tilt_after}°` }),
+      r.wedge_fov_after
+        ? el("div", { text: `map wedge ${r.wedge_fov_after}° (ground span — wider than the lens when tilted)` })
+        : null,
       el("div", { text: `fit error ${r.rms_ft} ft (per point: ${r.residual_ft.join(", ")})` })));
     const worst = Math.max(...r.residual_ft);
     if (worst > 8) {
@@ -523,7 +526,10 @@ export class Inspector {
             const entry = (dd.camera_layout || {})[cam];
             if (entry) {
               entry.azimuth = r.azimuth_after;
-              entry.fov = r.hfov_after; // keep the wedge honest too
+              // The wedge shows ground coverage — wider than the lens
+              // HFOV when the camera is tilted, so solved landmarks at
+              // the frame edge still fall inside it.
+              entry.fov = r.wedge_fov_after || r.hfov_after;
             }
           }, ["camera_optics", "camera_layout"]);
           this.cancelLandmark();

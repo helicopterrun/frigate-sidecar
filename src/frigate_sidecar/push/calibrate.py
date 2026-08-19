@@ -315,8 +315,15 @@ def solve_landmarks(
         best = cur
 
     res = residuals(hfov, az, tilt)
+    # The map wedge shows GROUND coverage, which for a tilted camera is
+    # wider than the lens HFOV: a frame-edge ray lands on the ground at
+    # bearing atan(tan(hfov/2)/cos(tilt)) off the axis (at the axis row).
+    wedge = 2 * math.degrees(math.atan(
+        math.tan(math.radians(hfov) / 2) / max(1e-6, math.cos(math.radians(tilt)))
+    ))
     report = {
         "camera": camera,
+        "wedge_fov_after": round(min(360.0, wedge), 1),
         "hfov_before": round(hfov0, 1), "hfov_after": round(hfov, 1),
         "azimuth_before": round(az0, 1), "azimuth_after": round(az % 360.0, 1),
         "tilt_before": round(tilt0, 1), "tilt_after": round(tilt, 1),
