@@ -757,7 +757,7 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
                 and 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0
             ):
                 continue
-            entry: dict[str, float] = {"x": round(float(x), 4), "y": round(float(y), 4)}
+            entry: dict[str, Any] = {"x": round(float(x), 4), "y": round(float(y), 4)}
             azimuth = pos.get("azimuth")
             if isinstance(azimuth, (int, float)) and math.isfinite(azimuth):
                 entry["azimuth"] = round(float(azimuth) % 360.0, 1)
@@ -806,7 +806,7 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
                 and isinstance(tilt, (int, float)) and -90.0 <= tilt <= 90.0
             ):
                 continue
-            entry: dict[str, Any] = {
+            entry = {
                 "hfov": round(float(hfov), 1),
                 "mount_ft": round(float(mount), 1),
                 "tilt_deg": round(float(tilt), 1),
@@ -845,11 +845,11 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
                     k: float(cal[k]) for k in ("x0", "y0", "x1", "y1")
                     if isinstance(cal.get(k), (int, float)) and 0.0 <= cal[k] <= 1.0
                 }
-                length = cal.get("length_ft")
-                if len(vals) == 4 and isinstance(length, (int, float)) and 0 < length <= 100000:
+                cal_len = cal.get("length_ft")
+                if len(vals) == 4 and isinstance(cal_len, (int, float)) and 0 < cal_len <= 100000:
                     fp["calibration"] = {
                         **{k: round(v, 4) for k, v in vals.items()},
-                        "length_ft": round(float(length), 1),
+                        "length_ft": round(float(cal_len), 1),
                     }
             merged["floorplan"] = fp
     elif floorplan is None and "floorplan" in data:

@@ -162,7 +162,7 @@ def mine_pairs(
             src_cam = ta["camera"] if src is pa else tb["camera"]
             oth_cam = other["camera"]
             candidates: list[Pair] = []
-            last_kept: tuple = None  # (src_world, oth_world)
+            last_kept: tuple | None = None  # (src_world, oth_world)
             for p in src:
                 if p[2] <= 0:
                     continue
@@ -423,6 +423,8 @@ def fit(
     involved = {c for p in pairs for c in (p[0], p[2])}
     for cam in sorted(involved):
         facts = facts_for(settings, cam)
+        if facts is None:  # pairs only exist for cameras with facts
+            continue
         base[cam] = (layout[cam]["azimuth"], facts["tilt_deg"])
     params: Params = dict(base)
 
