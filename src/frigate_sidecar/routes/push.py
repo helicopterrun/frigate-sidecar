@@ -1065,6 +1065,84 @@ async def map_live(request: Request, debug: int = Query(default=0)) -> dict[str,
     return {"t": now, "objects": objects}
 
 
+@router.get("/map/track")
+async def map_track(
+    request: Request, camera: str = Query(...), event_id: str = Query(...),
+) -> dict[str, Any]:
+    """One event's trail projected onto the floorplan map, for the app's
+    event mini-map. Live tracks come from the engine's track store; ended
+    events fall back to the MQTT flight recorder (same source as
+    /replay/capture-window). 404 `not_projectable` whenever the world model
+    can't answer — the app renders nothing rather than a guess."""
+    import time as _time
+
+    from frigate_sidecar.push import ground
+    from frigate_sidecar.routes.replay import _capture_paths, _capture_tracks
+
+    active = policy_settings.get_active()
+    scale_ft = active.get("map_scale_ft")
+    layout = (active.get("camera_layout") or {}).get(camera)
+    if (
+        not scale_ft or scale_ft <= 0 or not layout
+        or layout.get("azimuth") is None or ground.camera_ground(camera) is None
+    ):
+        raise HTTPException(status_code=404, detail="not_projectable")
+
+    path_data: list | None = None
+    engine = getattr(request.app.state, "push_engine", None)
+    if engine is not None:
+        state = engine.tracks.get(camera, event_id)
+        if state is not None and state.path_data:
+            path_data = list(state.path_data)
+    if path_data is None:
+        # Flight-recorder fallback: last 24 h, this camera only.
+        rows = _capture_tracks(
+            _capture_paths(request.app.state.settings),
+            _time.time() - 24 * 3600.0, camera=camera,
+        )
+        for row in rows:
+            if row["track_id"] == event_id:
+                path_data = row["points"]
+                break
+    if not path_data:
+        raise HTTPException(status_code=404, detail="not_projectable")
+
+    aspect = ground.map_aspect(active)
+    projected: list[list[float]] = []
+    for pt in path_data:
+        wp = ground.world_position(
+            pt[0], pt[1], camera=camera, layout_entry=layout,
+            scale_ft=scale_ft, aspect_h_over_w=aspect,
+        )
+        if wp is not None:
+            projected.append([round(wp[0], 4), round(wp[1], 4)])
+    if len(projected) < 2:
+        raise HTTPException(status_code=404, detail="not_projectable")
+
+    if len(projected) > 60:  # even decimation, endpoints preserved
+        stride = (len(projected) - 1) / 59
+        projected = [projected[round(k * stride)] for k in range(60)]
+
+    secure = active.get("secure_area")
+    distances = [
+        d for p in projected
+        if (d := ground.distance_to_secure_ft(
+            p[0], p[1], secure, scale_ft=scale_ft, aspect_h_over_w=aspect,
+        )) is not None
+    ]
+    speed = ground.speed_ft_s(path_data, camera)
+    return {
+        "points_map": projected,
+        "camera": {"x": layout.get("x", 0.0), "y": layout.get("y", 0.0)},
+        "secure_area": secure if isinstance(secure, dict) else None,
+        "aspect": round(aspect, 4),
+        "speed_ft_s": round(speed, 1) if speed is not None else None,
+        "distance_ft_range": (
+            [round(min(distances), 1), round(max(distances), 1)] if distances else None
+        ),
+    }
+
+
 @router.post("/map/landmark-solve")
 async def map_landmark_solve(request: Request) -> dict[str, Any]:
     """Solve one camera's HFOV/azimuth/tilt from landmark matches.

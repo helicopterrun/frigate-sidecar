@@ -139,3 +139,67 @@ def test_map_footprints_without_scale_is_empty(
 ):
     client = _make_client(tmp_path, frigate_db_path, sidecar_db_path)
     assert client.get("/v1/push/map/footprints").json()["footprints"] == []
+
+
+# ---- /map/track: one event's trail projected for the app mini-map ----
+
+
+def _live_engine(points):
+    import time
+
+    from frigate_sidecar.push.situations import TrackStore
+
+    class _Engine:
+        tracks = TrackStore()
+
+    engine = _Engine()
+    now = time.time()
+    path = tuple((x, y, now - (len(points) - 1 - i)) for i, (x, y) in enumerate(points))
+    engine.tracks.observe_object("cam", "ev1", (), now=now, path_data=path, label="person")
+    return engine
+
+
+def test_map_track_projects_a_live_track(
+    tmp_path: Path, frigate_db_path: Path, sidecar_db_path: Path,
+):
+    client = _make_client(tmp_path, frigate_db_path, sidecar_db_path)
+    _apply_map_policy(secure_area={"x0": 0.4, "y0": 0.4, "x1": 0.6, "y1": 0.6})
+    client.app.state.push_engine = _live_engine([(0.5, 0.6), (0.5, 0.7), (0.5, 0.8)])
+    body = client.get("/v1/push/map/track?camera=cam&event_id=ev1").json()
+    assert len(body["points_map"]) == 3
+    assert body["camera"] == {"x": 0.5, "y": 0.5}
+    assert body["secure_area"]["x0"] == 0.4
+    assert body["aspect"] == 1.0
+    assert body["speed_ft_s"] is not None and body["speed_ft_s"] > 0
+    lo, hi = body["distance_ft_range"]
+    assert 0 <= lo <= hi
+
+
+def test_map_track_404s_without_calibration_or_track(
+    tmp_path: Path, frigate_db_path: Path, sidecar_db_path: Path,
+):
+    client = _make_client(tmp_path, frigate_db_path, sidecar_db_path)
+    # No map policy at all: not projectable.
+    r = client.get("/v1/push/map/track?camera=cam&event_id=ev1")
+    assert r.status_code == 404 and r.json()["detail"] == "not_projectable"
+    # Calibrated but the track doesn't exist anywhere.
+    _apply_map_policy()
+    r = client.get("/v1/push/map/track?camera=cam&event_id=ghost")
+    assert r.status_code == 404
+
+
+def test_map_track_decimates_to_sixty_points(
+    tmp_path: Path, frigate_db_path: Path, sidecar_db_path: Path,
+):
+    client = _make_client(tmp_path, frigate_db_path, sidecar_db_path)
+    _apply_map_policy()
+    pts = [(0.3 + 0.4 * i / 199, 0.7) for i in range(200)]
+    client.app.state.push_engine = _live_engine(pts)
+    body = client.get("/v1/push/map/track?camera=cam&event_id=ev1").json()
+    assert len(body["points_map"]) == 60
+    # Endpoints preserved by the even decimation.
+    first, last = body["points_map"][0], body["points_map"][-1]
+    assert first[0] == pytest.approx(body["points_map"][0][0])
+    assert last[0] > first[0]
+    assert body["secure_area"] is None
+    assert body["distance_ft_range"] is None
