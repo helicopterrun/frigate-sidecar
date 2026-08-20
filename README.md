@@ -122,7 +122,13 @@ Four deliberate exceptions:
   its 401 + `WWW-Authenticate` challenge must reach the client intact.
 - a valid remember-me cookie (the "stay signed in" box at `/login`) — a signed
   expiry token minted only for a caller who had just proved a live Frigate
-  session; delete `.session_secret` to revoke all of them at once.
+  session. The window is hard, not sliding: `sidecar.remember_ttl_s` (default
+  30 days) from the moment the box is ticked, with no renewal on use. It is
+  checked *before* the Frigate session, so disabling the Frigate account does
+  not cut off a holder mid-window — the one kill switch is deleting
+  `.session_secret` (data dir) and restarting, which invalidates every
+  outstanding cookie at once. `HttpOnly`, `SameSite=Lax`; not `Secure`, since
+  plain-HTTP LAN deployments are the norm.
 
 Set `sidecar.require_frigate_auth: false` only if your Frigate has auth
 disabled, in which case there is no session to check.

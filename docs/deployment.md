@@ -22,8 +22,39 @@ copy with the venv path substituted. Notes:
 - `KillMode=mixed` is deliberate: the default control-group kill SIGTERMs
   in-flight ffmpeg children out from under the scrub generator, which then
   reads as a camera fault. Keep it.
-- The unit runs as root for simplicity; a dedicated user works if it can read
-  Frigate's DB/recordings and write the data dir.
+- The unit runs as a dedicated `frigate-sidecar` system user under
+  `ProtectSystem=strict` (install.sh creates the user and chowns the install
+  dir and `/etc/frigate-sidecar`). Writable paths are only the install dir,
+  the config dir, and the scrub cache (`ReadWritePaths` — install.sh derives
+  the cache dir from the live config; add it by hand if you move it later).
+
+### Granting the service user access to Frigate's files
+
+The sidecar reads Frigate's `config.yml`, database directory, and recordings
+tree. After the first install (or upgrade from a root unit), verify:
+
+```sh
+sudo -u frigate-sidecar test -r /opt/frigate/config.yml && echo config ok
+sudo -u frigate-sidecar test -r /opt/frigate/database/frigate.db && echo db ok
+sudo -u frigate-sidecar ls /mnt/frigate-storage/recordings >/dev/null && echo recordings ok
+```
+
+If any fail, either add the user to the group that owns those paths
+(`usermod -aG <group> frigate-sidecar`, then restart the unit) or grant
+ACLs directly:
+
+```sh
+setfacl -R -m u:frigate-sidecar:rX /mnt/frigate-storage/recordings
+setfacl -m d:u:frigate-sidecar:rX /mnt/frigate-storage/recordings   # future files
+setfacl -R -m u:frigate-sidecar:rX /opt/frigate/database
+setfacl -m u:frigate-sidecar:r /opt/frigate/config.yml
+```
+
+Frigate runs SQLite in WAL mode, so the whole `database/` directory matters
+(`frigate.db-wal`/`-shm` included). If the sidecar logs "unable to open
+database file" despite read access, the `-shm` file needs group/ACL write
+for read-only WAL clients on your SQLite build — extend the ACL to `rwX` on
+`frigate.db-shm` only.
 
 ## Optional units
 
