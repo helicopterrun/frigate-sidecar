@@ -74,8 +74,8 @@ class TestClassifySubject:
     def test_dog_returns_animal(self):
         assert classify_subject(_event(label="dog")) == "animal"
 
-    def test_package_returns_thing(self):
-        assert classify_subject(_event(label="package")) == "thing"
+    def test_package_returns_package(self):
+        assert classify_subject(_event(label="package")) == "package"
 
 
 class TestV2TableRouting:
@@ -490,7 +490,10 @@ class TestRecognitionAvailable:
 class TestSettingsShape:
     def test_default_settings_has_v2_table(self):
         s = policy_settings.default_settings()
-        assert set(s["routing_table_v2"]) == {"person", "vehicle", "animal", "thing"}
+        assert set(s["routing_table_v2"]) == {
+            "person", "vehicle", "animal", "thing", "package", "bin", "opening",
+        }
+        assert set(s["outcomes"]) == set(s["routing_table_v2"])
 
     def test_default_settings_has_recognition(self):
         s = policy_settings.default_settings()

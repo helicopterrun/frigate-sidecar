@@ -107,6 +107,12 @@ _SUBJECT_GLYPH = {
     "vehicle": "vehicle.detected",
     "animal": "animal.seen",
     "thing": "thing.detected",
+    # V3 subjects keep the `thing.*` semantic-glyph namespace: the app's
+    # glyph catalog predates them, and their labelled glyphs stay
+    # "thing.package"-shaped via `_glyph_for` for the same reason.
+    "package": "thing.detected",
+    "bin": "thing.detected",
+    "opening": "thing.detected",
 }
 
 _SUBJECT_COPY = {
@@ -129,6 +135,16 @@ def classify_subject(event: ReviewEvent) -> str:
         return "vehicle"
     if labels & _ANIMAL_LABELS:
         return "animal"
+    # V3 subjects (one alerts stack): the labels that used to pick an LA
+    # *family* off a `thing` card now classify the subject itself, so the
+    # outcome ladder is the single authority on what they do. `thing`
+    # remains the fallback for labels nothing claims.
+    if "package" in labels:
+        return "package"
+    if labels & live_activities.BIN_LABELS:
+        return "bin"
+    if labels & live_activities.OPENING_LABELS:
+        return "opening"
     return "thing"
 
 
@@ -217,7 +233,11 @@ def _copy(
 
 def _glyph_for(subject_kind: str, label: str) -> str:
     if label:
-        return f"{subject_kind}.{label}"
+        # V3 subjects emit the same wire ids their cards had as `thing`s --
+        # every app build in the field resolves "thing.package", none know
+        # "package.package".
+        kind = "thing" if subject_kind in ("package", "bin", "opening") else subject_kind
+        return f"{kind}.{label}"
     return _SUBJECT_GLYPH.get(subject_kind, "motion.detected")
 
 
@@ -654,7 +674,6 @@ async def _deliver_live_activities(
 
     policy = policy_settings.get_active()
     la_settings = policy.get("live_activities", {})
-    alert_all = la_settings.get("alert_all_changes", False)
     la_only = la_settings.get("la_only", False)
     escalation_sound = policy.get("escalation_sound", "urgent")
     stale_s = config.delivery_la_stale_s
@@ -834,8 +853,6 @@ async def _deliver_live_activities(
                 la_sound = sound_name_for_card(card.level, subject_kind, label,
                                               escalation_sound=escalation_sound)
             la_interruption = "time-sensitive" if card.level == "urgent" else "active"
-        elif alert_all and mutation == ESCALATE:
-            wants_alert = True
         elif family == live_activities.PERSON_RESTRICTED and mutation != RESOLVE:
             wants_alert = True
             la_interruption = "time-sensitive"
@@ -1207,8 +1224,9 @@ async def handle_delivery_event(
         # ladder promises a Live Activity with no banner, so the catch-all
         # guarantees an activity for *uncurated* content (a quiet person in
         # the yard matches no family today). Content a curated family
-        # claims (openings, package, bins...) stays governed by that
-        # family's toggle and picks -- those are the user's own curation.
+        # claims runs under that family's own name -- and since the V3
+        # subjects, those families are routed by the same ladder cell as
+        # everything else, with opening picks as the one curation left.
         cell_glance = policy_settings.outcome_for(subject_kind, place_class) == "glance"
         if cell_glance and not la_only:
             native = live_activities.classify_family(
@@ -1221,7 +1239,6 @@ async def handle_delivery_event(
         family = live_activities.should_start_activity(
             subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
             level=card.level,
-            families_enabled=policy["live_activities"],
             opening_picks=policy["live_activities"].get("opening_picks"),
             opening_ids=(zone_name, owning_camera) if zone_name else (owning_camera,),
             # Catch-all only for cards that would have pushed at all --

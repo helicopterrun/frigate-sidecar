@@ -47,7 +47,15 @@ SUPPRESSED = "suppressed"
 #: most-cautious v1 equivalent so the evaluator works regardless of which
 #: table is loaded. The reverse mapping handles v1 subjects against a v2
 #: TABLE (e.g. tests that construct Snapshots with legacy subject names).
-_V2_TO_V1 = {"person": "stranger", "vehicle": "thing"}
+_V2_TO_V1 = {
+    "person": "stranger",
+    "vehicle": "thing",
+    # V3 subjects (one alerts stack, 2026-08-20): when the applied table
+    # predates their rows, they route as the `thing` they used to be.
+    "package": "thing",
+    "bin": "thing",
+    "opening": "thing",
+}
 _V1_TO_V2 = {"stranger": "person", "known": "person"}
 
 

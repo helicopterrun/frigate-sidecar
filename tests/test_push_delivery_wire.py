@@ -422,7 +422,7 @@ async def test_changing_the_routing_table_via_settings_changes_the_level_applied
 
     new_settings = policy_settings.default_settings()
     table_key = "routing_table_v2" if "routing_table_v2" in new_settings else "routing_table"
-    new_settings[table_key]["thing"]["yard"] = "urgent"
+    new_settings[table_key]["package"]["yard"] = "urgent"
     policy_settings.apply_settings(new_settings)
 
     await handle_delivery_event(
@@ -434,7 +434,7 @@ async def test_changing_the_routing_table_via_settings_changes_the_level_applied
     )
 
     row = conn.execute(
-        "SELECT level FROM push_cards WHERE card_key = 'cam-a:thing:trkA'"
+        "SELECT level FROM push_cards WHERE card_key = 'cam-a:package:trkA'"
     ).fetchone()
     assert row["level"] == "urgent"
 
@@ -481,13 +481,13 @@ async def test_zone_override_via_settings_is_applied_to_a_real_card(sidecar_db_p
     config = PushSection(delivery_enabled=True)
     device = make_device()
 
-    # Base table says "thing"/"doors" is "log" (never pushed); the override
-    # forces "notify" for this specific zone regardless.
+    # Base table says "package"/"doors" is "quiet" (glance -- never a
+    # banner); the override forces "notify" for this specific zone.
     new_settings = policy_settings.default_settings()
     new_settings["zone_classes"]["front_entry_person"] = "doors"
-    new_settings["zone_overrides"] = {"front_entry_person": {"thing": "notify"}}
+    new_settings["zone_overrides"] = {"front_entry_person": {"package": "notify"}}
     policy_settings.apply_settings(new_settings)
-    assert new_settings["routing_table"]["thing"]["doors"] == "log"
+    assert new_settings["routing_table_v2"]["package"]["doors"] == "quiet"
 
     await handle_delivery_event(
         ReviewEvent(
@@ -498,7 +498,7 @@ async def test_zone_override_via_settings_is_applied_to_a_real_card(sidecar_db_p
     )
 
     row = conn.execute(
-        "SELECT level FROM push_cards WHERE card_key = 'cam-a:thing:trkA'"
+        "SELECT level FROM push_cards WHERE card_key = 'cam-a:package:trkA'"
     ).fetchone()
     assert row["level"] == "notify"
     assert transport.sent[0]["payload"]["level"] == "notify"

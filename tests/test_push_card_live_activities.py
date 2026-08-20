@@ -9,24 +9,34 @@ from frigate_sidecar.push.cards import CREATE, ENRICH, RESOLVE
 
 
 def test_package_family():
+    # V3: package is a subject of its own; the family follows the routed
+    # level like the person family always has.
     assert la.should_start_activity(
-        subject_kind="thing", label="package", place_class="yard",
+        subject_kind="package", label="package", place_class="yard", level="quiet",
     ) == la.PACKAGE
+    # The thing+label spelling still classifies (old applied tables).
+    assert la.should_start_activity(
+        subject_kind="thing", label="package", place_class="yard", level="quiet",
+    ) == la.PACKAGE
+    # A log-routed cell mints no activity — that's the ladder saying no.
+    assert la.should_start_activity(
+        subject_kind="package", label="package", place_class="street", level="log",
+    ) is None
 
 
 def test_bins_family_matches_bin_and_truck_labels():
     assert la.should_start_activity(
-        subject_kind="thing", label="waste_bin", place_class="street",
+        subject_kind="bin", label="waste_bin", place_class="street", level="quiet",
     ) == la.BINS
     assert la.should_start_activity(
-        subject_kind="thing", label="garbage_truck", place_class="street",
+        subject_kind="thing", label="garbage_truck", place_class="street", level="quiet",
     ) == la.BINS
 
 
 def test_openings_family_matches_door_gate_garage():
     for label in ("door", "gate", "garage"):
         assert la.should_start_activity(
-            subject_kind="thing", label=label, place_class="doors",
+            subject_kind="opening", label=label, place_class="doors", level="quiet",
         ) == la.OPENINGS
 
 
@@ -64,20 +74,6 @@ def test_person_restricted_family_off_limits():
     ) == la.PERSON_RESTRICTED
 
 
-def test_person_restricted_disabled_returns_none():
-    assert la.should_start_activity(
-        subject_kind="stranger", label="person", place_class="off_limits",
-        families_enabled={"person_restricted": False},
-    ) is None
-
-
-def test_person_restricted_disabled_falls_back_to_catch_all():
-    assert la.should_start_activity(
-        subject_kind="stranger", label="person", place_class="off_limits",
-        families_enabled={"person_restricted": False}, catch_all=True,
-    ) == la.CATCH_ALL
-
-
 def test_non_qualifying_cards_return_none():
     assert la.should_start_activity(
         subject_kind="animal", label="dog", place_class="yard",
@@ -93,53 +89,41 @@ def test_non_qualifying_cards_return_none():
 def test_opening_picks_empty_is_permissive():
     # Nothing curated yet -- every opening qualifies (Elsinore Phase 4).
     assert la.should_start_activity(
-        subject_kind="thing", label="garage", place_class="street",
+        subject_kind="opening", label="garage", place_class="street", level="quiet",
         opening_picks=[], opening_ids=("garage-cam",),
     ) == la.OPENINGS
 
 
 def test_opening_picks_restricts_to_curated_openings():
     assert la.should_start_activity(
-        subject_kind="thing", label="garage", place_class="street",
+        subject_kind="opening", label="garage", place_class="street", level="quiet",
         opening_picks=["front_gate"], opening_ids=("garage-cam", "garage"),
     ) is None
     assert la.should_start_activity(
-        subject_kind="thing", label="gate", place_class="street",
+        subject_kind="opening", label="gate", place_class="street", level="quiet",
         opening_picks=["front_gate"], opening_ids=("front_gate", "doorbell"),
     ) == la.OPENINGS
 
 
 def test_opening_picks_do_not_affect_other_families():
     assert la.should_start_activity(
-        subject_kind="thing", label="package", place_class="yard",
+        subject_kind="package", label="package", place_class="yard", level="quiet",
         opening_picks=["front_gate"], opening_ids=("some-other-camera",),
     ) == la.PACKAGE
 
 
-def test_disabled_family_returns_none():
-    assert la.should_start_activity(
-        subject_kind="thing", label="package", place_class="yard",
-        families_enabled={"package": False},
-    ) is None
-    # Every other family stays on by default even with one explicit override.
-    assert la.should_start_activity(
-        subject_kind="thing", label="waste_bin", place_class="street",
-        families_enabled={"package": False},
-    ) == la.BINS
-
-
-def test_disabled_family_falls_back_to_catch_all_when_la_only():
-    # la_only: a curated family match that's toggled off still gets *an*
+def test_log_routed_family_falls_back_to_catch_all_when_la_only():
+    # la_only: a curated family the ladder routed to log still gets *an*
     # activity -- the catch-all -- rather than none at all.
     assert la.should_start_activity(
-        subject_kind="thing", label="package", place_class="yard",
-        families_enabled={"package": False}, catch_all=True,
+        subject_kind="package", label="package", place_class="street", level="log",
+        catch_all=True,
     ) == la.CATCH_ALL
 
 
 def test_opening_picks_mismatch_falls_back_to_catch_all_when_la_only():
     assert la.should_start_activity(
-        subject_kind="thing", label="garage", place_class="street",
+        subject_kind="opening", label="garage", place_class="street", level="quiet",
         opening_picks=["front_gate"], opening_ids=("garage-cam", "garage"),
         catch_all=True,
     ) == la.CATCH_ALL
@@ -149,7 +133,7 @@ def test_eligible_family_wins_over_catch_all():
     # la_only on, but the family is eligible -- the native family is used,
     # not the catch-all.
     assert la.should_start_activity(
-        subject_kind="thing", label="package", place_class="yard",
+        subject_kind="package", label="package", place_class="yard", level="quiet",
         catch_all=True,
     ) == la.PACKAGE
 

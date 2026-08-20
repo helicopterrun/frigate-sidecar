@@ -74,9 +74,9 @@ async def test_full_la_lifecycle_create_enrich_escalate_resolve(sidecar_db_path:
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:thing:trk1"
+    card_key = "doorbell:package:trk1"
 
-    # create: package at pool zone -> thing/off_limits = quiet (pushable)
+    # create: package at pool zone -> package/off_limits = notify (pushable)
     await handle_delivery_event(
         make_event("doorbell", "trk1", "package", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
@@ -112,7 +112,7 @@ async def test_full_la_lifecycle_create_enrich_escalate_resolve(sidecar_db_path:
     # resolve
     resolved = await handle_delivery_resolve(
         "doorbell", "trk1", conn=conn, devices=[device], transport=transport,
-        config=config, subject_kind="thing", now=30.0,
+        config=config, subject_kind="package", now=30.0,
     )
     assert resolved == 1
     sends = la_sends(transport)
@@ -176,7 +176,7 @@ async def test_late_per_activity_token_drops_update_until_it_arrives(sidecar_db_
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:thing:trk1"
+    card_key = "doorbell:package:trk1"
 
     await handle_delivery_event(
         make_event("doorbell", "trk1", "package", zones=("pool",)),
@@ -217,7 +217,7 @@ async def test_resolve_before_token_arrives_skips_end_push(sidecar_db_path: Path
     )
     resolved = await handle_delivery_resolve(
         "doorbell", "trk1", conn=conn, devices=[device], transport=transport,
-        config=config, subject_kind="thing", now=5.0,
+        config=config, subject_kind="package", now=5.0,
     )
     assert resolved == 1
     sends = la_sends(transport)
@@ -258,10 +258,11 @@ async def test_delivery_la_enabled_false_suppresses_all_live_activities(sidecar_
 
 
 @pytest.mark.asyncio
-async def test_settings_family_toggle_suppresses_just_that_family(sidecar_db_path: Path):
-    """Elsinore Phase 4: `settings.live_activities.<family>` gates family
-    detection, one layer below `delivery_la_enabled`'s whole-feature kill
-    switch above."""
+async def test_log_routed_cell_suppresses_just_that_family(sidecar_db_path: Path):
+    """One alerts stack (2026-08-20): the retired per-family boolean's job
+    is done by the outcome ladder -- a package row routed to log mints no
+    package activity, one layer below `delivery_la_enabled`'s whole-feature
+    kill switch above."""
     from frigate_sidecar.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
@@ -270,7 +271,9 @@ async def test_settings_family_toggle_suppresses_just_that_family(sidecar_db_pat
     config = PushSection(delivery_enabled=True)
 
     disabled = policy_settings.default_settings()
-    disabled["live_activities"]["package"] = False
+    for place in disabled["outcomes"]["package"]:
+        disabled["outcomes"]["package"][place] = "log"
+        disabled["routing_table_v2"]["package"][place] = "log"
     policy_settings.apply_settings(disabled)
 
     await handle_delivery_event(
@@ -278,7 +281,7 @@ async def test_settings_family_toggle_suppresses_just_that_family(sidecar_db_pat
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     assert la_sends(transport) == []
-    # An ordinary card push still went out -- only the LA family is off.
+    # The card is still recorded -- log means logged, not gone.
     assert conn.execute("SELECT COUNT(*) FROM push_cards").fetchone()[0] == 1
 
 
@@ -435,7 +438,7 @@ async def test_deferred_end_when_token_arrives_after_resolve(sidecar_db_path: Pa
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:thing:trk1"
+    card_key = "doorbell:package:trk1"
 
     await handle_delivery_event(
         make_event("doorbell", "trk1", "package", zones=("pool",)),
@@ -443,7 +446,7 @@ async def test_deferred_end_when_token_arrives_after_resolve(sidecar_db_path: Pa
     )
     resolved = await handle_delivery_resolve(
         "doorbell", "trk1", conn=conn, devices=[device], transport=transport,
-        config=config, subject_kind="thing", now=5.0,
+        config=config, subject_kind="package", now=5.0,
     )
     assert resolved == 1
     assert len(la_sends(transport)) == 1  # start only; no end without a token
@@ -536,7 +539,7 @@ async def test_la_only_mode_skips_log_level_cards(sidecar_db_path: Path):
 
 @pytest.mark.asyncio
 async def test_la_only_ineligible_family_falls_back_to_catch_all(sidecar_db_path: Path):
-    """2026-08-12: with la_only on, a curated family that's toggled off must
+    """2026-08-12: with la_only on, a curated family that isn't eligible must
     not leave the device with neither surface -- the card push is always
     passive/silent in la_only mode, so a skipped LA meant nothing alerted at
     all. The card must ride the catch-all activity instead of nothing."""
@@ -546,31 +549,32 @@ async def test_la_only_ineligible_family_falls_back_to_catch_all(sidecar_db_path
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
-    card_key = "doorbell:thing:trk1"
+    card_key = "doorbell:opening:trk1"
 
     settings = policy_settings.default_settings()
     settings["live_activities"]["la_only"] = True
-    settings["live_activities"]["package"] = False
+    settings["live_activities"]["opening_picks"] = ["front_gate"]
     policy_settings.apply_settings(settings)
 
-    # create: package at pool zone -> thing/off_limits = quiet (pushable),
-    # but the package family itself is disabled.
+    # create: garage opening at the pool zone routes notify (pushable), but
+    # the opening isn't on the curated picks list -- the one family-level
+    # refinement left after the booleans dissolved into the ladder.
     await handle_delivery_event(
-        make_event("doorbell", "trk1", "package", zones=("pool",)),
+        make_event("doorbell", "trk1", "garage", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     sends = la_sends(transport)
     assert len(sends) == 1
     assert sends[0]["event"] == "start"
     assert sends[0]["payload"]["aps"]["attributes"]["family"] == "activity"
-    # Catch-all glyph is by subject kind ("thing"), not the package glyph.
-    assert sends[0]["payload"]["aps"]["content-state"]["glyph"] == "cube.fill"
+    # Catch-all glyph is by subject kind ("opening"), not the family glyph.
+    assert sends[0]["payload"]["aps"]["content-state"]["glyph"] == "door.left.hand.open"
 
     attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perActivity1")
 
     # enrich: no_row skip must not recur -- the same activity updates.
     await handle_delivery_event(
-        make_event("doorbell", "trk1", "package", zones=("pool",)),
+        make_event("doorbell", "trk1", "garage", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
     )
     sends = la_sends(transport)
@@ -581,7 +585,7 @@ async def test_la_only_ineligible_family_falls_back_to_catch_all(sidecar_db_path
     # resolve: the same (only) activity row ends.
     resolved = await handle_delivery_resolve(
         "doorbell", "trk1", conn=conn, devices=[device], transport=transport,
-        config=config, subject_kind="thing", now=30.0,
+        config=config, subject_kind="opening", now=30.0,
     )
     assert resolved == 1
     sends = la_sends(transport)
@@ -598,9 +602,10 @@ async def test_la_only_off_disabled_family_skips_without_fallback(sidecar_db_pat
     """The catch-all fallback is an `la_only`-only behavior. With `la_only`
     off, a disabled family must still just skip the LA -- and, since no LA
     covers it, the ordinary card push must alert normally, not be demoted.
-    Uses person/doors (notify) rather than package/off_limits (quiet) so a
-    demoted payload (passive, no sound) is visibly different from a normal
-    one (active, sound present)."""
+    Uses an opening routed to notify so a demoted payload (passive, no
+    sound) is visibly different from a normal one (active, sound present);
+    the picks mismatch is the one family-skip left since the per-family
+    booleans dissolved into the outcome ladder."""
     from frigate_sidecar.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
@@ -610,11 +615,13 @@ async def test_la_only_off_disabled_family_skips_without_fallback(sidecar_db_pat
 
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False
-    settings["live_activities"]["person"] = False
+    settings["outcomes"]["opening"]["doors"] = "notify"
+    settings["routing_table_v2"]["opening"]["doors"] = "notify"
+    settings["live_activities"]["opening_picks"] = ["front_gate"]
     policy_settings.apply_settings(settings)
 
     await handle_delivery_event(
-        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        make_event("doorbell", "trk1", "garage", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     assert la_sends(transport) == []

@@ -120,6 +120,47 @@ def test_put_persists_and_is_reflected_in_subsequent_get(client: TestClient, tmp
     assert on_disk["routing_table"]["thing"]["yard"] == "urgent"
 
 
+def test_put_round_trips_all_seven_subjects(client: TestClient):
+    new_settings = policy_settings.default_settings()
+    new_settings["outcomes"]["package"]["doors"] = "notify"
+    new_settings["outcomes"]["opening"]["yard"] = "off"
+
+    assert client.put("/v1/push/settings", json=new_settings).status_code == 200
+    stored = client.get("/v1/push/settings").json()["settings"]
+    assert set(stored["outcomes"]) == set(policy_settings.SUBJECTS_V3)
+    assert stored["outcomes"]["package"]["doors"] == "notify"
+    assert stored["outcomes"]["opening"]["yard"] == "off"
+    # v2 stays in lockstep, off spelling as log.
+    assert stored["routing_table_v2"]["package"]["doors"] == "notify"
+    assert stored["routing_table_v2"]["opening"]["yard"] == "log"
+
+
+def test_four_subject_put_preserves_stored_v3_rows(client: TestClient):
+    """An older app's PUT (its Codable only knows the classic four subjects)
+    must not reset the V3 rows the user tuned from a newer build."""
+    tuned = policy_settings.default_settings()
+    tuned["outcomes"]["package"]["yard"] = "alarm"
+    assert client.put("/v1/push/settings", json=tuned).status_code == 200
+
+    old_body = policy_settings.default_settings()
+    for subject in policy_settings.SUBJECTS_V3_EXTRA:
+        del old_body["outcomes"][subject]
+        del old_body["routing_table_v2"][subject]
+    assert client.put("/v1/push/settings", json=old_body).status_code == 200
+
+    stored = client.get("/v1/push/settings").json()["settings"]
+    assert stored["outcomes"]["package"]["yard"] == "alarm"
+    assert stored["routing_table_v2"]["package"]["yard"] == "urgent"
+
+
+def test_outcomes_unknown_subject_still_400s(client: TestClient):
+    bad = policy_settings.default_settings()
+    bad["outcomes"]["drone"] = {"yard": "notify"}
+    resp = client.put("/v1/push/settings", json=bad)
+    assert resp.status_code == 400
+    assert "unknown subject" in json.dumps(resp.json())
+
+
 def test_put_persists_zone_overrides_and_get_returns_them(client: TestClient):
     new_settings = policy_settings.default_settings()
     new_settings["zone_overrides"] = {"front_entry_person": {"thing": "notify"}}

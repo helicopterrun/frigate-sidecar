@@ -42,6 +42,13 @@ SETTINGS_VERSION = 1
 
 SUBJECTS = ("stranger", "known", "animal", "thing")
 SUBJECTS_V2 = ("person", "vehicle", "animal", "thing")
+#: V3 (2026-08-20, "one alerts stack"): the LA families that used to be
+#: booleans become routed subjects with their own outcome rows. Only these
+#: three moved -- person/person_restricted were already outcome-routed.
+#: `routing_table_v2`/`outcomes` accept all seven; the extra rows are
+#: optional in a PUT (an older app sends four and must keep working).
+SUBJECTS_V3 = SUBJECTS_V2 + ("package", "bin", "opening")
+SUBJECTS_V3_EXTRA = tuple(s for s in SUBJECTS_V3 if s not in SUBJECTS_V2)
 PLACES = ("street", "yard", "doors", "private", "off_limits")
 LEVELS = ladder_policy.LEVELS
 RECOGNITION_MODES = ("off", "relax_one", "relax_to_quiet")
@@ -100,6 +107,28 @@ DEFAULT_ROUTING_TABLE_V2: dict[str, dict[str, str]] = {
     "thing": {
         "street": "log", "yard": "log", "doors": "log",
         "private": "log", "off_limits": "quiet",
+    },
+}
+
+#: Default outcome rows for the V3 subjects, chosen to reproduce what the
+#: retired family booleans did when on: the family ran a silent LA wherever
+#: it could fire (glance), with a heads-up in a restricted place (notify).
+#: Cells where the family was noise (a package "on the street", bins deep
+#: in a private area) idle at log. Authored in outcome vocabulary because
+#: these subjects exist for the merged ladder; their `routing_table_v2`
+#: rows are derived via `OUTCOME_TO_LEVEL` like every other lockstep row.
+DEFAULT_EXTRA_OUTCOMES: dict[str, dict[str, str]] = {
+    "package": {
+        "street": "log", "yard": "glance", "doors": "glance",
+        "private": "glance", "off_limits": "notify",
+    },
+    "bin": {
+        "street": "glance", "yard": "glance", "doors": "glance",
+        "private": "log", "off_limits": "notify",
+    },
+    "opening": {
+        "street": "log", "yard": "glance", "doors": "glance",
+        "private": "glance", "off_limits": "notify",
     },
 }
 
@@ -198,12 +227,15 @@ def default_settings() -> dict[str, Any]:
         "routing_table": {subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE.items()},
         "routing_table_v2": {
             subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE_V2.items()
+        } | {
+            subject: {place: OUTCOME_TO_LEVEL[outcome] for place, outcome in row.items()}
+            for subject, row in DEFAULT_EXTRA_OUTCOMES.items()
         },
         "recognition": dict(DEFAULT_RECOGNITION),
         "outcomes": {
             subject: {place: LEVEL_TO_OUTCOME[level] for place, level in row.items()}
             for subject, row in DEFAULT_ROUTING_TABLE_V2.items()
-        },
+        } | {subject: dict(row) for subject, row in DEFAULT_EXTRA_OUTCOMES.items()},
         "zone_classes": {},
         # zone key -> human display name for notification copy ("back_critter"
         # -> "the back walkway"). Wins over Frigate's friendly_name. Edited on
@@ -303,13 +335,17 @@ def validate_settings(data: Any) -> list[str]:
         if not isinstance(routing_table_v2, dict):
             errors.append("routing_table_v2 must be an object")
         else:
-            unknown_subjects = set(routing_table_v2) - set(SUBJECTS_V2)
+            unknown_subjects = set(routing_table_v2) - set(SUBJECTS_V3)
             if unknown_subjects:
                 errors.append(
                     f"routing_table_v2 has unknown subject(s): {sorted(unknown_subjects)}"
                 )
-            for subject in SUBJECTS_V2:
+            for subject in SUBJECTS_V3:
                 row = routing_table_v2.get(subject)
+                # V3 rows are optional in a PUT: an older app sends only
+                # the classic four and must not start failing validation.
+                if row is None and subject in SUBJECTS_V3_EXTRA:
+                    continue
                 if not isinstance(row, dict):
                     errors.append(f"routing_table_v2.{subject} must be an object")
                     continue
@@ -343,10 +379,10 @@ def validate_settings(data: Any) -> list[str]:
         if not isinstance(outcomes, dict):
             errors.append("outcomes must be an object")
         else:
-            unknown = set(outcomes) - set(SUBJECTS_V2)
+            unknown = set(outcomes) - set(SUBJECTS_V3)
             if unknown:
                 errors.append(f"outcomes has unknown subject(s): {sorted(unknown)}")
-            for subject in SUBJECTS_V2:
+            for subject in SUBJECTS_V3:
                 row = outcomes.get(subject)
                 if row is None:
                     continue
@@ -387,7 +423,7 @@ def validate_settings(data: Any) -> list[str]:
             # Zone names themselves are unrestricted (design doc §4 -- the
             # user might configure a zone before it appears in Frigate);
             # only the inner subject/level vocabulary is closed.
-            valid_subjects = set(SUBJECTS) | set(SUBJECTS_V2)
+            valid_subjects = set(SUBJECTS) | set(SUBJECTS_V3)
             for zone, row in zone_overrides.items():
                 if not isinstance(row, dict):
                     errors.append(f"zone_overrides.{zone} must be an object")
@@ -612,7 +648,7 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
 
     routing_table_v2 = data.get("routing_table_v2")
     if isinstance(routing_table_v2, dict):
-        for subject in SUBJECTS_V2:
+        for subject in SUBJECTS_V3:
             row = routing_table_v2.get(subject)
             if isinstance(row, dict):
                 for place in PLACES:
@@ -627,17 +663,23 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
                 merged["recognition"][key] = val
 
     outcomes = data.get("outcomes")
+    stored_outcomes = (_active or {}).get("outcomes", {}) if isinstance(_active, dict) else {}
     if isinstance(outcomes, dict):
         # Outcomes are the authority: copy valid cells over the defaults,
         # then derive the legacy routing levels from them so the evaluator
         # (and an older app build reading routing_table_v2) stays in step.
-        for subject in SUBJECTS_V2:
+        # A body that omits a V3 subject entirely (a four-subject app build)
+        # keeps the *stored* row, not the default -- otherwise every PUT
+        # from an older app would quietly reset the new rows.
+        for subject in SUBJECTS_V3:
             row = outcomes.get(subject)
+            if not isinstance(row, dict) and subject in SUBJECTS_V3_EXTRA:
+                row = stored_outcomes.get(subject)
             if isinstance(row, dict):
                 for place in PLACES:
                     if row.get(place) in OUTCOMES:
                         merged["outcomes"][subject][place] = row[place]
-        for subject in SUBJECTS_V2:
+        for subject in SUBJECTS_V3:
             for place in PLACES:
                 merged["routing_table_v2"][subject][place] = OUTCOME_TO_LEVEL[
                     merged["outcomes"][subject][place]
@@ -646,18 +688,29 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
         # Legacy body (an older app build): derive outcomes from its levels.
         # "off" survives a legacy round trip: the legacy shape renders an
         # off cell as "log", so a stored off + incoming log stays off.
-        stored = (_active or {}).get("outcomes", {}) if isinstance(_active, dict) else {}
         for subject in SUBJECTS_V2:
             for place in PLACES:
                 level = merged["routing_table_v2"][subject][place]
                 derived = LEVEL_TO_OUTCOME[level]
                 was_off = (
-                    isinstance(stored.get(subject), dict)
-                    and stored[subject].get(place) == "off"
+                    isinstance(stored_outcomes.get(subject), dict)
+                    and stored_outcomes[subject].get(place) == "off"
                 )
                 merged["outcomes"][subject][place] = (
                     "off" if derived == "log" and was_off else derived
                 )
+        # Legacy bodies predate the V3 subjects entirely: preserve the
+        # stored rows (or fall back to defaults) and keep v2 in lockstep.
+        for subject in SUBJECTS_V3_EXTRA:
+            row = stored_outcomes.get(subject)
+            if isinstance(row, dict):
+                for place in PLACES:
+                    if row.get(place) in OUTCOMES:
+                        merged["outcomes"][subject][place] = row[place]
+            for place in PLACES:
+                merged["routing_table_v2"][subject][place] = OUTCOME_TO_LEVEL[
+                    merged["outcomes"][subject][place]
+                ]
 
     zone_names = data.get("zone_names")
     if isinstance(zone_names, dict):
@@ -678,7 +731,7 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
         for zone, row in zone_overrides.items():
             if not isinstance(row, dict):
                 continue
-            valid_subjects = set(SUBJECTS) | set(SUBJECTS_V2)
+            valid_subjects = set(SUBJECTS) | set(SUBJECTS_V3)
             valid_row = {
                 subject: level
                 for subject, level in row.items()

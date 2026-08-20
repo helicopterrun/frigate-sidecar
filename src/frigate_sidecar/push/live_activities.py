@@ -63,11 +63,13 @@ FAMILIES = (PACKAGE, BINS, OPENINGS, PERSON, PERSON_RESTRICTED)
 #: needed for this value to work.
 CATCH_ALL = "activity"
 
-#: Frigate labels that make a `thing` card an opening (door/gate/garage).
-_OPENING_LABELS = frozenset({"door", "gate", "garage"})
-#: Frigate labels that make a `thing` card the bins family -- either the bin
-#: itself or the correlated truck event.
-_BIN_LABELS = frozenset({"waste_bin", "garbage_truck"})
+#: Frigate labels that make a card an opening (door/gate/garage). Public:
+#: `delivery_wire.classify_subject` uses the same sets to classify the V3
+#: subjects, so subject and family can never disagree about a label.
+OPENING_LABELS = frozenset({"door", "gate", "garage"})
+#: Frigate labels for the bins family -- the bin itself or the correlated
+#: truck event.
+BIN_LABELS = frozenset({"waste_bin", "garbage_truck"})
 
 #: Semantic glyph ids (SF Symbol names, or a documented custom name the app's
 #: asset catalog resolves) per family/state. Resolve always wins regardless
@@ -93,6 +95,9 @@ _CATCH_ALL_GLYPH = {
     "vehicle": "car.fill",
     "animal": "pawprint.fill",
     "thing": "cube.fill",
+    "package": "shippingbox.fill",
+    "bin": "trash.fill",
+    "opening": "door.left.hand.open",
 }
 _CATCH_ALL_DEFAULT_GLYPH = "dot.radiowaves.left.and.right"
 
@@ -116,13 +121,21 @@ def classify_family(
     get a person LA at all — observed live 2026-08-14. `person_restricted`
     keeps its place-class identity because Restricted *is* the user's own
     routing vocabulary, and a person there is a categorically different
-    situation regardless of level."""
-    if subject_kind == "thing" and label == "package":
-        return PACKAGE
-    if subject_kind == "thing" and label in _BIN_LABELS:
-        return BINS
-    if subject_kind == "thing" and label in _OPENING_LABELS:
-        return OPENINGS
+    situation regardless of level.
+
+    Since the V3 subjects (one alerts stack, 2026-08-20), package/bin/
+    opening are subjects of their own and their families are gated on the
+    routed level exactly like the person family: level `log` means the
+    ladder cell said log (or an old table had nothing louder), so no
+    activity runs. The `thing`+label spelling is kept as a fallback for
+    callers that still classify these cards as `thing` (an old applied
+    table, direct test callers)."""
+    if subject_kind == "package" or (subject_kind == "thing" and label == "package"):
+        return PACKAGE if level != "log" else None
+    if subject_kind == "bin" or (subject_kind == "thing" and label in BIN_LABELS):
+        return BINS if level != "log" else None
+    if subject_kind == "opening" or (subject_kind == "thing" and label in OPENING_LABELS):
+        return OPENINGS if level != "log" else None
     if subject_kind in ("stranger", "known", "person") and place_class == "off_limits":
         return PERSON_RESTRICTED
     if subject_kind in ("stranger", "known", "person") and level in ("notify", "urgent"):
@@ -136,31 +149,28 @@ def should_start_activity(
     label: str,
     place_class: str,
     level: str = "log",
-    families_enabled: dict[str, bool] | None = None,
     opening_picks: list[str] | None = None,
     opening_ids: tuple[str, ...] = (),
     catch_all: bool = False,
 ) -> str | None:
     """Which LA family this card qualifies for, or `None`.
 
-    Hard-coded MVP rules (design doc §1) -- a config-driven per-family
-    override (Phase 4's `push/policy_settings.py`, `live_activities`
-    section of the settings object) is checked after the curated match, so
-    a disabled family never starts an activity *under its own name* even
-    when it would otherwise match, but the detection itself doesn't depend
-    on any settings existing.
+    The retired per-family booleans are gone (one alerts stack,
+    2026-08-20): whether a family runs is the routed level's call, decided
+    inside `classify_family` -- the outcome ladder is the single authority.
 
     `opening_picks`/`opening_ids` are the one family-specific refinement
-    (Phase 4 §3): the `openings` family additionally requires this card's
-    zone or camera to be one of the openings the user actually picked. An
-    empty or absent `opening_picks` means "nothing curated yet" and is
-    read permissively (every opening qualifies) rather than as "nothing
-    qualifies" -- the family toggle above is what fully turns `openings`
-    off; an empty picks list is a not-yet-configured state, not a choice.
+    left (Phase 4 §3): the `openings` family additionally requires this
+    card's zone or camera to be one of the openings the user actually
+    picked. An empty or absent `opening_picks` means "nothing curated yet"
+    and is read permissively (every opening qualifies) rather than as
+    "nothing qualifies" -- turning openings off is an Off row in the
+    ladder now; an empty picks list is a not-yet-configured state, not a
+    choice.
 
     `catch_all` (`la_only` mode): every pushable card gets *an* activity,
-    period. A curated family that doesn't clear the checks above (toggled
-    off, or `openings` with picks that don't match) falls back to
+    period. A curated family that doesn't clear the checks above (routed
+    to log, or `openings` with picks that don't match) falls back to
     `CATCH_ALL` here rather than returning `None` -- `la_only`'s whole
     contract is that a Live Activity is the only surface, so routing a card
     to no activity at all would silently drop it (the card push is always
@@ -172,16 +182,12 @@ def should_start_activity(
         subject_kind=subject_kind, label=label, place_class=place_class, level=level,
     )
 
-    if family is not None:
-        if families_enabled is not None and families_enabled.get(family) is False:
-            family = None
-        else:
-            if (
-                family == OPENINGS
-                and opening_picks
-                and not any(oid in opening_picks for oid in opening_ids)
-            ):
-                family = None
+    if (
+        family == OPENINGS
+        and opening_picks
+        and not any(oid in opening_picks for oid in opening_ids)
+    ):
+        family = None
 
     if family is None and catch_all:
         family = CATCH_ALL

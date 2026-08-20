@@ -65,9 +65,14 @@ def test_classify_subject_dog_returns_animal():
     assert classify_subject(ev) == "animal"
 
 
-def test_classify_subject_package_returns_thing():
-    ev = _event("cam", "t1", "package")
-    assert classify_subject(ev) == "thing"
+def test_classify_subject_v3_labels_get_their_own_subjects():
+    # One alerts stack (2026-08-20): the labels that used to pick an LA
+    # family off a `thing` card are subjects now.
+    assert classify_subject(_event("cam", "t1", "package")) == "package"
+    assert classify_subject(_event("cam", "t1", "waste_bin")) == "bin"
+    assert classify_subject(_event("cam", "t1", "garage")) == "opening"
+    # Unclaimed labels still fall back to `thing`.
+    assert classify_subject(_event("cam", "t1", "umbrella")) == "thing"
 
 
 @pytest.mark.asyncio
