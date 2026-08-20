@@ -1388,6 +1388,9 @@ async def handle_delivery_resolve(
     # own if it's still detected afterward -- it will have moved zones by
     # then in the walk-through case that motivated dedup in the first place).
     _heading_streaks.pop((camera, track_id), None)
+    # Same lifetime as the streaks: without this the announced-distance map
+    # leaks one entry per track ever seen (nothing else deletes from it).
+    _announced_distance.pop((camera, track_id), None)
     if card_store.get_track_alias(conn, camera, track_id) is not None:
         card_store.delete_track_alias(conn, camera, track_id)
         return 0

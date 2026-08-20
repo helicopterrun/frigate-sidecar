@@ -13,7 +13,6 @@ from frigate_sidecar.push.transport import LogTransport
 def _make_engine(db_path: Path, transport=None) -> PushEngine:
     engine = PushEngine(
         db_path=str(db_path), transport=transport or LogTransport(), server_id="s1",
-        handle_ttl_s=3600,
     )
     engine.push_config = PushSection(delivery_enabled=True)
     return engine

@@ -10,6 +10,7 @@ turns a `Card` into rows and back.
 from __future__ import annotations
 
 import sqlite3
+import time
 
 from frigate_sidecar.push.cards import Card
 
@@ -327,6 +328,33 @@ def delete_track_alias(conn: sqlite3.Connection, camera: str, track_id: str) -> 
         (camera, track_id),
     )
     conn.commit()
+
+
+def reap_cards(
+    conn: sqlite3.Connection, *, older_than: float, now: float | None = None
+) -> int:
+    """Drop closed cards (and any aliases pointing at them) once they're old
+    enough that nothing will look them up again.
+
+    Without this the table grows by one row per event ever routed — nothing
+    else deletes from `push_cards`. Only `closed` rows are candidates: an open
+    card, however old, is still the identity a live track resolves against.
+    """
+    now = time.time() if now is None else now
+    cutoff = now - older_than
+    rows = conn.execute(
+        "SELECT card_key FROM push_cards WHERE closed = 1 AND updated_at <= ?",
+        (cutoff,),
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "DELETE FROM push_card_track_aliases WHERE card_key = ?", (row["card_key"],)
+        )
+        conn.execute("DELETE FROM push_cards WHERE card_key = ?", (row["card_key"],))
+    # Aliases are normally deleted with their track or card, but an alias
+    # whose card vanished by another path would otherwise sit forever.
+    conn.execute("DELETE FROM push_card_track_aliases WHERE created_at <= ?", (cutoff,))
+    return len(rows)
 
 
 def list_open_urgent_cards(conn: sqlite3.Connection) -> list[tuple[Card, dict[str, str]]]:
