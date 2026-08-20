@@ -13,7 +13,9 @@ set -euo pipefail
 REPO="helicopterrun/frigate-sidecar"
 RAW="https://raw.githubusercontent.com/$REPO/main"
 INSTALL_DIR="${INSTALL_DIR:-/opt/frigate-sidecar}"
-IMAGE="ghcr.io/$REPO:latest"
+# Release train, not :latest — reruns of this script should not silently
+# cross a minor version.
+IMAGE="ghcr.io/$REPO:0.3"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -93,6 +95,27 @@ EOF
     say "keeping existing /etc/frigate-sidecar/sidecar.yml"
   fi
 
+  say "creating service user"
+  id -u frigate-sidecar >/dev/null 2>&1 || \
+    useradd --system --no-create-home --shell /usr/sbin/nologin frigate-sidecar
+  mkdir -p "$INSTALL_DIR/data"
+  chown -R frigate-sidecar: "$INSTALL_DIR" /etc/frigate-sidecar
+
+  # The scrub cache lives outside the install dir; the unit's ProtectSystem=strict
+  # blocks writes everywhere else, so grant it explicitly if configured.
+  SCRUB_CACHE_DIR="$("$INSTALL_DIR/venv/bin/python" - <<'EOF' 2>/dev/null || true
+import os
+os.environ.setdefault("FRIGATE_SIDECAR_CONFIG", "/etc/frigate-sidecar/sidecar.yml")
+from frigate_sidecar.config import load_settings
+print(load_settings().scrub.cache_dir)
+EOF
+)"
+  EXTRA_RW=""
+  if [ -n "$SCRUB_CACHE_DIR" ]; then
+    mkdir -p "$SCRUB_CACHE_DIR" && chown frigate-sidecar: "$SCRUB_CACHE_DIR"
+    EXTRA_RW="ReadWritePaths=$SCRUB_CACHE_DIR"
+  fi
+
   say "installing systemd unit"
   cat > /etc/systemd/system/frigate-sidecar.service <<EOF
 [Unit]
@@ -102,12 +125,23 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+# Needs READ access to Frigate's recordings and frigate.db -- grant via group
+# membership or ACLs if Frigate's files aren't world-readable.
+User=frigate-sidecar
 WorkingDirectory=$INSTALL_DIR
 Environment="FRIGATE_SIDECAR_CONFIG=/etc/frigate-sidecar/sidecar.yml"
 ExecStart=$INSTALL_DIR/venv/bin/python -m frigate_sidecar serve
 Restart=on-failure
 RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=$INSTALL_DIR /etc/frigate-sidecar
+$EXTRA_RW
 # Signal only the main process on stop: the default (control-group) SIGTERMs
 # in-flight ffmpeg children out from under the scrub generator.
 KillMode=mixed
@@ -119,6 +153,8 @@ EOF
   systemctl daemon-reload
   systemctl enable --now frigate-sidecar.service
   systemctl restart frigate-sidecar.service
+  say "service runs as user 'frigate-sidecar' -- if Frigate's recordings/db are not"
+  say "readable by it, add group access (e.g. usermod -aG <frigate-group> frigate-sidecar)"
   say "done. Check: curl http://localhost:5001/healthz  |  logs: journalctl -fu frigate-sidecar"
   say "Config: /etc/frigate-sidecar/sidecar.yml (restart with: systemctl restart frigate-sidecar)"
 fi
