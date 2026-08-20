@@ -123,3 +123,40 @@ def test_camera_ground_reads_settings_backed_optics():
         assert ground.camera_ground("never-onboarded") is None
     finally:
         policy_settings.reset_for_tests()
+
+
+# ---- Distance to the secure area (map point -> rect, in feet) ----
+
+
+def test_distance_to_secure_inside_is_zero():
+    sa = {"x0": 0.2, "y0": 0.2, "x1": 0.6, "y1": 0.6}
+    assert ground.distance_to_secure_ft(0.4, 0.4, sa, scale_ft=100) == 0.0
+
+
+def test_distance_to_secure_edge_and_corner():
+    sa = {"x0": 0.2, "y0": 0.2, "x1": 0.6, "y1": 0.6}
+    # Straight left of the rect: pure x-leg, 0.1 * 100 ft.
+    assert ground.distance_to_secure_ft(0.1, 0.4, sa, scale_ft=100) == pytest.approx(10.0)
+    # Diagonal off the corner: hypot of both legs.
+    d = ground.distance_to_secure_ft(0.1, 0.1, sa, scale_ft=100)
+    assert d == pytest.approx(math.hypot(10.0, 10.0))
+
+
+def test_distance_to_secure_aspect_scales_the_y_leg():
+    sa = {"x0": 0.2, "y0": 0.2, "x1": 0.6, "y1": 0.6}
+    # 0.1 above the rect on a map twice as tall as wide: 0.1 * 100 * 2 ft.
+    d = ground.distance_to_secure_ft(0.4, 0.1, sa, scale_ft=100, aspect_h_over_w=2.0)
+    assert d == pytest.approx(20.0)
+
+
+def test_distance_to_secure_none_when_unconfigured():
+    assert ground.distance_to_secure_ft(0.5, 0.5, None, scale_ft=100) is None
+    assert ground.distance_to_secure_ft(0.5, 0.5, {"x0": 0}, scale_ft=100) is None
+    sa = {"x0": 0.2, "y0": 0.2, "x1": 0.6, "y1": 0.6}
+    assert ground.distance_to_secure_ft(0.5, 0.5, sa, scale_ft=None) is None
+    assert ground.distance_to_secure_ft(0.5, 0.5, sa, scale_ft=0) is None
+
+
+def test_distance_to_secure_reversed_corners_normalize():
+    sa = {"x0": 0.6, "y0": 0.6, "x1": 0.2, "y1": 0.2}
+    assert ground.distance_to_secure_ft(0.4, 0.4, sa, scale_ft=100) == 0.0

@@ -247,6 +247,12 @@ def default_settings() -> dict[str, Any]:
         # startup; edited on /cameras (onboarding + detail panel). Feeds
         # ground.camera_ground. Sticky across app PUTs.
         "camera_optics": {},
+        # Let geometric fusion (cross-camera cluster within the
+        # distance-scaled merge threshold, push/fusion.py) adopt an open
+        # same-label card instead of minting a duplicate when zone dedup
+        # found nothing. Default OFF: enable after grepping
+        # "geometric_dedup: would_suppress" logs against real duplicates.
+        "geometric_dedup": False,
         # None, or {ext, w, h, uploaded_at, calibration}: the uploaded
         # floorplan/site image behind the layout map. `calibration` remembers
         # the drawn reference line ({x0,y0,x1,y1,length_ft}) so it can be
@@ -427,6 +433,10 @@ def validate_settings(data: Any) -> list[str]:
     mute_sounds = data.get("mute_sounds")
     if mute_sounds is not None and not isinstance(mute_sounds, bool):
         errors.append("mute_sounds must be a boolean")
+
+    geometric_dedup = data.get("geometric_dedup")
+    if geometric_dedup is not None and not isinstance(geometric_dedup, bool):
+        errors.append("geometric_dedup must be a boolean")
 
     quiet_hours = data.get("quiet_hours")
     if quiet_hours is not None:
@@ -703,6 +713,9 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
 
     if isinstance(data.get("mute_sounds"), bool):
         merged["mute_sounds"] = data["mute_sounds"]
+
+    if isinstance(data.get("geometric_dedup"), bool):
+        merged["geometric_dedup"] = data["geometric_dedup"]
 
     quiet_hours = data.get("quiet_hours")
     if quiet_hours is None:

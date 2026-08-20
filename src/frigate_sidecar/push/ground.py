@@ -163,6 +163,30 @@ def world_position(
     return (layout_entry.get("x", 0.0) + dx, layout_entry.get("y", 0.0) + dy)
 
 
+def distance_to_secure_ft(
+    x: float, y: float, secure_area: dict | None,
+    *, scale_ft: float | None, aspect_h_over_w: float = 1.0,
+) -> float | None:
+    """Distance in feet from a map point to the secure-area rectangle.
+
+    0.0 inside the rectangle; None when the secure area or map scale is
+    missing. Map coords are normalized with y scaled by the floorplan
+    aspect, so the y-leg converts through scale·aspect.
+    """
+    if not isinstance(secure_area, dict) or not scale_ft or scale_ft <= 0:
+        return None
+    try:
+        x0, x1 = sorted((float(secure_area["x0"]), float(secure_area["x1"])))
+        y0, y1 = sorted((float(secure_area["y0"]), float(secure_area["y1"])))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not aspect_h_over_w or aspect_h_over_w <= 0:
+        aspect_h_over_w = 1.0
+    dx = max(x0 - x, 0.0, x - x1)
+    dy = max(y0 - y, 0.0, y - y1)
+    return math.hypot(dx * scale_ft, dy * scale_ft * aspect_h_over_w)
+
+
 def map_aspect(settings: dict) -> float:
     """The layout map's height/width ratio: the uploaded floorplan's pixel
     aspect when one is set, else 1.0 (the square default map)."""

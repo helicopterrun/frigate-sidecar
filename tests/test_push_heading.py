@@ -177,3 +177,40 @@ def test_heading_streak_counts_and_resets():
     # None (unknown) zeroes it.
     assert _update_heading_streak("cam", "t1", None) == 0
     _heading_streaks.clear()
+
+
+# ---- Distance copy: rounding, hysteresis, and the approach story ----
+
+
+def test_round_distance_ft():
+    from frigate_sidecar.push.delivery_wire import _round_distance_ft
+    assert _round_distance_ft(31.0) == 30
+    assert _round_distance_ft(33.0) == 35
+    assert _round_distance_ft(1.0) == 5  # floor: never announce below 5
+
+
+def test_stabilize_distance_hysteresis():
+    from frigate_sidecar.push import delivery_wire as dw
+    dw._announced_distance.clear()
+    assert dw._stabilize_distance("cam", "t1", 31.0) == 30
+    # Small wobble (< 10 ft from the announced 30) keeps saying 30.
+    assert dw._stabilize_distance("cam", "t1", 26.0) == 30
+    assert dw._stabilize_distance("cam", "t1", 38.0) == 30
+    # A real move re-announces.
+    assert dw._stabilize_distance("cam", "t1", 18.0) == 20
+    # Inside the secure area announces 0 immediately, no hysteresis.
+    assert dw._stabilize_distance("cam", "t1", 0.0) == 0
+    # Other tracks are independent.
+    assert dw._stabilize_distance("cam", "t2", 52.0) == 50
+    dw._announced_distance.clear()
+
+
+def test_approach_story_copy():
+    from frigate_sidecar.push.delivery_wire import _approach_story
+    assert _approach_story(30, {"walking"}) == "approaching — 30 ft out, walking"
+    assert _approach_story(30, {"walking", "running"}) == "approaching — 30 ft out, running"
+    assert _approach_story(30, set()) == "approaching — 30 ft out"
+    assert _approach_story(0, {"walking"}) == "at the house"
+    # Beyond 100 ft (or unknown) the classic phrase stands.
+    assert _approach_story(105, {"walking"}) == "approaching the house"
+    assert _approach_story(None, {"walking"}) == "approaching the house"

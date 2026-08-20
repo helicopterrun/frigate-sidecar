@@ -724,3 +724,69 @@ async def test_off_cell_suppression_still_traced_once(sidecar_db_path: Path):
     )
     assert transport.sent == []
     assert len(decision_trace.recent()) == 1
+
+
+# ---- Geometric dedup adoption (flag-gated; docs: push/fusion.py) ----
+
+
+@pytest.mark.asyncio
+async def test_geo_adoption_respects_the_flag(sidecar_db_path: Path):
+    from frigate_sidecar.push import policy_settings
+    from frigate_sidecar.push.delivery_wire import _resolve_card_for_track
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    engine = PushEngine(db_path=str(sidecar_db_path), transport=transport, server_id="s_test")
+    config = PushSection(delivery_enabled=True, external_base_url=EXTERNAL_BASE_URL)
+
+    # Camera A creates a card for its own track.
+    await handle_delivery_event(
+        ReviewEvent(
+            review_id="r1", camera="gate-face", severity="alert", labels=("car",),
+            track_ids=("trkA",), zones=("driveway",),
+        ),
+        conn=conn, devices=[make_device()], transport=transport,
+        config=config, engine=engine, now=0.0,
+    )
+    a_key = conn.execute("SELECT card_key FROM push_cards").fetchone()["card_key"]
+
+    # Flag OFF (default): geometry only logs; camera B keeps its own key.
+    key, existing, owner, via_geo = _resolve_card_for_track(
+        conn, camera="street", track_id="trkB", subject_kind="vehicle",
+        zone_name="", zones=(), now=1.0,
+        geo_mates=[("gate-face", "trkA")], geo_enabled=False,
+    )
+    assert (key, existing, via_geo) == ("street:vehicle:trkB", None, False)
+
+    # Flag ON: adopt camera A's open card.
+    key, existing, owner, via_geo = _resolve_card_for_track(
+        conn, camera="street", track_id="trkB", subject_kind="vehicle",
+        zone_name="", zones=(), now=1.0,
+        geo_mates=[("gate-face", "trkA")], geo_enabled=True,
+    )
+    assert via_geo is True
+    assert key == a_key
+    assert existing is not None and not existing.closed
+    assert owner == "gate-face"
+    # The alias persists: the next evaluation takes path 1, not geometry.
+    key2, _, _, via_geo2 = _resolve_card_for_track(
+        conn, camera="street", track_id="trkB", subject_kind="vehicle",
+        zone_name="", zones=(), now=2.0, geo_mates=None, geo_enabled=True,
+    )
+    assert (key2, via_geo2) == (a_key, False)
+
+    policy_settings.reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_geo_adoption_skips_closed_and_unknown_mates(sidecar_db_path: Path):
+    from frigate_sidecar.push.delivery_wire import _resolve_card_for_track
+
+    conn = db.open_sidecar(sidecar_db_path)
+    # No card exists for the mate at all: natural key, no adoption.
+    key, existing, owner, via_geo = _resolve_card_for_track(
+        conn, camera="street", track_id="trkB", subject_kind="vehicle",
+        zone_name="", zones=(), now=1.0,
+        geo_mates=[("gate-face", "ghost")], geo_enabled=True,
+    )
+    assert (key, existing, owner, via_geo) == ("street:vehicle:trkB", None, "street", False)

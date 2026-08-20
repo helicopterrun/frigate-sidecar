@@ -310,6 +310,49 @@ def last_heading(camera: str, track_id: str) -> str | None:
     return _heading_streaks.get((camera, track_id), (None, 0))[0]
 
 
+#: Per-(camera, track) last ANNOUNCED distance to the secure area, in feet.
+#: In-memory like the streaks; a restart just re-announces.
+_announced_distance: dict[tuple[str, str], int] = {}
+
+
+def _round_distance_ft(ft: float) -> int:
+    """Copy-grade rounding: nearest 5 ft, floored at 5 (the exact number is
+    projection-model precision theater below that)."""
+    return max(5, int(round(ft / 5.0)) * 5)
+
+
+def _approach_story(nearest_ft: int | None, speed_words: set[str]) -> str:
+    """Copy for a confirmed approach. With a calibrated world model this
+    says how far out ("approaching — 30 ft out, walking"); beyond 100 ft
+    the number is projection-error noise and the classic phrase stands."""
+    if nearest_ft is not None and nearest_ft == 0:
+        return "at the house"
+    if nearest_ft is not None and nearest_ft <= 100:
+        pace = (
+            ", running" if "running" in speed_words
+            else ", walking" if "walking" in speed_words else ""
+        )
+        return f"approaching — {nearest_ft} ft out{pace}"
+    return "approaching the house"
+
+
+def _stabilize_distance(camera: str, track_id: str, raw_ft: float) -> int:
+    """Rounded distance with hysteresis: keep announcing the previous value
+    until the raw distance moves ≥10 ft from it, so copy never flaps
+    30 → 25 → 30 across consecutive card mutations. 0 (inside the secure
+    area) always announces immediately."""
+    key = (camera, track_id)
+    prev = _announced_distance.get(key)
+    if raw_ft <= 2.5:
+        _announced_distance[key] = 0
+        return 0
+    if prev is not None and prev > 0 and abs(raw_ft - prev) < 10.0:
+        return prev
+    out = _round_distance_ft(raw_ft)
+    _announced_distance[key] = out
+    return out
+
+
 def _build_zones_ladder(
     event_zones: tuple[str, ...],
     current_zones: tuple[str, ...],
@@ -435,12 +478,14 @@ def _resolve_card_for_track(
     zone_name: str,
     zones: tuple[str, ...] = (),
     now: float,
-) -> tuple[str, Card | None, str]:
+    geo_mates: list[tuple[str, str]] | None = None,
+    geo_enabled: bool = False,
+) -> tuple[str, Card | None, str, bool]:
     """Which card this (camera, track_id) evaluation belongs to, applying
     cross-camera dedup (docs/push-notifications.md "Cross-camera
     deduplication") before a fresh card key would otherwise be minted.
 
-    Returns `(card_key, existing_card_or_None, owning_camera)`.
+    Returns `(card_key, existing_card_or_None, owning_camera, via_geo)`.
     `owning_camera` is this track's own camera unless the track has been
     merged onto a card another camera created first, in which case it's
     that card's original camera -- callers must persist *that*, not
@@ -459,7 +504,13 @@ def _resolve_card_for_track(
        natural key) with a zone: look for an open card with the same
        `subject_kind`/`zone_name` created within the dedup window. If one
        exists, alias this track onto it instead of creating a sibling.
-    3. Otherwise (existing card under its own key, or no zone to dedup on)
+    3. No zone match, but geometry clusters this track with another
+       camera's track that owns an open same-label card (`geo_mates`, from
+       fusion.cluster) -- adopt that card WHEN the `geometric_dedup` policy
+       flag is on. Flag off: log what would have been adopted
+       ("geometric_dedup: would_suppress ...") so a week of logs can be
+       grepped against actual duplicate cards before enabling.
+    4. Otherwise (existing card under its own key, or no zone to dedup on)
        -- this track's own natural key, unchanged from before this feature.
     """
     alias_key = card_store.get_track_alias(conn, camera, track_id)
@@ -467,7 +518,7 @@ def _resolve_card_for_track(
         aliased = card_store.get_card(conn, alias_key)
         if aliased is not None and not aliased.closed:
             ctx = card_store.get_card_context(conn, alias_key)
-            return alias_key, aliased, (ctx or {}).get("camera") or camera
+            return alias_key, aliased, (ctx or {}).get("camera") or camera, False
         card_store.delete_track_alias(conn, camera, track_id)
 
     natural_key = build_card_key(camera=camera, subject_kind=subject_kind, subject_id=track_id)
@@ -488,7 +539,7 @@ def _resolve_card_for_track(
                     flipped_key, natural_key,
                 )
                 ctx = card_store.get_card_context(conn, flipped_key)
-                return flipped_key, flipped, (ctx or {}).get("camera") or camera
+                return flipped_key, flipped, (ctx or {}).get("camera") or camera, False
     neighbor_cameras = policy_settings.camera_neighbor_set(camera)
     if existing is None and (zone_name or neighbor_cameras):
         candidate_key = card_store.find_dedup_candidate(
@@ -501,9 +552,40 @@ def _resolve_card_for_track(
             if candidate is not None and not candidate.closed:
                 card_store.set_track_alias(conn, camera, track_id, candidate_key, now)
                 ctx = card_store.get_card_context(conn, candidate_key)
-                return candidate_key, candidate, (ctx or {}).get("camera") or camera
+                return candidate_key, candidate, (ctx or {}).get("camera") or camera, False
 
-    return natural_key, existing, camera
+    # Geometric adoption: zone dedup found nothing, but fusion clustered
+    # this track with another camera's track. Adopt that mate's open card
+    # (its alias target, else its own natural card) — the mate saw the same
+    # physical object within the distance-scaled merge threshold.
+    if existing is None and geo_mates:
+        for mate_cam, mate_tid in geo_mates:
+            mate_key = card_store.get_track_alias(conn, mate_cam, mate_tid)
+            if mate_key is None:
+                mate_key = card_store.find_open_card_for_track(
+                    conn, camera=mate_cam, track_id=mate_tid, exclude_key="",
+                )
+            if mate_key is None:
+                continue
+            mate_card = card_store.get_card(conn, mate_key)
+            if mate_card is None or mate_card.closed:
+                continue
+            if not geo_enabled:
+                # Validation breadcrumb — fires with the flag OFF so the
+                # operator can count would-suppress vs. real duplicates.
+                logger.info(
+                    "geometric_dedup: would_suppress card=%s adopting=%s/%s",
+                    natural_key, mate_cam, mate_tid,
+                )
+                break
+            card_store.set_track_alias(conn, camera, track_id, mate_key, now)
+            ctx = card_store.get_card_context(conn, mate_key)
+            logger.info(
+                "geometric_dedup: adopted card=%s for %s/%s", mate_key, camera, track_id,
+            )
+            return mate_key, mate_card, (ctx or {}).get("camera") or camera, True
+
+    return natural_key, existing, camera, False
 
 
 async def _deliver_live_activities(
@@ -888,7 +970,31 @@ async def handle_delivery_event(
     leaving_scene = False
     moving_fast = False
     track_motion: dict[str, dict[str, str] | None] = {}
+    # Nearest distance (ft) from any of this event's tracks to the secure
+    # area, rounded/hysteresis-stabilized for copy; None when the world
+    # model can't say. geo_members maps each of this event's tracks to its
+    # cross-camera cluster mates (other cameras only), for dedup adoption.
+    nearest_ft: int | None = None
+    speed_words: set[str] = set()
+    geo_members: dict[str, list[tuple[str, str]]] = {}
     if engine is not None:
+        # World projection first (was after the motion loop): the motion
+        # loop needs per-track map positions for distance-to-secure.
+        _scale = policy.get("map_scale_ft")
+        _aspect = ground.map_aspect(policy)
+        _positions: list = []
+        _clusters: list = []
+        if _scale and _scale > 0:
+            from frigate_sidecar.push import fusion
+            _positions = fusion.track_world_positions(
+                engine.tracks, policy, now=time.time(),
+            )
+            _clusters = fusion.cluster(
+                _positions, scale_ft=_scale, aspect_h_over_w=_aspect,
+            )
+        _pos_by_track = {(p.camera, p.track_id): p for p in _positions}
+
+        _raw_nearest: float | None = None
         for _tid in (event.track_ids or (event.event_id,)):
             _ts = engine.tracks.get(event.camera, _tid)
             if _ts is None:
@@ -902,38 +1008,45 @@ async def handle_delivery_event(
                 leaving_scene = True
             if _speed == "running":
                 moving_fast = True
+            if _speed:
+                speed_words.add(_speed)
             track_motion[_tid] = _build_motion(
                 _ts.path_data, _ts.stationary, event.camera, speed_label=_speed,
             )
-        # Geometric-fusion validation (log-only): project every live track
-        # onto the map and cluster cross-camera sightings. A cluster of >1
-        # member is what geometry WOULD merge into one object — evidence to
-        # validate against the zone/neighbor dedup before it earns a vote
-        # in routing.
-        _scale = policy.get("map_scale_ft")
-        if _scale and _scale > 0:
-            from frigate_sidecar.push import fusion
-            _positions = fusion.track_world_positions(
-                engine.tracks, policy, now=time.time(),
+            _tp = _pos_by_track.get((event.camera, _tid))
+            if _tp is not None:
+                _d = ground.distance_to_secure_ft(
+                    _tp.x, _tp.y, policy.get("secure_area"),
+                    scale_ft=_scale, aspect_h_over_w=_aspect,
+                )
+                if _d is not None and (_raw_nearest is None or _d < _raw_nearest):
+                    _raw_nearest = _d
+        if _raw_nearest is not None:
+            _key_tid = (event.track_ids or (event.event_id,))[0]
+            nearest_ft = _stabilize_distance(event.camera, _key_tid, _raw_nearest)
+
+        # Geometric-fusion logs (kept from the log-only phase) + the
+        # cluster-mate index for dedup adoption below.
+        for _tp in _positions:
+            if _tp.camera == event.camera:
+                logger.info(
+                    "push: world pos camera=%s track=%s map=(%.3f, %.3f)",
+                    _tp.camera, _tp.track_id, _tp.x, _tp.y,
+                )
+        for _cl in _clusters:
+            if len(_cl.members) <= 1:
+                continue
+            logger.info(
+                "push: geometric_dedup would_link=%s label=%s map=(%.3f, %.3f)",
+                ",".join(f"{m.camera}/{m.track_id}" for m in _cl.members),
+                _cl.label, _cl.x, _cl.y,
             )
-            for _tp in _positions:
-                if _tp.camera == event.camera:
-                    logger.info(
-                        "push: world pos camera=%s track=%s map=(%.3f, %.3f)",
-                        _tp.camera, _tp.track_id, _tp.x, _tp.y,
-                    )
-            for _cl in fusion.cluster(
-                _positions, scale_ft=_scale,
-                aspect_h_over_w=ground.map_aspect(policy),
-            ):
-                if len(_cl.members) > 1:
-                    logger.info(
-                        "push: geometric_dedup would_link=%s label=%s map=(%.3f, %.3f)",
-                        ",".join(
-                            f"{m.camera}/{m.track_id}" for m in _cl.members
-                        ),
-                        _cl.label, _cl.x, _cl.y,
-                    )
+            for _m in _cl.members:
+                if _m.camera == event.camera:
+                    geo_members[_m.track_id] = [
+                        (o.camera, o.track_id)
+                        for o in _cl.members if o.camera != event.camera
+                    ]
     # A track approaching outranks another leaving in the same event.
     leaving_scene = leaving_scene and not approaching_secure
 
@@ -975,6 +1088,8 @@ async def handle_delivery_event(
         trace_reasons.append("quiet_hours_cap")
     if approaching_secure:
         trace_reasons.append("approaching")
+        if nearest_ft is not None and nearest_ft <= 100:
+            trace_reasons.append(f"dist_{nearest_ft}ft")
     if leaving_scene:
         trace_reasons.append("leaving")
     if moving_fast:
@@ -982,11 +1097,15 @@ async def handle_delivery_event(
 
     mutated = 0
     for track_id in track_ids:
-        card_key, existing, owning_camera = _resolve_card_for_track(
+        card_key, existing, owning_camera, via_geo = _resolve_card_for_track(
             conn, camera=event.camera, track_id=track_id, subject_kind=subject_kind,
             zone_name=zone_name, zones=event.zones, now=now,
+            geo_mates=geo_members.get(track_id),
+            geo_enabled=bool(policy.get("geometric_dedup")),
         )
         card, mutation, sound = _advance_card(existing, level, card_key=card_key, now=now)
+        if via_geo and "geo_dedup" not in trace_reasons:
+            trace_reasons.append("geo_dedup")
 
         if mutation in (CREATE, ESCALATE, DEESCALATE):
             decision_trace.append(
@@ -1038,7 +1157,7 @@ async def handle_delivery_event(
         if mutation == RESOLVE:
             story = f"left after {_fmt_elapsed(elapsed)}"
         elif approaching_secure:
-            story = "approaching the house"
+            story = _approach_story(nearest_ft, speed_words)
         elif moving_fast:
             story = "moving fast"
         elif dwell_exceeded:
