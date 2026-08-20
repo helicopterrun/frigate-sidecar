@@ -607,7 +607,7 @@ async def _deliver_live_activities(
     now: float,
     sound_allowed: bool = True,
     state_since_ts: float | None = None,
-    motion: dict[str, str] | None = None,
+    motion: dict[str, Any] | None = None,
     zones: dict[str, Any] | None = None,
     path: dict[str, Any] | None = None,
 ) -> set[str]:
@@ -1245,13 +1245,18 @@ async def handle_delivery_event(
                 )
         # §8 instrument fields — derived from the engine's track store.
         la_state_since_ts = round(card.state_since_at, 1) if card.state_since_at else None
-        la_motion = None
+        la_motion: dict[str, Any] | None = None
         la_zones = None
         la_path = None
         if engine is not None:
             track_state = engine.tracks.get(event.camera, track_id)
             if track_state is not None:
                 la_motion = track_motion.get(track_id)
+                # Same rounded/hysteresis distance the alert copy used, so
+                # the LA chip and the notification never disagree. Additive
+                # optional field per the LA contract; ≤100 ft or absent.
+                if la_motion is not None and nearest_ft is not None and nearest_ft <= 100:
+                    la_motion = {**la_motion, "distance_ft": nearest_ft}
                 live_zones = tuple(
                     z for z in track_state.first_seen_in_zone if z
                 )

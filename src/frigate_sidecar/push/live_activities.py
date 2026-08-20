@@ -248,7 +248,7 @@ def build_content_state(
     thumbnail_handle: str | None,
     thumbnail_revision: int,
     state_since_ts: float | None = None,
-    motion: dict[str, str] | None = None,
+    motion: dict[str, Any] | None = None,
     zones: dict[str, Any] | None = None,
     path: dict[str, Any] | None = None,
 ) -> dict[str, Any]:

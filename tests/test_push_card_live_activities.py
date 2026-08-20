@@ -315,13 +315,20 @@ def test_content_state_motion_without_speed():
     assert "speed_label" not in state["motion"]
 
 
+def test_content_state_motion_carries_distance_ft():
+    """World-model distance rides in motion verbatim (additive contract:
+    the app treats a missing key as don't-render)."""
+    state = _content_state(motion={"heading": "approaching", "distance_ft": 30})
+    assert state["motion"]["distance_ft"] == 30
+
+
 def test_content_state_size_under_budget():
     state = _content_state(
         level="urgent", mutation="escalate", glyph="figure.stand",
         primary="Still at Front Door", secondary="Front Door · 2m",
         elapsed_seconds=126,
         state_since_ts=1786337290.0,
-        motion={"heading": "stationary"},
+        motion={"heading": "approaching", "speed_label": "running", "distance_ft": 100},
         zones={"ladder": ["Street", "Path", "Porch", "Yard", "Private"], "current_index": 2},
         path={"points": [[round(i * 0.03, 2), round(0.9 - i * 0.02, 2)] for i in range(30)]},
     )
