@@ -391,6 +391,9 @@ def _refresh_client(
     import httpx
 
     settings = _settings(frigate_db_path, sidecar_db_path, tmp_path)
+    # The tests point config_path at a sidecar-owned snapshot, which is the
+    # one deployment shape allowed to opt in to refresh overwrites.
+    settings.frigate.config_refresh_enabled = True
     app = create_app(settings)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -438,6 +441,29 @@ def test_config_refresh_propagates_upstream_denial(
     assert resp.status_code == 502
 
 
+def test_config_refresh_refused_by_default(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+):
+    """`config_refresh_enabled` defaults off: on prod, config_path is
+    Frigate's live config.yml and this endpoint must never touch it."""
+    client = TestClient(create_app(_settings(frigate_db_path, sidecar_db_path, tmp_path)))
+    before = (tmp_path / "frigate-config.yml").read_text()
+    resp = client.post("/v1/push/frigate-config/refresh")
+    assert resp.status_code == 403
+    assert (tmp_path / "frigate-config.yml").read_text() == before
+
+
+def test_config_refresh_keeps_backup_of_replaced_snapshot(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+):
+    new_yaml = "cameras:\n  cam:\n    zones: {}\n"
+    client = _refresh_client(frigate_db_path, sidecar_db_path, tmp_path, new_yaml)
+    before = (tmp_path / "frigate-config.yml").read_text()
+    resp = client.post("/v1/push/frigate-config/refresh")
+    assert resp.status_code == 200
+    assert (tmp_path / "frigate-config.yml.bak").read_text() == before
+
+
 def test_stale_rev_conflicts_instead_of_clobbering(client: TestClient):
     """Two tabs edit the same document: the second save with the old rev must
     409, not silently overwrite the first."""
@@ -456,3 +482,31 @@ def test_stale_rev_conflicts_instead_of_clobbering(client: TestClient):
     # A client that never sends rev (the iOS app) keeps working.
     legacy = client.put("/v1/push/settings", json=doc)
     assert legacy.status_code == 200
+
+
+def test_stale_rev_still_conflicts_after_restart(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+):
+    """The rev lives in the settings file, not process memory: a tab holding a
+    pre-restart rev must still 409 against a sidecar restarted (redeployed)
+    in between, instead of the counter resetting and re-admitting it."""
+    settings = _settings(frigate_db_path, sidecar_db_path, tmp_path)
+    doc = policy_settings.default_settings()
+
+    client = TestClient(create_app(settings))
+    old_rev = client.get("/v1/push/settings").json()["rev"]
+    saved = client.put("/v1/push/settings", json={**doc, "rev": old_rev})
+    assert saved.status_code == 200
+    current_rev = saved.json()["rev"]
+
+    # "Restart": a fresh app process over the same settings file.
+    policy_settings.reset_for_tests()
+    restarted = TestClient(create_app(settings))
+    assert restarted.get("/v1/push/settings").json()["rev"] == current_rev
+
+    stale = restarted.put("/v1/push/settings", json={**doc, "rev": old_rev})
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["error"] == "stale_settings_rev"
+
+    fresh = restarted.put("/v1/push/settings", json={**doc, "rev": current_rev})
+    assert fresh.status_code == 200

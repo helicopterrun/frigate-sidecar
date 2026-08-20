@@ -56,11 +56,7 @@ async def settings_view(request: Request) -> Any:
     settings = request.app.state.settings
     templates = request.app.state.templates
 
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
-        devices = store.list_devices(conn)
-    finally:
-        conn.close()
+    devices = await db.with_sidecar(settings.sidecar.db_path, store.list_devices)
 
     caps = await scrub_routes.capabilities(request)
 

@@ -1280,7 +1280,20 @@ async def _decimate_source(
             wanted.append((k, cell_t))
         if not wanted:
             continue
-        try:
+
+        def _slice_sheet(
+            img_path: Path = img_path,
+            wanted: list[tuple[int, float]] = wanted,
+            cols: int = cols,
+            cell_w: int = cell_w,
+            cell_h: int = cell_h,
+            base: int = len(frames),
+        ) -> list[grid.Frame]:
+            # PIL decode + N crops + N JPEG encodes per sheet is real CPU and
+            # disk time; on a worker thread so the event loop (proxy video
+            # range requests included) keeps serving while a derived tier
+            # catches up.
+            out_frames: list[grid.Frame] = []
             with Image.open(img_path) as im:
                 rgb = im.convert("RGB")
                 for k, cell_t in wanted:
@@ -1288,9 +1301,13 @@ async def _decimate_source(
                     crop = rgb.crop(
                         (col * cell_w, row * cell_h, (col + 1) * cell_w, (row + 1) * cell_h)
                     )
-                    out = work_dir / f"{k:06d}-{len(frames):06d}.jpg"
+                    out = work_dir / f"{k:06d}-{base + len(out_frames):06d}.jpg"
                     crop.save(out, format="JPEG", quality=90)
-                    frames.append(grid.Frame(timestamp=cell_t, path=str(out)))
+                    out_frames.append(grid.Frame(timestamp=cell_t, path=str(out)))
+            return out_frames
+
+        try:
+            frames.extend(await asyncio.to_thread(_slice_sheet))
         except OSError as exc:
             logger.warning(
                 "scrub: could not read source sheet %s for decimation: %s", img_path, exc

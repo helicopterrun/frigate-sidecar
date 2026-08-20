@@ -11,13 +11,16 @@ can JOIN across them in a single query.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
+
+T = TypeVar("T")
 
 SIDECAR_SCHEMA = """
 CREATE TABLE IF NOT EXISTS triage_labels (
@@ -415,6 +418,26 @@ def open_sidecar(path: str | Path) -> sqlite3.Connection:
         conn.commit()
         _SCHEMA_APPLIED.add(key)
     return conn
+
+
+async def with_sidecar(path: str | Path, fn: Callable[[sqlite3.Connection], T]) -> T:
+    """Run `fn` against the sidecar DB on a worker thread.
+
+    `open_sidecar` and every query on the connection it returns are synchronous
+    sqlite3 -- called directly inside an `async def` route they stall the whole
+    single-worker event loop (including the proxy's video range requests) for
+    the duration. Route handlers should use this instead; `fn` owns the whole
+    connect/query/commit sequence and the connection is always closed.
+    """
+
+    def _run() -> T:
+        conn = open_sidecar(path)
+        try:
+            return fn(conn)
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_run)
 
 
 def open_joined(

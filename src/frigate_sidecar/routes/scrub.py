@@ -127,12 +127,13 @@ async def capabilities(request: Request) -> dict[str, Any]:
     generated = False
     generated_cameras: list[str] = list(settings.scrub.cameras)
     if settings.scrub.enabled:
-        conn = db.open_sidecar(settings.sidecar.db_path)
-        try:
-            rows = conn.execute("SELECT DISTINCT camera FROM scrub_buckets").fetchall()
-            cams_with_data = {r["camera"] for r in rows}
-        finally:
-            conn.close()
+        cams_with_data = await db.with_sidecar(
+            settings.sidecar.db_path,
+            lambda conn: {
+                r["camera"]
+                for r in conn.execute("SELECT DISTINCT camera FROM scrub_buckets").fetchall()
+            },
+        )
         # Cached buckets can outlive a camera rename; don't advertise ghosts.
         configured = zones.configured_camera_names(settings.frigate.config_path)
         if configured is not None:
@@ -232,8 +233,7 @@ async def scrub_coverage(camera: str, start: float, end: float, request: Request
     # along. `grid.exclude_derived_buckets` drops them, keeping this response's
     # one-bucket-per-instant contract exactly (shared with `/v1/reel`, which
     # applies the same exclusion to its own `frames` list).
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
+    def _read_coverage(conn: Any) -> tuple[list[Any], float]:
         bucket_rows = db.list_scrub_buckets(conn, camera, start, end)
         exclude = sorted(
             grid.excluded_derived_intervals(bucket_rows, settings.scrub.derived_intervals_s)
@@ -245,8 +245,11 @@ async def scrub_coverage(camera: str, start: float, end: float, request: Request
             )
         else:
             generated_through = db.latest_generated_through(conn, camera) or 0.0
-    finally:
-        conn.close()
+        return bucket_rows, generated_through
+
+    bucket_rows, generated_through = await db.with_sidecar(
+        settings.sidecar.db_path, _read_coverage
+    )
 
     return {
         "camera": camera,
@@ -271,11 +274,10 @@ async def scrub_sheets(
     _require_window(start, end)
     _require_known_camera(request, camera)
 
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
-        sheet_rows = db.list_scrub_sheets(conn, camera, start, end, interval=interval)
-    finally:
-        conn.close()
+    sheet_rows = await db.with_sidecar(
+        settings.sidecar.db_path,
+        lambda conn: db.list_scrub_sheets(conn, camera, start, end, interval=interval),
+    )
 
     sheets = [
         {
@@ -316,11 +318,10 @@ async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
             status_code=404, detail={"error": _ERR_NOT_GENERATED, "message": str(exc)}
         ) from exc
 
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
-        row = db.get_scrub_sheet(conn, camera, start, interval, count)
-    finally:
-        conn.close()
+    row = await db.with_sidecar(
+        settings.sidecar.db_path,
+        lambda conn: db.get_scrub_sheet(conn, camera, start, interval, count),
+    )
     if row is None:
         raise HTTPException(
             status_code=404,
@@ -427,11 +428,10 @@ async def reel(
     finally:
         conn.close()
 
-    sidecar_conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
-        bucket_rows = db.list_scrub_buckets(sidecar_conn, camera, start, end)
-    finally:
-        sidecar_conn.close()
+    bucket_rows = await db.with_sidecar(
+        settings.sidecar.db_path,
+        lambda conn: db.list_scrub_buckets(conn, camera, start, end),
+    )
 
     # Same exclusion `/v1/scrub/{camera}/coverage` applies -- without it, a
     # window covered by both a decode tier and an overlapping derived tier

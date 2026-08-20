@@ -177,6 +177,15 @@ def _build_push_transport(settings: Settings):  # noqa: ANN201 - Protocol return
     """Mock/log transport by default -- the only one usable without real APNs
     credentials (spec §4). "relay" posts to `push.relay_base_url`."""
     if settings.push.transport == "relay":
+        if not settings.push.relay_key:
+            # Deliberately not fatal -- an LXC deploy mid-upgrade must not
+            # hard-fail on a missing key -- but every push would go to the
+            # relay unauthenticated, so it has to be unmissable in the log.
+            logger.critical(
+                "push: transport is 'relay' but push.relay_key is EMPTY -- every "
+                "relay request will be sent UNAUTHENTICATED. Set push.relay_key "
+                "in the sidecar config."
+            )
         return RelayTransport(
             settings.push.relay_base_url,
             timeout=settings.push.relay_timeout_s,
@@ -327,19 +336,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             db_path=str(settings.sidecar.db_path),
             transport=transport,
             server_id=server_id,
-            handle_ttl_s=settings.push.handle_ttl_s,
             situation_handle_ttl_s=settings.push.situation_handle_ttl_s,
             frigate_base_url=settings.frigate.base_url,
-            rate_limit_per_hour=settings.push.rate_limit_per_hour,
             rate_limit_window_s=settings.push.rate_limit_window_s,
             thumbnail_max_edge=settings.push.thumbnail_max_edge,
             thumbnail_quality=settings.push.thumbnail_quality,
             thumbnail_timeout_s=settings.push.thumbnail_timeout_s,
             dwell_source=settings.push.dwell_source,
-            activity_update_min_interval_s=settings.push.activity_update_min_interval_s,
             activity_resolution_s=settings.push.activity_resolution_s,
             activity_dismissal_tail_s=settings.push.activity_dismissal_tail_s,
-            activity_updates_per_hour=settings.push.activity_updates_per_hour,
             activity_reap_after_s=settings.push.activity_reap_after_s,
             push_config=settings.push,
         )
@@ -403,6 +408,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
     )
     app.state.plus_enabled = False
+    # /healthz uses this as the grace window before a never-completed scrub
+    # cycle counts as stale.
+    app.state.started_at = time.time()
 
     @app.exception_handler(FrigateDBMissingError)
     async def _frigate_db_missing(request: Request, exc: FrigateDBMissingError) -> object:

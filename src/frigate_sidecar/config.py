@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 class FrigateSection(BaseModel):
     base_url: str = "http://frigate.lan:5000"
     config_path: Path = Path("/opt/frigate/config.yml")
+    # Allow POST /v1/push/frigate-config/refresh to overwrite `config_path`.
+    # Default OFF: on the bare-metal install config_path is Frigate's LIVE
+    # config.yml, and a refresh would replace it wholesale. Only enable on a
+    # deployment where config_path is a sidecar-owned snapshot (dev).
+    config_refresh_enabled: bool = False
     db_path: Path = Path("/opt/frigate/database/frigate.db")
     # Authed origin used ONLY to proxy app traffic (routes/proxy.py). Auth stays
     # entirely Frigate's — the sidecar forwards the client's own cookie and never

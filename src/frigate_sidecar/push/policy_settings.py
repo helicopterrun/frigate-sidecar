@@ -965,15 +965,42 @@ def load_settings(path: str | Path) -> dict[str, Any]:
     return normalize_settings(data)
 
 
-def save_settings(path: str | Path, settings: dict[str, Any]) -> None:
+def read_rev(path: str | Path) -> int:
+    """The optimistic-concurrency revision stored in the settings file.
+
+    Kept in the document itself (not in process memory) so a sidecar restart
+    can't reset it to 1 and silently re-admit a PUT holding a pre-restart
+    rev. Read raw rather than through `load_settings`: `normalize_settings`
+    rebuilds the document from known policy keys and would drop `rev`.
+    An unreadable or rev-less file reads as 1, matching what `save_settings`
+    writes on its first save of a fresh file.
+    """
+    try:
+        with Path(path).open() as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return 1
+    rev = data.get("rev") if isinstance(data, dict) else None
+    return rev if isinstance(rev, int) and rev > 0 else 1
+
+
+def save_settings(path: str | Path, settings: dict[str, Any]) -> int:
     """Write-then-rename so a reader (or a crash mid-write) never observes a
-    half-written file."""
+    half-written file.
+
+    Every write bumps the on-disk `rev` (returned) -- any save, whatever the
+    caller, is a change another open editor's rev is now stale against. The
+    key lives only in the file; the in-memory policy (`apply_settings`) and
+    `load_settings` never carry it.
+    """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    new_rev = (read_rev(p) if p.exists() else 0) + 1
     tmp = p.with_suffix(p.suffix + ".tmp")
     with tmp.open("w") as f:
-        json.dump(settings, f, indent=2, sort_keys=True)
+        json.dump({**settings, "rev": new_rev}, f, indent=2, sort_keys=True)
     tmp.replace(p)
+    return new_rev
 
 
 #: The live, in-process policy -- what `get_active()` returns and what

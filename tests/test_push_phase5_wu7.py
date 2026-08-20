@@ -13,6 +13,7 @@ Organized by the 9 areas from the Phase 5 spec:
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import httpx
@@ -574,6 +575,26 @@ async def test_relay_key_on_la_and_test_endpoints():
     assert all(h.get("x-relay-key") == "k1" for h in seen_headers)
     assert len(seen_headers) == 4
     await relay.aclose()
+
+
+def test_relay_without_key_logs_critical_at_startup(caplog):
+    """`transport = "relay"` with an empty relay_key is a live misconfiguration
+    (every push goes out unauthenticated) -- startup must say so at CRITICAL,
+    without refusing to start (a deploy mid-upgrade shouldn't hard-fail)."""
+    from frigate_sidecar.config import PushSection, Settings
+    from frigate_sidecar.server import _build_push_transport
+
+    settings = Settings(push=PushSection(transport="relay", relay_key=""))
+    with caplog.at_level(logging.CRITICAL, logger="frigate_sidecar.server"):
+        transport = _build_push_transport(settings)
+    assert isinstance(transport, RelayTransport)
+    critical = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert critical and "relay_key" in critical[0].getMessage()
+
+    caplog.clear()
+    with caplog.at_level(logging.CRITICAL, logger="frigate_sidecar.server"):
+        _build_push_transport(Settings(push=PushSection(transport="relay", relay_key="k1")))
+    assert not [r for r in caplog.records if r.levelno == logging.CRITICAL]
 
 
 # ── 8. Sound filename correctness ───────────────────────────────────────

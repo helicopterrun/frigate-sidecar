@@ -11,6 +11,7 @@ opaque, unguessable, and short-lived instead.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import pathlib
 from typing import Annotated, Any, Literal
@@ -169,8 +170,7 @@ async def register_device(
     parsed = [s for s in (Situation.from_dict(s) for s in situations) if s is not None]
     schema_version = 2 if parsed else body.schema_version
 
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
+    def _persist(conn: Any) -> tuple[Any, Any, Any]:
         previous = store.get_device(conn, apns_token)
         device_id = store.upsert_device(
             conn,
@@ -197,23 +197,19 @@ async def register_device(
         # Read back rather than echoing the request: a PUT that omits
         # `push_to_start_token` keeps the one already stored, so the body alone
         # can't answer "can this device run Live Activities".
-        stored = store.get_device(conn, apns_token)
-    finally:
-        conn.close()
+        return previous, device_id, store.get_device(conn, apns_token)
 
-    # Which mode this device evaluates under is otherwise invisible short of
-    # dumping the row: an empty `situations` array is a legitimate, deliberate
-    # choice (v1 camera/label/severity dispatch), but nothing recorded *that*
-    # a device landed there until this line existed.
+    previous, device_id, stored = await db.with_sidecar(settings.sidecar.db_path, _persist)
+
+    # Recorded for back-compat visibility only: the situations pipeline is
+    # retired (Phase 5 §1, card pipeline is the sole alert path), but which
+    # mode a device *registered* under still matters for tracing older app
+    # builds, so the row keeps its situations and this line keeps logging.
     uses_situations = bool(parsed)
-    dispatch = (
-        "situation matching (_dispatch_situations)"
-        if uses_situations
-        else "v1 camera/label/severity (_dispatch_v1)"
-    )
     logger.info(
-        "push: registration apns_token=%s schema_version=%s uses_situations=%s dispatch=%s",
-        apns_token[:8], schema_version, uses_situations, dispatch,
+        "push: registration apns_token=%s schema_version=%s uses_situations=%s "
+        "(situations stored for back-compat; card pipeline is the alert path)",
+        apns_token[:8], schema_version, uses_situations,
     )
     if previous is not None and previous.uses_situations != uses_situations:
         # The edge that actually matters: a device silently flipping mode
@@ -250,12 +246,12 @@ async def unregister_device(
     is still a 200, not a 404, since the end state either way is "not
     registered"."""
     settings = request.app.state.settings
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
+
+    def _delete(conn: Any) -> None:
         store.delete_device(conn, apns_token)
         conn.commit()
-    finally:
-        conn.close()
+
+    await db.with_sidecar(settings.sidecar.db_path, _delete)
     return {"unregistered": True}
 
 
@@ -274,11 +270,9 @@ async def test_push(
     switched off is 503, both carrying the standard error envelope.
     """
     settings = request.app.state.settings
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
-        device = store.get_device(conn, apns_token)
-    finally:
-        conn.close()
+    device = await db.with_sidecar(
+        settings.sidecar.db_path, lambda conn: store.get_device(conn, apns_token)
+    )
     if device is None:
         raise HTTPException(
             status_code=404,
@@ -360,8 +354,8 @@ async def create_snooze(body: SnoozeRequest, request: Request) -> dict[str, Any]
     )
     scope = _validate_scope(body.scope)
     settings = request.app.state.settings
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
+
+    def _snooze(conn: Any) -> Any:
         if store.get_device(conn, body.apns_token) is None:
             raise HTTPException(
                 status_code=404,
@@ -371,9 +365,9 @@ async def create_snooze(body: SnoozeRequest, request: Request) -> dict[str, Any]
             conn, apns_token=body.apns_token, scope=scope, until_epoch=body.until_epoch
         )
         conn.commit()
-        active = store.list_snoozes(conn, body.apns_token)
-    finally:
-        conn.close()
+        return store.list_snoozes(conn, body.apns_token)
+
+    active = await db.with_sidecar(settings.sidecar.db_path, _snooze)
     return {"snoozed": True, "scope": scope, "until_epoch": body.until_epoch, "active": active}
 
 
@@ -397,13 +391,13 @@ async def delete_snooze(
         "use registration.snoozes instead", scope, apns_token,
     )
     settings = request.app.state.settings
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
+
+    def _unsnooze(conn: Any) -> Any:
         store.clear_snooze(conn, apns_token=apns_token, scope=scope)
         conn.commit()
-        active = store.list_snoozes(conn, apns_token)
-    finally:
-        conn.close()
+        return store.list_snoozes(conn, apns_token)
+
+    active = await db.with_sidecar(settings.sidecar.db_path, _unsnooze)
     return {"unsnoozed": True, "scope": scope, "active": active}
 
 
@@ -427,11 +421,9 @@ async def test_situation_push(
     hourly budget -- the user asked for this one.
     """
     settings = request.app.state.settings
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
-        device = store.get_device(conn, body.apns_token)
-    finally:
-        conn.close()
+    device = await db.with_sidecar(
+        settings.sidecar.db_path, lambda conn: store.get_device(conn, body.apns_token)
+    )
     if device is None:
         raise HTTPException(
             status_code=404,
@@ -489,8 +481,8 @@ async def upload_activity_token(
     which is why the body carries both.
     """
     settings = request.app.state.settings
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
+
+    def _attach(conn: Any) -> Any:
         device = store.get_device(conn, body.apns_token)
         if device is None:
             raise HTTPException(
@@ -506,20 +498,29 @@ async def upload_activity_token(
             token=body.token,
         )
         conn.commit()
-        # Fast create→resolve race: the card may already be closed by the
-        # time this token arrives. End the activity now rather than leaving
-        # it stranded on the lock screen until its stale-date.
-        engine = getattr(request.app.state, "push_engine", None)
-        if engine is not None:
-            from frigate_sidecar.push.delivery_wire import end_activity_if_card_closed
+        return device
 
+    device = await db.with_sidecar(settings.sidecar.db_path, _attach)
+
+    # Fast create→resolve race: the card may already be closed by the time
+    # this token arrives. End the activity now rather than leaving it
+    # stranded on the lock screen until its stale-date. This part can't ride
+    # in `_attach`'s worker thread: `end_activity_if_card_closed` awaits the
+    # transport while holding the connection (sqlite connections are
+    # thread-bound), so this rare path keeps a loop-thread connection.
+    engine = getattr(request.app.state, "push_engine", None)
+    if engine is not None:
+        from frigate_sidecar.push.delivery_wire import end_activity_if_card_closed
+
+        conn = db.open_sidecar(settings.sidecar.db_path)
+        try:
             await end_activity_if_card_closed(
                 conn, device, engine.transport,
                 card_key=body.situation_id, track_id=body.track_id, token=body.token,
             )
             conn.commit()
-    finally:
-        conn.close()
+        finally:
+            conn.close()
     return {"accepted": True, "activity_id": body.activity_id}
 
 
@@ -536,12 +537,13 @@ async def delete_activity_token(
     state either way is "the sidecar isn't tracking that activity".
     """
     settings = request.app.state.settings
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
+
+    def _delete(conn: Any) -> Any:
         removed = store.delete_activity(conn, activity_id)
         conn.commit()
-    finally:
-        conn.close()
+        return removed
+
+    removed = await db.with_sidecar(settings.sidecar.db_path, _delete)
     return {"deleted": True, "activity_id": activity_id, "was_tracked": removed}
 
 
@@ -557,11 +559,9 @@ async def get_thumbnail(handle: str, request: Request) -> Response:
     visible push is the promise, the image is not.
     """
     settings = request.app.state.settings
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
-        jpeg = store.get_thumbnail(conn, handle)
-    finally:
-        conn.close()
+    jpeg = await db.with_sidecar(
+        settings.sidecar.db_path, lambda conn: store.get_thumbnail(conn, handle)
+    )
     if jpeg is None:
         raise HTTPException(
             status_code=404,
@@ -585,11 +585,9 @@ async def redeem_handle(handle: str, request: Request) -> dict[str, Any]:
     Frigate event id a handle stands for, plus the `snapshot_url` to fetch
     next -- never the raw event id in the APNs payload itself."""
     settings = request.app.state.settings
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
-        data = store.redeem_handle(conn, handle)
-    finally:
-        conn.close()
+    data = await db.with_sidecar(
+        settings.sidecar.db_path, lambda conn: store.redeem_handle(conn, handle)
+    )
     if data is None:
         raise HTTPException(
             status_code=404,
@@ -611,12 +609,13 @@ async def get_decisions(limit: int = Query(default=50, ge=1)) -> dict[str, Any]:
 _ERR_INVALID_SETTINGS = "invalid_settings"
 _ERR_STALE_REV = "stale_settings_rev"
 
-# In-process revision counter for the settings document. Both /zones and
-# /cameras (and now /settings) PUT the whole document; without this, two tabs
-# silently clobber each other last-write-wins. A web client sends back the
-# rev it loaded and gets a 409 if someone else saved in between. Clients
-# that never send `rev` (the iOS app) keep the old behavior.
-_settings_rev = 1
+# The settings document's revision guards against two tabs clobbering each
+# other last-write-wins: a web client sends back the rev it loaded and gets a
+# 409 if someone else saved in between. Clients that never send `rev` (the
+# iOS app) keep the old behavior. The rev lives *in the settings file*
+# (`policy_settings.read_rev`/`save_settings`) rather than process memory --
+# an in-process counter reset to 1 on every restart, silently re-admitting
+# any pre-deploy stale rev.
 
 
 @router.get("/settings")
@@ -654,7 +653,7 @@ async def get_push_settings(request: Request) -> dict[str, Any]:
 
     return {
         "settings": active,
-        "rev": _settings_rev,
+        "rev": policy_settings.read_rev(settings_path),
         "available_cameras": available_cameras,
         "derived_headings": derived_headings,
         # Response key predates the settings-backed optics table; kept so
@@ -684,10 +683,11 @@ async def put_push_settings(request: Request) -> dict[str, Any]:
     ignored (forward compat); an unknown subject/place/family key inside a
     known block, or an invalid level/place-class value, is a 400.
     """
-    global _settings_rev
     body = await request.json()
+    settings = request.app.state.settings
     client_rev = body.pop("rev", None) if isinstance(body, dict) else None
-    if isinstance(client_rev, int) and client_rev != _settings_rev:
+    current_rev = policy_settings.read_rev(settings.push.push_settings_path)
+    if isinstance(client_rev, int) and client_rev != current_rev:
         raise HTTPException(
             status_code=409,
             detail={
@@ -702,7 +702,6 @@ async def put_push_settings(request: Request) -> dict[str, Any]:
             detail={"error": _ERR_INVALID_SETTINGS, "detail": errors},
         )
 
-    settings = request.app.state.settings
     merged = policy_settings.normalize_settings(body)
     # la_only is sticky: normalize fills absent keys from *defaults*, and the
     # app's settings model round-trips through a fixed Codable type that drops
@@ -727,10 +726,9 @@ async def put_push_settings(request: Request) -> dict[str, Any]:
     for nullable_key in ("secure_area", "map_scale_ft", "floorplan"):
         if nullable_key not in body:
             merged[nullable_key] = policy_settings.get_active().get(nullable_key)
-    policy_settings.save_settings(settings.push.push_settings_path, merged)
+    new_rev = policy_settings.save_settings(settings.push.push_settings_path, merged)
     policy_settings.apply_settings(merged)
-    _settings_rev += 1
-    return {"ok": True, "rev": _settings_rev}
+    return {"ok": True, "rev": new_rev}
 
 
 _ERR_CONFIG_REFRESH = "config_refresh_failed"
@@ -752,6 +750,18 @@ async def refresh_frigate_config(request: Request) -> dict[str, Any]:
     from frigate_sidecar.frigate_api import get_async_client
 
     settings = request.app.state.settings
+    if not settings.frigate.config_refresh_enabled:
+        # On prod `frigate.config_path` is Frigate's live config.yml -- an
+        # overwrite here would clobber it. Only a deployment that has declared
+        # its copy to be a sidecar-owned snapshot may refresh it.
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": _ERR_CONFIG_REFRESH,
+                "message": "frigate.config_refresh_enabled is off -- refusing to "
+                "overwrite frigate.config_path",
+            },
+        )
     upstream = settings.frigate.proxy_base_url.rstrip("/") + "/api/config/raw"
     client = get_async_client(request.app)
     try:
@@ -789,13 +799,23 @@ async def refresh_frigate_config(request: Request) -> dict[str, Any]:
         )
 
     path = pathlib.Path(settings.frigate.config_path)
-    current = path.read_text() if path.exists() else None
-    changed = raw != current
-    if changed:
+
+    def _rewrite_snapshot() -> bool:
+        current = path.read_text() if path.exists() else None
+        if raw == current:
+            return False
         path.parent.mkdir(parents=True, exist_ok=True)
+        if current is not None:
+            # Keep the outgoing content: this endpoint is the only writer that
+            # can destroy a config it didn't author.
+            path.with_suffix(path.suffix + ".bak").write_text(current)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(raw)
         tmp.replace(path)
+        return True
+
+    changed = await asyncio.to_thread(_rewrite_snapshot)
+    if changed:
         policy_settings.load_zone_display_names(path)
 
     from frigate_sidecar.zones import load_camera_zones
@@ -895,13 +915,17 @@ async def upload_floorplan(request: Request) -> dict[str, Any]:
 
     settings = request.app.state.settings
     base = pathlib.Path(settings.push.floorplan_path)
-    base.parent.mkdir(parents=True, exist_ok=True)
-    tmp = base.with_suffix(".tmp")
-    tmp.write_bytes(data)
-    tmp.replace(base.with_suffix("." + ext))
-    for other in _FLOORPLAN_MEDIA_TYPES:
-        if other != ext:
-            base.with_suffix("." + other).unlink(missing_ok=True)
+
+    def _store_image() -> None:
+        base.parent.mkdir(parents=True, exist_ok=True)
+        tmp = base.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(base.with_suffix("." + ext))
+        for other in _FLOORPLAN_MEDIA_TYPES:
+            if other != ext:
+                base.with_suffix("." + other).unlink(missing_ok=True)
+
+    await asyncio.to_thread(_store_image)
 
     from datetime import datetime, timezone
 
@@ -926,7 +950,7 @@ async def get_floorplan(request: Request) -> Response:
             detail={"error": _ERR_FLOORPLAN_NOT_FOUND, "message": "no floorplan uploaded"},
         )
     return Response(
-        content=path.read_bytes(),
+        content=await asyncio.to_thread(path.read_bytes),
         media_type=_FLOORPLAN_MEDIA_TYPES[path.suffix.lstrip(".")],
         headers={"Cache-Control": "no-cache"},
     )
