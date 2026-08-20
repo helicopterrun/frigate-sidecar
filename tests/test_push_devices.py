@@ -107,4 +107,8 @@ def test_unregister_unknown_token_is_still_200(client: TestClient) -> None:
 def test_capabilities_reports_push_disabled_by_default(client: TestClient) -> None:
     r = client.get("/v1/capabilities")
     assert r.status_code == 200
-    assert r.json()["push"] == {"enabled": False, "transport": "mock"}
+    body = r.json()["push"]
+    assert body["enabled"] is False
+    assert body["transport"] == "mock"
+    # attention_subjects rides along regardless of enabled state.
+    assert "package" in body["attention_subjects"]

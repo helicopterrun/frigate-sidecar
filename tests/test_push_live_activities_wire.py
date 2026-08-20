@@ -129,6 +129,31 @@ async def test_full_la_lifecycle_create_enrich_escalate_resolve(sidecar_db_path:
 
 
 @pytest.mark.asyncio
+async def test_decision_trace_carries_la_side_of_the_decision(sidecar_db_path: Path):
+    """One alerts stack: the decisions feed records what the LA did, not
+    just the banner routing."""
+    from frigate_sidecar.push import decision_trace
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trkD", "package", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    entry = next(
+        e for e in decision_trace.recent(limit=200)
+        if e["event_id"] == "trkD"  # event_id defaults to the first track id
+    )
+    assert entry["subject"] == "package"
+    assert entry["family"] == "package"
+    assert entry["la_started"] is True
+    assert entry["la_reason"] == "started"
+
+
+@pytest.mark.asyncio
 async def test_non_qualifying_card_gets_no_live_activity(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()

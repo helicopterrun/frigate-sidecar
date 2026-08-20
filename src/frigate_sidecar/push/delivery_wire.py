@@ -1291,6 +1291,39 @@ async def handle_delivery_event(
             state_since_ts=la_state_since_ts, motion=la_motion,
             zones=la_zones, path=la_path,
         )
+        # One alerts stack: the decisions feed carries the LA side of the
+        # same decision. Only on the mutations that appended an entry above
+        # -- annotating on enrich would overwrite the create entry's story.
+        if mutation in (CREATE, ESCALATE, DEESCALATE):
+            if family is None:
+                # Would the content have matched a family at a loud-enough
+                # cell? Distinguishes ladder/picks skips from plain
+                # no-family content.
+                content_family = live_activities.classify_family(
+                    subject_kind=subject_kind, label=snapshot.label,
+                    place_class=place_class, level="notify",
+                )
+                if content_family is None:
+                    la_reason = "no_family"
+                elif content_family == live_activities.OPENINGS and card.level != "log":
+                    la_reason = "opening_not_picked"
+                else:
+                    la_reason = "cell_below_glance"
+                decision_trace.annotate(
+                    event.event_id, la_started=False, la_reason=la_reason,
+                )
+            else:
+                started = bool(la_covered)
+                if not started:
+                    la_reason = "device_not_la_capable"
+                elif family == live_activities.CATCH_ALL:
+                    la_reason = "catch_all"
+                else:
+                    la_reason = "started"
+                decision_trace.annotate(
+                    event.event_id, family=family, la_started=started,
+                    la_reason=la_reason,
+                )
         # la_first demotion: if the delivery mode is la_first and this is
         # NOT an escalation, broaden demotion to all la_capable devices that
         # have an open activity for this card — even if the LA update was

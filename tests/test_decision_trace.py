@@ -174,3 +174,41 @@ class TestEndpoint:
         resp = client.get("/v1/capabilities")
         assert resp.status_code == 200
         assert resp.json()["decisions"] == {"enabled": True}
+
+    def test_capabilities_advertises_attention_subjects(self, client: TestClient):
+        from frigate_sidecar.push import policy_settings
+
+        resp = client.get("/v1/capabilities")
+        assert resp.status_code == 200
+        assert resp.json()["push"]["attention_subjects"] == list(policy_settings.SUBJECTS_V3)
+
+
+class TestAnnotate:
+    def test_annotate_patches_matching_entry(self):
+        entry = decision_trace.append(
+            camera="porch", label="package", subject="package", zones=["porch"],
+            place="doors", level="quiet", reasons=["routing_table"], event_id="ev-la-1",
+        )
+        decision_trace.annotate(
+            "ev-la-1", family="package", la_started=True, la_reason="started",
+        )
+        assert entry["family"] == "package"
+        assert entry["la_started"] is True
+        assert entry["la_reason"] == "started"
+
+    def test_annotate_targets_newest_entry_for_event(self):
+        decision_trace.append(
+            camera="porch", label="package", subject="package", zones=[],
+            place="doors", level="quiet", reasons=[], event_id="ev-la-2",
+        )
+        newest = decision_trace.append(
+            camera="porch", label="package", subject="package", zones=[],
+            place="doors", level="notify", reasons=[], event_id="ev-la-2",
+        )
+        decision_trace.annotate("ev-la-2", la_started=False, la_reason="device_not_la_capable")
+        assert newest["la_started"] is False
+        older = [e for e in decision_trace.recent(limit=200) if e["event_id"] == "ev-la-2"][-1]
+        assert "la_started" not in older
+
+    def test_annotate_unknown_event_is_a_noop(self):
+        decision_trace.annotate("ev-does-not-exist", family="package")

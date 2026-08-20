@@ -51,6 +51,31 @@ def append(
     return entry
 
 
+def annotate(
+    event_id: str,
+    *,
+    family: str | None = None,
+    la_started: bool | None = None,
+    la_reason: str | None = None,
+) -> None:
+    """Patch the newest buffered entry for `event_id` with the Live Activity
+    side of the decision (one alerts stack: the feed covers the whole
+    stack, not just banner routing). The LA call site runs after `append`,
+    so patching in place keeps one entry per decision. No-op when the entry
+    has already rotated out -- like `append`, this must never raise into
+    the push path."""
+    with _lock:
+        for entry in reversed(_buffer):
+            if entry["event_id"] == event_id:
+                if family is not None:
+                    entry["family"] = family
+                if la_started is not None:
+                    entry["la_started"] = la_started
+                if la_reason is not None:
+                    entry["la_reason"] = la_reason
+                return
+
+
 def recent(limit: int = 50) -> list[dict[str, Any]]:
     """Return up to `limit` most recent entries, newest first."""
     limit = max(1, min(limit, _SERVE_CAP))

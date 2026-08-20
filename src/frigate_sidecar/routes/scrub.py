@@ -30,6 +30,7 @@ from frigate_sidecar.frigate_api import (
     get_async_client,
 )
 from frigate_sidecar.frigate_config import recording_retention_days
+from frigate_sidecar.push import policy_settings
 from frigate_sidecar.scrub import grid
 from frigate_sidecar.scrub.motion import aggregate_motion, safe_fetch_scale
 
@@ -165,7 +166,14 @@ async def capabilities(request: Request) -> dict[str, Any]:
             "intervals": intervals,
         },
         "proxy": {"enabled": settings.proxy.enabled},
-        "push": {"enabled": settings.push.enabled, "transport": settings.push.transport},
+        "push": {
+            "enabled": settings.push.enabled,
+            "transport": settings.push.transport,
+            # One alerts stack: which subjects the outcomes/routing tables
+            # accept. The app hides the V3 ladder rows -- and omits their
+            # keys from PUTs -- unless this list says they're routable.
+            "attention_subjects": list(policy_settings.SUBJECTS_V3),
+        },
         "decisions": {"enabled": True},
     }
 
