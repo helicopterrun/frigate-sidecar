@@ -104,7 +104,23 @@ def test_clear_label(client: TestClient) -> None:
 def test_healthz(client: TestClient) -> None:
     r = client.get("/healthz")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    assert r.json()["status"] == "ok"
+
+
+def test_healthz_degraded_when_mqtt_disconnected(client: TestClient) -> None:
+    """A dead subscriber must surface as 503 -- the 2026-08-11 outage sat
+    invisible for 41 hours behind a static-ok healthcheck."""
+
+    class _DeadSubscriber:
+        connected = False
+
+    client.app.state.settings.push.enabled = True
+    client.app.state.push_subscriber = _DeadSubscriber()
+    r = client.get("/healthz")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["mqtt"] == "disconnected"
 
 
 def test_motion_blank_form(client: TestClient) -> None:

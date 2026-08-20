@@ -226,6 +226,16 @@ class MqttReviewSubscriber:
         elif msg.topic == self.settings.mqtt_topic_available:
             self._handle_available_message(msg.payload)
 
+    @property
+    def connected(self) -> bool:
+        """True while the paho client holds a live broker connection.
+
+        Surfaced by /healthz so a dead subscriber (the 2026-08-11 41-hour
+        silent outage) is visible to the container/systemd healthcheck
+        instead of only to someone reading the logs.
+        """
+        return self._client is not None and self._client.is_connected()
+
     def is_stale(self, *, now: float | None = None) -> bool:
         """True once the broker's been silent long enough that Frigate might
         be offline (spec §5 / §12.6's stale/live model)."""
