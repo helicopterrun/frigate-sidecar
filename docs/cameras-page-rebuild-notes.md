@@ -1,6 +1,7 @@
-# Cameras page — rebuild notes
+# Map page (formerly `/cameras`) — rebuild notes
 
 Observations gathered before the from-scratch rebuild (2026-08-17). The page
+now lives at `/map` (`/cameras` remains an alias — `routes/map_page.py`). The page
 grew feature-by-feature (map, layers, calibration, lock, visibility, rotation,
 fullscreen…) and the seams show. Functionality worth keeping is listed at the
 end.

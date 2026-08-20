@@ -256,20 +256,20 @@ is parsed from `card_key`'s final component, so cross-camera dedup keeps
 updating the same activity. `DELETE /v1/push/activity/token/{activity_id}`
 drops the row when the app ends the activity locally.
 
-## Situations (legacy v2 registration path)
+## Situations (retired — Phase 5 §1)
 
-A device registering with a non-empty `situations` array (user-authored
-rules over camera + label + zone + loiter + time-of-day,
-`push/situations.py`) evaluates situation-only; its v1
-`cameras`/`labels`/`min_severity` survive as a pre-filter. A device with no
-situations fires on the plain v1 filters. Both predate the card pipeline
-and still work; supporting pieces: starter library
-(`GET /v1/push/situations/library`), rate limiting (10 pushes per situation
-per device per rolling hour, counted in SQLite, `" · +X more"` suffix on
-the next push through), `sent_at` epoch-ms stamping for the app's
-`sidecar_to_nse_ms` latency measurement, and a Present-tier Live Activity
-stage machine (`push/activity.py`) with its own resolution sweeper and
-budgets (`activity_updates_per_hour`).
+The situations pipeline (situation-only evaluation and the v1
+camera/label/severity dispatch that preceded it) is retired: the
+card/attention-ladder pipeline above (`push/delivery_wire.py`) is the only
+alert path, and no review or object message emits a situation push. What
+survives, for back-compat with older app builds: registrations carrying a
+`situations` array are still accepted and stored (`push/situations.py`
+keeps the parser/model), the starter library
+(`GET /v1/push/situations/library`) still serves, and
+`POST /v1/push/test/{situation_id}` still fires one legacy-shaped push on
+demand. The situation and Live Activity payload builders
+(`push/payload.py`, `push/activity.py`) remain as the wire-shape record
+(see `docs/apns-payload-spec.md`).
 
 ## The settings document
 
@@ -360,17 +360,17 @@ being opaque, unguessable, and short-lived — the NSE holds no session.
   (reserved — the released client maps it to a specific message), 503
   `push_disabled`, 502 `test_send_failed`. `{"sent": true}` means APNs
   accepted; there is no delivery receipt.
-- `GET /v1/push/situations/library`, `GET /v1/push/sounds` — starters and
-  the sound catalog (keyed on `app_version`; the `.caf` assets ship in the
+- `GET /v1/push/situations/library`, `GET /v1/push/sounds` — starters
+  (legacy, see "Situations (retired)") and the sound catalog (keyed on `app_version`; the `.caf` assets ship in the
   app bundle).
 - `POST /v1/push/snooze`, `DELETE /v1/push/snooze/{scope}` — **deprecated**,
   superseded by `registration.snoozes` (full-state replace on every device
   PUT); kept one release. Scopes: `global`, `situation:<id>`,
   `camera:<name>` (per-device — snoozing the iPad must not quiet the
   iPhone). Expiry is a timestamp, not a scheduled job.
-- `POST /v1/push/test/{situation_id}` — fire one real situation push at the
-  named device, running the whole real path; snooze and rate limits are
-  bypassed and the send isn't charged.
+- `POST /v1/push/test/{situation_id}` — fire one legacy situation-shaped
+  push at the named device (the pipeline itself is retired; this test
+  button still works for devices registered with situations).
 - `POST /v1/push/activity/token`, `DELETE /v1/push/activity/token/{id}` —
   Live Activity token upload / local-end teardown (see above).
 - `GET /v1/push/thumbnail/{handle}`, `GET /v1/push/handle/{handle}` —
@@ -449,8 +449,8 @@ id.
 - `tests/test_push_cards.py` / `test_push_card_store.py` /
   `test_push_delivery_payload.py` — classifier, sound budget, persistence,
   payload/orchestration against `LogTransport`.
-- `tests/test_push_live_activities.py` / `_wire.py` — family detection,
-  payload shapes, and full lifecycles including token-race and dedup cases.
+- `tests/test_push_live_activities_wire.py` — family detection, payload
+  shapes, and full lifecycles including token-race and dedup cases.
 - `tests/test_push_policy_settings.py` / `test_push_settings_routes.py` /
   `test_push_delivery_wire.py` — settings defaults, validation, the
   zone-guessing heuristic, persistence, that `apply_settings` changes real

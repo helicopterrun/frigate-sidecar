@@ -111,12 +111,18 @@ of identified people, and writes that reach back into Frigate (labels, Frigate+
 submissions, face-library promotion), an open sidecar is a way around Frigate's
 own auth.
 
-Three deliberate exceptions:
+Four deliberate exceptions:
 
 - `/v1/capabilities`, `/healthz`, `/version` — reachability probes a client
-  needs *before* it has a session (plus `/static`).
+  needs *before* it has a session (plus `/static` and `/login` itself).
+- `/v1/push/thumbnail/{handle}` — fetched by the iOS Notification Service
+  Extension, which holds no Frigate session; protected instead by the handle
+  being opaque, unguessable, and short-lived.
 - the reverse-proxy catch-all — Frigate authenticates that traffic itself, and
   its 401 + `WWW-Authenticate` challenge must reach the client intact.
+- a valid remember-me cookie (the "stay signed in" box at `/login`) — a signed
+  expiry token minted only for a caller who had just proved a live Frigate
+  session; delete `.session_secret` to revoke all of them at once.
 
 Set `sidecar.require_frigate_auth: false` only if your Frigate has auth
 disabled, in which case there is no session to check.
