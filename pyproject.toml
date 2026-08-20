@@ -10,17 +10,20 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "helicopterrun" }]
+# Major-version caps only: two builds of the same tag should not silently
+# resolve across an API-breaking release (there is no lockfile — the Docker
+# image and install.sh both do a fresh resolve at build/install time).
 dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.32",
-    "pydantic>=2.9",
-    "pydantic-settings>=2.6",
-    "pyyaml>=6.0",
-    "typer>=0.13",
-    "jinja2>=3.1",
-    "httpx>=0.27",
-    "pillow>=10.4",
-    "paho-mqtt>=2.1",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.32,<1",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
+    "pyyaml>=6.0,<7",
+    "typer>=0.13,<1",
+    "jinja2>=3.1,<4",
+    "httpx>=0.27,<1",
+    "pillow>=10.4,<12",
+    "paho-mqtt>=2.1,<3",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +51,8 @@ dev = [
     "ruff>=0.7",
     "mypy>=1.13",
     "types-PyYAML",
+    # test_proxy_ws.py skips silently without this
+    "websockets>=13",
 ]
 
 [project.scripts]
@@ -67,19 +72,22 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM"]
 
-[tool.ruff.lint.per-file-ignores]
-# Retired suites: a module-level `pytestmark = skip` deliberately precedes the
-# imports so the skip applies before anything heavy loads.
-"tests/test_push_live_activities.py" = ["E402"]
-"tests/test_push_situation_engine.py" = ["E402"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
 asyncio_mode = "auto"
 
 [tool.mypy]
-python_version = "3.12"
+# Prod (bare-metal LXC) runs 3.10 — typecheck against the oldest supported runtime.
+python_version = "3.10"
 warn_unused_ignores = true
 warn_redundant_casts = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# numpy's bundled stubs use the 3.12+ `type` statement, which mypy refuses to
+# parse under python_version = 3.10. Treat numpy as untyped instead.
+module = "numpy.*"
+follow_imports = "skip"
+follow_imports_for_stubs = true
 ignore_missing_imports = true

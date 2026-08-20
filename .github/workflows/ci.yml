@@ -8,11 +8,15 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 3.10 is what prod runs (bare-metal LXC); 3.12 is the Docker image.
+        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Install ffmpeg
         # The scrub-generator tests probe GOP cadence with ffprobe; without it
         # they fail with KeyError on profile.gop_s.
