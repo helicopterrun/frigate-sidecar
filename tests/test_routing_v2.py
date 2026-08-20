@@ -443,7 +443,8 @@ class TestMigration:
 
         result = policy_settings.startup(settings_path)
         assert "routing_table_v2" in result
-        assert set(result["routing_table_v2"]) == {"person", "vehicle", "animal", "thing"}
+        # The V3 seeding runs in the same startup, so all seven rows exist.
+        assert set(result["routing_table_v2"]) == set(policy_settings.SUBJECTS_V3)
         assert "recognition" in result
 
         reloaded = json.loads(settings_path.read_text())

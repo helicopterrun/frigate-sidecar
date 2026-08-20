@@ -34,7 +34,7 @@ def test_default_routing_table_matches_the_brief_exactly():
 
 def test_default_settings_shape():
     settings = policy_settings.default_settings()
-    assert settings["v"] == 1
+    assert settings["v"] == policy_settings.SETTINGS_VERSION
     assert settings["zone_classes"] == {}
     assert settings["zone_overrides"] == {}
     assert settings["live_activities"] == {
@@ -415,3 +415,81 @@ def test_startup_never_reseeds_over_user_edits(tmp_path: Path):
     path.write_text(json.dumps(doc))
     assert policy_settings.startup(path)["camera_optics"] == {}
     policy_settings.reset_for_tests()
+
+
+# -- V3 seeding migration (one alerts stack, 2026-08-20) ---------------------
+
+def _pre_v3_doc() -> dict:
+    """A settings doc as an S1-era sidecar wrote it: four-subject outcomes,
+    authoritative family booleans."""
+    doc = policy_settings.default_settings()
+    for subject in policy_settings.SUBJECTS_V3_EXTRA:
+        del doc["outcomes"][subject]
+        del doc["routing_table_v2"][subject]
+    doc["v"] = 1
+    return doc
+
+
+def test_v3_seeding_family_boolean_off_becomes_off_row(tmp_path: Path):
+    path = tmp_path / "push_settings.json"
+    doc = _pre_v3_doc()
+    doc["live_activities"]["openings"] = False
+    path.write_text(json.dumps(doc))
+
+    settings = policy_settings.startup(path)
+    assert all(v == "off" for v in settings["outcomes"]["opening"].values())
+    assert all(v == "log" for v in settings["routing_table_v2"]["opening"].values())
+    # Untouched booleans seed the default rows.
+    assert settings["outcomes"]["package"] == policy_settings.DEFAULT_EXTRA_OUTCOMES["package"]
+    # Derived booleans reflect the seeded rows.
+    assert settings["live_activities"]["openings"] is False
+    assert settings["live_activities"]["package"] is True
+    policy_settings.reset_for_tests()
+
+
+def test_v3_seeding_alert_all_changes_bumps_glance_to_notify(tmp_path: Path):
+    path = tmp_path / "push_settings.json"
+    doc = _pre_v3_doc()
+    doc["live_activities"]["alert_all_changes"] = True
+    path.write_text(json.dumps(doc))
+
+    settings = policy_settings.startup(path)
+    for subject in policy_settings.SUBJECTS_V3_EXTRA:
+        assert "glance" not in settings["outcomes"][subject].values()
+    assert settings["outcomes"]["package"]["yard"] == "notify"
+    # The field itself is retired: derived False from here on.
+    assert settings["live_activities"]["alert_all_changes"] is False
+    policy_settings.reset_for_tests()
+
+
+def test_v3_seeding_is_idempotent_and_never_reseeds_user_edits(tmp_path: Path):
+    path = tmp_path / "push_settings.json"
+    path.write_text(json.dumps(_pre_v3_doc()))
+    policy_settings.startup(path)
+
+    # User tunes a seeded row; a later startup must not re-seed over it.
+    doc = json.loads(path.read_text())
+    assert doc["v"] == policy_settings.SETTINGS_VERSION
+    doc["outcomes"]["bin"]["street"] = "off"
+    path.write_text(json.dumps(doc))
+    settings = policy_settings.startup(path)
+    assert settings["outcomes"]["bin"]["street"] == "off"
+    policy_settings.reset_for_tests()
+
+
+def test_retired_family_booleans_are_derived_not_stored():
+    merged = policy_settings.normalize_settings(
+        policy_settings.default_settings()
+        | {"live_activities": {"package": False, "alert_all_changes": True}}
+    )
+    # Incoming retired fields are ignored; derivation from outcomes wins.
+    assert merged["live_activities"]["package"] is True
+    assert merged["live_activities"]["alert_all_changes"] is False
+
+
+def test_derived_person_restricted_follows_off_limits_cell():
+    doc = policy_settings.default_settings()
+    doc["outcomes"]["person"]["off_limits"] = "off"
+    merged = policy_settings.normalize_settings(doc)
+    assert merged["live_activities"]["person_restricted"] is False
+    assert merged["live_activities"]["person"] is True

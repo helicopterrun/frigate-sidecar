@@ -102,6 +102,7 @@ def test_put_persists_and_is_reflected_in_subsequent_get(client: TestClient, tmp
     new_settings = policy_settings.default_settings()
     new_settings["zone_classes"]["front_door"] = "doors"
     new_settings["routing_table"]["thing"]["yard"] = "urgent"
+    # Retired boolean: accepted on the wire, ignored, derived on read.
     new_settings["live_activities"]["package"] = False
 
     put_resp = client.put("/v1/push/settings", json=new_settings)
@@ -114,7 +115,7 @@ def test_put_persists_and_is_reflected_in_subsequent_get(client: TestClient, tmp
     stored = get_resp.json()["settings"]
     assert stored["zone_classes"] == {"front_door": "doors"}
     assert stored["routing_table"]["thing"]["yard"] == "urgent"
-    assert stored["live_activities"]["package"] is False
+    assert stored["live_activities"]["package"] is True
 
     on_disk = json.loads((tmp_path / "push_settings.json").read_text())
     assert on_disk["routing_table"]["thing"]["yard"] == "urgent"

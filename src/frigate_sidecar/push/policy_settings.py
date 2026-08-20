@@ -38,7 +38,9 @@ from frigate_sidecar.push.live_activities import FAMILIES
 
 #: Bumped only on a breaking shape change; the app pins against it the same
 #: way the card payload contract does (`delivery.CONTRACT_VERSION`).
-SETTINGS_VERSION = 1
+#: v2 (2026-08-20): package/bin/opening outcome rows exist; the LA family
+#: booleans and alert_all_changes are derived, never authoritative.
+SETTINGS_VERSION = 2
 
 SUBJECTS = ("stranger", "known", "animal", "thing")
 SUBJECTS_V2 = ("person", "vehicle", "animal", "thing")
@@ -630,6 +632,26 @@ def validate_settings(data: Any) -> list[str]:
     return errors
 
 
+def _derived_family_booleans(outcomes: dict[str, dict[str, str]]) -> dict[str, Any]:
+    """The retired `live_activities` family booleans, derived from the
+    outcome ladder for GET responses: an older app's toggles then display
+    what the ladder actually does (a fully-off row reads as family off),
+    and `alert_all_changes` is permanently False -- per-cell outcomes
+    replaced it (glance updates stay silent, notify+ pops)."""
+    def alive(subject: str) -> bool:
+        row = outcomes.get(subject, {})
+        return any(cell != "off" for cell in row.values()) if row else True
+
+    return {
+        "package": alive("package"),
+        "bins": alive("bin"),
+        "openings": alive("opening"),
+        "person": alive("person"),
+        "person_restricted": outcomes.get("person", {}).get("off_limits", "alarm") != "off",
+        "alert_all_changes": False,
+    }
+
+
 def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
     """Fill in anything missing or invalid from a persisted-but-partial
     document with defaults, so a settings file written before a schema
@@ -746,19 +768,19 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
 
     live_activities = data.get("live_activities")
     if isinstance(live_activities, dict):
-        for family in FAMILIES:
-            if isinstance(live_activities.get(family), bool):
-                merged["live_activities"][family] = live_activities[family]
+        # The family booleans and alert_all_changes are retired (one alerts
+        # stack, 2026-08-20): incoming values are accepted and ignored --
+        # the outcome ladder is the authority now, and the derivation below
+        # keeps an older app's UI honest about what the ladder says.
         picks = live_activities.get("opening_picks")
         if isinstance(picks, list):
             merged["live_activities"]["opening_picks"] = [str(p) for p in picks]
-        if isinstance(live_activities.get("alert_all_changes"), bool):
-            merged["live_activities"]["alert_all_changes"] = live_activities["alert_all_changes"]
         if isinstance(live_activities.get("la_only"), bool):
             merged["live_activities"]["la_only"] = live_activities["la_only"]
         delivery = live_activities.get("delivery")
         if delivery in ("la_first", "notifications"):
             merged["live_activities"]["delivery"] = delivery
+    merged["live_activities"] |= _derived_family_booleans(merged["outcomes"])
 
     escalation_sound = data.get("escalation_sound")
     if isinstance(escalation_sound, str) and escalation_sound:
@@ -1143,6 +1165,46 @@ def startup(path: str | Path) -> dict[str, Any]:
         settings["routing_table_v2"] = v2_table
         settings["recognition"] = recognition
         logging.getLogger(__name__).info(log_msg)
+        save_settings(path, settings)
+
+    # One-time v2 seeding (one alerts stack): a doc written before the V3
+    # subject rows existed carries the user's family booleans and
+    # alert_all_changes as the authority -- fold them into outcome rows
+    # once, then the booleans are derived forever after. Keyed on the raw
+    # doc's outcomes lacking the rows (not on "v") so a hand-edited file is
+    # never re-seeded over.
+    raw_outcomes_val = raw.get("outcomes")
+    raw_outcomes: dict[str, Any] = raw_outcomes_val if isinstance(raw_outcomes_val, dict) else {}
+    if raw and not any(subject in raw_outcomes for subject in SUBJECTS_V3_EXTRA):
+        stored_la = raw.get("live_activities")
+        stored_la = stored_la if isinstance(stored_la, dict) else {}
+        alert_all = stored_la.get("alert_all_changes") is True
+        for bool_key, subject in (
+            ("package", "package"), ("bins", "bin"), ("openings", "opening"),
+        ):
+            if stored_la.get(bool_key) is False:
+                row = {place: "off" for place in PLACES}
+            else:
+                row = dict(DEFAULT_EXTRA_OUTCOMES[subject])
+                if alert_all:
+                    # alert_all_changes' observable effect was popping
+                    # updates; per-cell that means notify, not glance.
+                    row = {
+                        place: "notify" if outcome == "glance" else outcome
+                        for place, outcome in row.items()
+                    }
+            settings["outcomes"][subject] = row
+            settings["routing_table_v2"][subject] = {
+                place: OUTCOME_TO_LEVEL[outcome] for place, outcome in row.items()
+            }
+        settings["live_activities"] |= _derived_family_booleans(settings["outcomes"])
+        settings["v"] = SETTINGS_VERSION
+        logging.getLogger(__name__).info(
+            "outcomes v3 seeding: package/bin/opening rows from booleans "
+            "(package=%s bins=%s openings=%s alert_all=%s)",
+            stored_la.get("package", True), stored_la.get("bins", True),
+            stored_la.get("openings", True), alert_all,
+        )
         save_settings(path, settings)
 
     # Seed camera_optics once from the deployed-fleet literals. Keyed on the

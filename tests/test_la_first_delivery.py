@@ -59,11 +59,13 @@ def test_normalize_person_restricted_default_true():
     assert result["live_activities"]["person_restricted"] is True
 
 
-def test_normalize_person_restricted_explicit_false():
+def test_normalize_person_restricted_boolean_is_derived_not_stored():
+    # Retired field (one alerts stack): an explicit False is ignored, the
+    # person/off_limits outcome cell is the authority.
     result = policy_settings.normalize_settings({
         "live_activities": {"person_restricted": False},
     })
-    assert result["live_activities"]["person_restricted"] is False
+    assert result["live_activities"]["person_restricted"] is True
 
 
 def test_settings_delivery_sticky(tmp_path):
