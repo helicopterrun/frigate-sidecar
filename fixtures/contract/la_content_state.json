@@ -4,8 +4,8 @@
   "glyph": "shippingbox.fill",
   "level": "urgent",
   "motion": {
-    "active": true,
-    "last_motion_ts": 1785952619.704
+    "heading": "approaching",
+    "speed_label": "walking"
   },
   "mutation": "escalate",
   "path": {
@@ -38,7 +38,10 @@
   "thumbnail_handle": "h_9f3a1c2d3e4f5061",
   "thumbnail_revision": 2,
   "zones": {
-    "current": "front_door",
-    "entered_ts": 1785952580.704
+    "current_index": 1,
+    "ladder": [
+      "Yard",
+      "Front door"
+    ]
   }
 }

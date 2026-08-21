@@ -133,8 +133,11 @@ def _content_state_full() -> dict[str, Any]:
         thumbnail_handle=HANDLE,
         thumbnail_revision=2,
         state_since_ts=SENT_AT - 42.0,
-        motion={"active": True, "last_motion_ts": SENT_AT - 3.0},
-        zones={"current": "front_door", "entered_ts": SENT_AT - 42.0},
+        # Shapes as _build_motion / the zones-ladder builder in
+        # delivery_wire.py actually emit them — the app's ContentState
+        # requires motion.heading and zones.ladder/current_index.
+        motion={"heading": "approaching", "speed_label": "walking"},
+        zones={"ladder": ["Yard", "Front door"], "current_index": 1},
         path={"points": live_activities.downsample_path(
             [[0.1, 0.9], [0.2, 0.8], [0.35, 0.62], [0.5, 0.5], [0.62, 0.41]]
         )},
