@@ -1,0 +1,42 @@
+{
+  "decisions": [
+    {
+      "camera": "street",
+      "event_id": "1755550002.654321-def456",
+      "family": "activity",
+      "id": "dec-00000002",
+      "la_reason": "level=log",
+      "la_started": false,
+      "label": "car",
+      "level": "log",
+      "place": "street",
+      "reasons": [
+        "outcomes[vehicle][street]=log"
+      ],
+      "subject": "vehicle",
+      "ts": "2026-08-19T20:37:41Z",
+      "zones": [
+        "nw_49th_st"
+      ]
+    },
+    {
+      "camera": "doorbell",
+      "event_id": "1755550001.123456-abc123",
+      "family": "package",
+      "id": "dec-00000001",
+      "la_reason": "family=package",
+      "la_started": true,
+      "label": "package",
+      "level": "notify",
+      "place": "doors",
+      "reasons": [
+        "outcomes[package][doors]=notify"
+      ],
+      "subject": "package",
+      "ts": "2026-08-19T20:37:02Z",
+      "zones": [
+        "front_door"
+      ]
+    }
+  ]
+}

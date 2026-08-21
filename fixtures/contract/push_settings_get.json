@@ -1,0 +1,228 @@
+{
+  "available_cameras": [
+    "backyard",
+    "doorbell",
+    "street"
+  ],
+  "available_openings": [
+    "doorbell",
+    "front_door",
+    "garage"
+  ],
+  "available_zones": [
+    {
+      "cameras": [
+        "doorbell"
+      ],
+      "friendly_name": null,
+      "guessed_class": "doors",
+      "zone": "front_door"
+    },
+    {
+      "cameras": [
+        "backyard"
+      ],
+      "friendly_name": null,
+      "guessed_class": "private",
+      "zone": "garage"
+    },
+    {
+      "cameras": [
+        "street"
+      ],
+      "friendly_name": null,
+      "guessed_class": "street",
+      "zone": "nw_49th_st"
+    },
+    {
+      "cameras": [
+        "street"
+      ],
+      "friendly_name": null,
+      "guessed_class": "street",
+      "zone": "sidewalk"
+    }
+  ],
+  "derived_headings": {},
+  "placement_deployments": {},
+  "recognition_available": {
+    "faces": false,
+    "plates": false
+  },
+  "rev": 1,
+  "settings": {
+    "camera_headings": {},
+    "camera_layout": {},
+    "camera_neighbors": {
+      "doorbell": [
+        "street"
+      ]
+    },
+    "camera_optics": {},
+    "escalation_sound": "urgent",
+    "floorplan": null,
+    "geometric_dedup": false,
+    "live_activities": {
+      "alert_all_changes": false,
+      "bins": true,
+      "delivery": "la_first",
+      "la_only": false,
+      "opening_picks": [],
+      "openings": true,
+      "package": true,
+      "person": true,
+      "person_restricted": true
+    },
+    "map_scale_ft": null,
+    "mute_sounds": true,
+    "outcomes": {
+      "animal": {
+        "doors": "glance",
+        "off_limits": "glance",
+        "private": "glance",
+        "street": "log",
+        "yard": "glance"
+      },
+      "bin": {
+        "doors": "glance",
+        "off_limits": "notify",
+        "private": "log",
+        "street": "glance",
+        "yard": "glance"
+      },
+      "opening": {
+        "doors": "glance",
+        "off_limits": "notify",
+        "private": "glance",
+        "street": "log",
+        "yard": "off"
+      },
+      "package": {
+        "doors": "notify",
+        "off_limits": "notify",
+        "private": "glance",
+        "street": "log",
+        "yard": "glance"
+      },
+      "person": {
+        "doors": "notify",
+        "off_limits": "alarm",
+        "private": "notify",
+        "street": "log",
+        "yard": "glance"
+      },
+      "thing": {
+        "doors": "log",
+        "off_limits": "glance",
+        "private": "log",
+        "street": "log",
+        "yard": "alarm"
+      },
+      "vehicle": {
+        "doors": "glance",
+        "off_limits": "notify",
+        "private": "glance",
+        "street": "log",
+        "yard": "glance"
+      }
+    },
+    "quiet_hours": null,
+    "recognition": {
+      "known_person": "relax_one",
+      "known_vehicle": "relax_one"
+    },
+    "routing_table": {
+      "animal": {
+        "doors": "quiet",
+        "off_limits": "quiet",
+        "private": "quiet",
+        "street": "log",
+        "yard": "quiet"
+      },
+      "known": {
+        "doors": "quiet",
+        "off_limits": "quiet",
+        "private": "quiet",
+        "street": "log",
+        "yard": "log"
+      },
+      "stranger": {
+        "doors": "notify",
+        "off_limits": "urgent",
+        "private": "notify",
+        "street": "log",
+        "yard": "quiet"
+      },
+      "thing": {
+        "doors": "log",
+        "off_limits": "quiet",
+        "private": "log",
+        "street": "log",
+        "yard": "log"
+      }
+    },
+    "routing_table_v2": {
+      "animal": {
+        "doors": "quiet",
+        "off_limits": "quiet",
+        "private": "quiet",
+        "street": "log",
+        "yard": "quiet"
+      },
+      "bin": {
+        "doors": "quiet",
+        "off_limits": "notify",
+        "private": "log",
+        "street": "quiet",
+        "yard": "quiet"
+      },
+      "opening": {
+        "doors": "quiet",
+        "off_limits": "notify",
+        "private": "quiet",
+        "street": "log",
+        "yard": "log"
+      },
+      "package": {
+        "doors": "notify",
+        "off_limits": "notify",
+        "private": "quiet",
+        "street": "log",
+        "yard": "quiet"
+      },
+      "person": {
+        "doors": "notify",
+        "off_limits": "urgent",
+        "private": "notify",
+        "street": "log",
+        "yard": "quiet"
+      },
+      "thing": {
+        "doors": "log",
+        "off_limits": "quiet",
+        "private": "log",
+        "street": "log",
+        "yard": "urgent"
+      },
+      "vehicle": {
+        "doors": "quiet",
+        "off_limits": "notify",
+        "private": "quiet",
+        "street": "log",
+        "yard": "quiet"
+      }
+    },
+    "secure_area": null,
+    "v": 2,
+    "zone_classes": {
+      "front_door": "doors",
+      "garage": "off_limits"
+    },
+    "zone_names": {},
+    "zone_overrides": {
+      "sidewalk": {
+        "person": "notify"
+      }
+    }
+  }
+}

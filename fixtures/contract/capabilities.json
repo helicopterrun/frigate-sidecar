@@ -1,0 +1,36 @@
+{
+  "decisions": {
+    "enabled": true
+  },
+  "proxy": {
+    "enabled": true
+  },
+  "push": {
+    "attention_subjects": [
+      "person",
+      "vehicle",
+      "animal",
+      "thing",
+      "package",
+      "bin",
+      "opening"
+    ],
+    "enabled": false,
+    "transport": "mock"
+  },
+  "scrub_cache": {
+    "cameras": [],
+    "enabled": false,
+    "format": "jpeg",
+    "generated": false,
+    "intervals": [
+      1.0,
+      5.0,
+      60.0,
+      300.0,
+      900.0,
+      3600.0
+    ]
+  },
+  "version": "0.3.0"
+}

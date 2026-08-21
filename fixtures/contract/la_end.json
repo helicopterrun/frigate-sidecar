@@ -1,0 +1,21 @@
+{
+  "Simulator Target Bundle": "com.houseofpaimon.Elsinore",
+  "aps": {
+    "content-state": {
+      "deep_link_card_key": "doorbell:package:t_1755550001-abc123",
+      "elapsed_seconds": 95,
+      "glyph": "checkmark.circle.fill",
+      "level": "urgent",
+      "mutation": "resolve",
+      "primary": "Package delivered",
+      "secondary": "Box picked up from the porch",
+      "state_since_ts": 1785952527.704,
+      "thumbnail_handle": "h_9f3a1c2d3e4f5061",
+      "thumbnail_revision": 3
+    },
+    "dismissal-date": 1785952652,
+    "event": "end",
+    "relevance-score": 1.0,
+    "timestamp": 1785952622
+  }
+}
