@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 def compute_backoff(attempt: int, base: float, cap: float) -> float:
     """Exponential backoff, capped. `attempt` is 0-indexed (first retry ->
     `attempt=0`)."""
-    return min(cap, base * (2**attempt))
+    return min(cap, base * (2.0**attempt))
 
 
 async def backfill_since(
@@ -256,7 +256,7 @@ class MqttReviewSubscriber:
 
         client = mqtt_client.Client(
             client_id=self.settings.mqtt_client_id,
-            callback_api_version=mqtt_client.CallbackAPIVersion.VERSION2,
+            callback_api_version=mqtt_client.CallbackAPIVersion.VERSION2,  # type: ignore[attr-defined]  # paho re-exports it without __all__
         )
         if self.settings.mqtt_username:
             client.username_pw_set(self.settings.mqtt_username, self.settings.mqtt_password)

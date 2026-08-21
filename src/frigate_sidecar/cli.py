@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import typer
 
@@ -100,7 +101,7 @@ def init(
         typer.echo(f"{out_path} already exists; use --force to overwrite.", err=True)
         raise typer.Exit(code=1)
 
-    cfg: dict = {
+    cfg: dict[str, Any] = {
         "frigate": {
             "base_url": ask(
                 "Frigate API URL (unauthenticated origin)", frigate_url, frigate_defaults.base_url

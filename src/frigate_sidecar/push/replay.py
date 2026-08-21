@@ -67,7 +67,7 @@ def load_scenario(path: Path) -> dict[str, Any]:
         topic = step.get("topic", "frigate/reviews")
         if topic not in ("frigate/reviews", "frigate/events"):
             raise ValueError(f"{path}: steps[{i}].topic must be frigate/reviews or frigate/events")
-    return data
+    return cast("dict[str, Any]", data)
 
 
 def build_messages(
@@ -341,7 +341,7 @@ class MqttPublisher:
         import paho.mqtt.client as mqtt_client
         self._client = mqtt_client.Client(
             client_id=client_id,
-            callback_api_version=mqtt_client.CallbackAPIVersion.VERSION2,
+            callback_api_version=mqtt_client.CallbackAPIVersion.VERSION2,  # type: ignore[attr-defined]  # paho re-exports it without __all__
         )
         if username:
             self._client.username_pw_set(username, password)
@@ -385,7 +385,7 @@ class ReplayRun:
 
 
 _current_run: ReplayRun | None = None
-_run_task: asyncio.Task | None = None
+_run_task: asyncio.Task[None] | None = None
 _run_lock = asyncio.Lock()
 
 

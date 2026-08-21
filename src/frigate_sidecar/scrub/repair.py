@@ -107,7 +107,8 @@ def _true_count_from_pixels(cache_dir: Path, row: dict[str, Any]) -> int | None:
     path = cache_dir / row["path"]
     if not path.exists():
         return None
-    cols, declared = row["cols"], row["count"]
+    cols: int = row["cols"]
+    declared: int = row["count"]
     try:
         with Image.open(path) as im:
             # Only worth drafting when an eighth-scale cell is still big enough

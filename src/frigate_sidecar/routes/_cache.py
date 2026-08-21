@@ -15,17 +15,20 @@ from collections.abc import Callable
 from typing import Any
 
 from fastapi import Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 _MAX_ENTRIES = 64
 
 
-def ttl_page_cache(seconds: float = 60.0) -> Callable:
-    def decorator(fn: Callable) -> Callable:
+_PageHandler = Callable[..., Response]
+
+
+def ttl_page_cache(seconds: float = 60.0) -> Callable[[_PageHandler], _PageHandler]:
+    def decorator(fn: _PageHandler) -> _PageHandler:
         cache: OrderedDict[str, tuple[float, bytes]] = OrderedDict()
 
         @functools.wraps(fn)
-        def wrapper(*args: Any, request: Request, **kwargs: Any) -> Any:
+        def wrapper(*args: Any, request: Request, **kwargs: Any) -> Response:
             key = str(request.url)
             now = time.monotonic()
             hit = cache.get(key)
@@ -36,7 +39,7 @@ def ttl_page_cache(seconds: float = 60.0) -> Callable:
             # TemplateResponse renders its body at construction; only cache
             # successes so an error page doesn't stick for the TTL.
             if getattr(response, "status_code", None) == 200:
-                cache[key] = (now, response.body)
+                cache[key] = (now, bytes(response.body))
                 cache.move_to_end(key)
                 while len(cache) > _MAX_ENTRIES:
                     cache.popitem(last=False)

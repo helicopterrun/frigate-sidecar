@@ -17,6 +17,7 @@ and the repo carries no numpy/scipy in core deps by design.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from typing import Any
 
 from frigate_sidecar.analysis import optics
@@ -40,7 +41,7 @@ _OFFRANGE_MISS_FT = 30.0
 _GOLDEN = (math.sqrt(5) - 1) / 2
 
 
-def facts_for(settings: dict, camera: str) -> dict[str, float] | None:
+def facts_for(settings: dict[str, Any], camera: str) -> dict[str, float] | None:
     """`ground.camera_ground` equivalent reading a passed-in doc."""
     entry = (settings.get("camera_optics") or {}).get(camera)
     if not entry:
@@ -57,7 +58,7 @@ def facts_for(settings: dict, camera: str) -> dict[str, float] | None:
     }
 
 
-def _tunable_cameras(settings: dict) -> dict[str, dict[str, float]]:
+def _tunable_cameras(settings: dict[str, Any]) -> dict[str, dict[str, float]]:
     """Cameras with optics facts AND an aimed layout entry: camera -> facts."""
     layout = settings.get("camera_layout") or {}
     out: dict[str, dict[str, float]] = {}
@@ -71,7 +72,7 @@ def _tunable_cameras(settings: dict) -> dict[str, dict[str, float]]:
 
 
 def world_ft(
-    pt: tuple[float, float], camera: str, params: Params, settings: dict,
+    pt: tuple[float, float], camera: str, params: Params, settings: dict[str, Any],
     facts: dict[str, float] | None = None,
 ) -> tuple[float, float] | None:
     """Image point → map position in FEET under (azimuth, tilt) overrides.
@@ -103,7 +104,7 @@ def world_ft(
     )
 
 
-def _interp_at(points: list, t: float, max_dt_s: float) -> tuple[float, float] | None:
+def _interp_at(points: list[list[float]], t: float, max_dt_s: float) -> tuple[float, float] | None:
     """Track position at time t: linear interpolation between bracketing
     points (bracket span ≤ _MAX_BRACKET_S), else nearest point within
     max_dt_s. Points are [x, y, t] sorted by t."""
@@ -124,7 +125,7 @@ def _interp_at(points: list, t: float, max_dt_s: float) -> tuple[float, float] |
 
 def mine_pairs(
     tracks: list[dict[str, Any]],
-    settings: dict,
+    settings: dict[str, Any],
     *,
     max_dt_s: float = 0.4,
     max_forward_ft: float = 100.0,
@@ -162,7 +163,8 @@ def mine_pairs(
             src_cam = ta["camera"] if src is pa else tb["camera"]
             oth_cam = other["camera"]
             candidates: list[Pair] = []
-            last_kept: tuple | None = None  # (src_world, oth_world)
+            # (src_world, oth_world)
+            last_kept: tuple[tuple[float, float], tuple[float, float]] | None = None
             for p in src:
                 if p[2] <= 0:
                     continue
@@ -223,7 +225,7 @@ def mine_pairs(
 def solve_landmarks(
     camera: str,
     matches: list[dict[str, float]],
-    settings: dict,
+    settings: dict[str, Any],
     *,
     az_bound_deg: float = 60.0,
     tilt_bound_deg: float = 25.0,
@@ -340,7 +342,7 @@ def _huber(d: float, delta: float) -> float:
 
 
 def objective(
-    params: Params, pairs: list[Pair], settings: dict, *,
+    params: Params, pairs: list[Pair], settings: dict[str, Any], *,
     base: Params, reg_weight: float = 0.02, huber_delta_ft: float = 15.0,
 ) -> float:
     """Mean Huber loss over pair disagreement (ft) + gauge regularizer.
@@ -370,7 +372,7 @@ def objective(
     return loss
 
 
-def _rms_ft(params: Params, pairs: list[Pair], settings: dict) -> float:
+def _rms_ft(params: Params, pairs: list[Pair], settings: dict[str, Any]) -> float:
     """Raw (unhuberized) RMS pair disagreement in feet; off-range counts
     as the fixed miss."""
     if not pairs:
@@ -387,7 +389,7 @@ def _rms_ft(params: Params, pairs: list[Pair], settings: dict) -> float:
     return math.sqrt(total / len(pairs))
 
 
-def _golden_min(f, lo: float, hi: float, iters: int = 20) -> float:
+def _golden_min(f: Callable[..., float], lo: float, hi: float, iters: int = 20) -> float:
     """Golden-section minimum of f on [lo, hi]."""
     a, b = lo, hi
     c = b - (b - a) * _GOLDEN
@@ -406,7 +408,7 @@ def _golden_min(f, lo: float, hi: float, iters: int = 20) -> float:
 
 
 def fit(
-    pairs: list[Pair], settings: dict, *,
+    pairs: list[Pair], settings: dict[str, Any], *,
     az_bound_deg: float = 15.0, tilt_bound_deg: float = 8.0,
     max_rounds: int = 30, eps: float = 1e-3,
 ) -> dict[str, Any]:
@@ -440,7 +442,7 @@ def fit(
             az0, tilt0 = base[cam]
             az, tilt = params[cam]
 
-            def try_az(v: float, _cam=cam, _tilt=tilt) -> float:
+            def try_az(v: float, _cam: str = cam, _tilt: float = tilt) -> float:
                 trial = dict(params)
                 trial[_cam] = (v, _tilt)
                 return score(trial)
@@ -449,7 +451,7 @@ def fit(
             hi = min(az0 + az_bound_deg, az + az_half)
             az = _golden_min(try_az, lo, hi)
 
-            def try_tilt(v: float, _cam=cam, _az=az) -> float:
+            def try_tilt(v: float, _cam: str = cam, _az: float = az) -> float:
                 trial = dict(params)
                 trial[_cam] = (_az, v)
                 return score(trial)

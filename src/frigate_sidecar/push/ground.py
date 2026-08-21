@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from typing import Any
 
 from frigate_sidecar.analysis import optics
 from frigate_sidecar.push import policy_settings
@@ -88,7 +89,8 @@ def project(
 
 
 def speed_ft_s(
-    path_data: list[tuple[float, float, float]] | tuple, camera: str,
+    path_data: list[tuple[float, float, float]] | tuple[tuple[float, float, float], ...],
+    camera: str,
 ) -> float | None:
     """Median ground speed over the trail's recent usable segments. None
     when the camera lacks projection facts, points lack timestamps, or no
@@ -164,7 +166,7 @@ def world_position(
 
 
 def distance_to_secure_ft(
-    x: float, y: float, secure_area: dict | None,
+    x: float, y: float, secure_area: dict[str, float] | None,
     *, scale_ft: float | None, aspect_h_over_w: float = 1.0,
 ) -> float | None:
     """Distance in feet from a map point to the secure-area rectangle.
@@ -187,7 +189,7 @@ def distance_to_secure_ft(
     return math.hypot(dx * scale_ft, dy * scale_ft * aspect_h_over_w)
 
 
-def map_aspect(settings: dict) -> float:
+def map_aspect(settings: dict[str, Any]) -> float:
     """The layout map's height/width ratio: the uploaded floorplan's pixel
     aspect when one is set, else 1.0 (the square default map)."""
     fp = settings.get("floorplan")

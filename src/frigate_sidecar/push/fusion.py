@@ -21,8 +21,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from frigate_sidecar.push import ground
+
+if TYPE_CHECKING:
+    from frigate_sidecar.push.situations import TrackStore
 
 #: Densify polygon edges so no segment spans more than this in image space.
 _MAX_EDGE_STEP = 0.05
@@ -131,7 +135,8 @@ class Cluster:
 
 
 def track_world_positions(
-    tracks, settings: dict, *, now: float, window_s: float = LIVE_WINDOW_S,
+    tracks: TrackStore, settings: dict[str, Any], *,
+    now: float, window_s: float = LIVE_WINDOW_S,
 ) -> list[TrackPos]:
     """Project every live track's newest path point onto the map.
 

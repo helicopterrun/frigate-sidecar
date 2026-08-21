@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from typing import cast
 
 from frigate_sidecar.push.cards import Card
 
@@ -273,9 +274,9 @@ def find_dedup_candidate(
         if row["zone_name"]:
             candidate_zones.add(row["zone_name"])
         if event_zones & candidate_zones:
-            return row["card_key"]
+            return cast(str, row["card_key"])
         if row["camera"] and row["camera"] in neighbor_cameras:
-            return row["card_key"]
+            return cast(str, row["card_key"])
     return None
 
 
@@ -297,7 +298,7 @@ def find_open_card_for_track(
     for row in rows:
         parts = row["card_key"].split(":", 2)
         if len(parts) == 3 and parts[0] == camera and parts[2] == track_id:
-            return row["card_key"]
+            return cast(str, row["card_key"])
     return None
 
 

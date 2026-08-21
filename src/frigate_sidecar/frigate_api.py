@@ -7,7 +7,7 @@ one place to set timeouts / headers / base URL.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -104,13 +104,13 @@ class FrigateClient:
         return r.json()
 
     def stats(self) -> dict[str, Any]:
-        return self._get_json("/api/stats")
+        return cast("dict[str, Any]", self._get_json("/api/stats"))
 
     def config(self) -> dict[str, Any]:
-        return self._get_json("/api/config")
+        return cast("dict[str, Any]", self._get_json("/api/config"))
 
     def recordings_summary(self, camera: str) -> list[dict[str, Any]]:
-        return self._get_json(f"/api/{camera}/recordings/summary")
+        return cast("list[dict[str, Any]]", self._get_json(f"/api/{camera}/recordings/summary"))
 
     def get_faces(self) -> dict[str, list[str]]:
         """Return Frigate's registered faces: {name: [filenames], 'train': [...]}.

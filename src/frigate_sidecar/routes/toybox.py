@@ -9,7 +9,7 @@ sidecar DB (`toybox_scores`). The game itself is fully client-side
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -28,7 +28,7 @@ _NAME_MAX = 8  # arcade initials are short; keep the board tidy
 
 
 def _settings(request: Request) -> Settings:
-    return request.app.state.settings
+    return cast(Settings, request.app.state.settings)
 
 
 def _top_scores(settings: Settings, game: str, limit: int = _TOP_N) -> list[dict[str, Any]]:

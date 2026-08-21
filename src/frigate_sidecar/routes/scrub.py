@@ -18,7 +18,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
@@ -78,7 +78,7 @@ def _known_cameras(app_state: Any, conn: Any) -> set[str]:
     cached = getattr(app_state, "scrub_known_cameras_cache", None)
     now = time.time()
     if cached is not None and now - cached[0] < _CAMERA_CACHE_TTL_S:
-        return cached[1]
+        return cast("set[str]", cached[1])
     rows = conn.execute("SELECT DISTINCT camera FROM recordings").fetchall()
     cameras = {row["camera"] for row in rows}
     app_state.scrub_known_cameras_cache = (now, cameras)
@@ -486,7 +486,7 @@ def _cluster_highlights(
 
     def _extent(item: dict[str, Any]) -> float:
         """Where an item finishes, treating in-progress as still at its start."""
-        return item["start"] if item["end"] is None else item["end"]
+        return cast(float, item["start"] if item["end"] is None else item["end"])
 
     clusters: list[dict[str, Any]] = []
     for item in highlights:

@@ -76,7 +76,7 @@ LEVEL_APNS: dict[str, dict[str, Any]] = {
 
 
 def should_push(level: str) -> bool:
-    return LEVEL_APNS.get(level, {}).get("push", False)
+    return bool(LEVEL_APNS.get(level, {}).get("push", False))
 
 
 def sound_name_for_card(
@@ -294,7 +294,7 @@ _SOUND_RATE_KEY = "_card_sound"
 # history row landing during that window reads as a duplicate of the frozen
 # LA (user feedback 2026-08-14, second round) -- hold it until the LA is gone.
 RESOLVE_DEFER_S = 33.0
-_DEFERRED_TASKS: set[asyncio.Task] = set()
+_DEFERRED_TASKS: set[asyncio.Task[None]] = set()
 
 
 def _schedule_deferred_resolve(

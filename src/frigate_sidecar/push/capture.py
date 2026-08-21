@@ -25,6 +25,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +74,11 @@ def read_window(
     start_ts: float | None = None,
     end_ts: float | None = None,
     camera: str | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Load capture lines across files (oldest rotation first), filtered to a
     time window and optionally one camera. Malformed lines are skipped —
     a torn final line from a crash must not poison the whole capture."""
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     for path in paths:
         if not path.exists():
             continue
@@ -101,7 +102,7 @@ def read_window(
     return rows
 
 
-def _camera_of(row: dict) -> str | None:
+def _camera_of(row: dict[str, Any]) -> str | None:
     payload = row.get("payload") or {}
     # reviews: {"after": {"camera": ...}}; events: {"after": {"camera": ...}}
     after = payload.get("after") or payload.get("before") or {}

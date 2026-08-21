@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from frigate_sidecar.config import Settings
 from frigate_sidecar.push import replay
 
 router = APIRouter(tags=["replay"])
@@ -37,9 +39,7 @@ def replay_scenarios() -> JSONResponse:
     return JSONResponse({"scenarios": replay.list_scenarios()})
 
 
-def _capture_paths(settings) -> list:
-    from pathlib import Path
-
+def _capture_paths(settings: Settings) -> list[Path]:
     capture_path = settings.push.capture_path or str(
         Path(settings.push.push_settings_path).parent / "mqtt-capture.jsonl"
     )
@@ -47,9 +47,9 @@ def _capture_paths(settings) -> list:
 
 
 def _capture_tracks(
-    paths: list, start_ts: float, camera: str | None = None,
+    paths: list[Path], start_ts: float, camera: str | None = None,
     max_points: int = 400, max_tracks: int = 500,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Capture rows -> track list shaped for map trails / calibration:
     per (camera, track_id) -> label + (x, y, t) path points, newest tracks
     first, capped so a busy ring can't flood the consumer."""
@@ -57,7 +57,7 @@ def _capture_tracks(
 
     rows = capture.read_window(paths, start_ts=start_ts, camera=camera)
 
-    tracks: dict[tuple[str, str], dict] = {}
+    tracks: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
         if not str(row.get("topic", "")).endswith("events"):
             continue

@@ -13,7 +13,7 @@ import secrets
 import sqlite3
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from frigate_sidecar.push.models import Device
 
@@ -473,17 +473,23 @@ def find_activity(
     conn: sqlite3.Connection, *, apns_token: str, situation_id: str, track_id: str
 ) -> sqlite3.Row | None:
     """The live activity for this (device, situation, track), if any."""
-    return conn.execute(
-        "SELECT * FROM push_activities WHERE apns_token = ? AND situation_id = ? "
-        "AND track_id = ? AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1",
-        (apns_token, situation_id, track_id),
-    ).fetchone()
+    return cast(
+        "sqlite3.Row | None",
+        conn.execute(
+            "SELECT * FROM push_activities WHERE apns_token = ? AND situation_id = ? "
+            "AND track_id = ? AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1",
+            (apns_token, situation_id, track_id),
+        ).fetchone(),
+    )
 
 
 def get_activity(conn: sqlite3.Connection, activity_id: str) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT * FROM push_activities WHERE activity_id = ?", (activity_id,)
-    ).fetchone()
+    return cast(
+        "sqlite3.Row | None",
+        conn.execute(
+            "SELECT * FROM push_activities WHERE activity_id = ?", (activity_id,)
+        ).fetchone(),
+    )
 
 
 def touch_activity(

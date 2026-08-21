@@ -158,7 +158,7 @@ async def map_track(
     ):
         raise HTTPException(status_code=404, detail="not_projectable")
 
-    path_data: list | None = None
+    path_data: list[Any] | None = None
     engine = getattr(request.app.state, "push_engine", None)
     if engine is not None:
         state = engine.tracks.get(camera, event_id)

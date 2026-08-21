@@ -26,7 +26,7 @@ from frigate_sidecar.push import delivery, delivery_wire
 from frigate_sidecar.push import store as push_store
 from frigate_sidecar.push.engine import PushEngine
 from frigate_sidecar.push.mqtt import MqttReviewSubscriber, compute_backoff
-from frigate_sidecar.push.transport import LogTransport, RelayTransport
+from frigate_sidecar.push.transport import LogTransport, PushTransport, RelayTransport
 from frigate_sidecar.routes import analysis as analysis_routes
 from frigate_sidecar.routes import debug as debug_routes
 from frigate_sidecar.routes import devices as devices_routes
@@ -176,7 +176,7 @@ def _check_scrub_inputs(settings: Settings) -> None:
             )
 
 
-def _build_push_transport(settings: Settings):  # noqa: ANN201 - Protocol return
+def _build_push_transport(settings: Settings) -> PushTransport:
     """Mock/log transport by default -- the only one usable without real APNs
     credentials (spec §4). "relay" posts to `push.relay_base_url`."""
     if settings.push.transport == "relay":
@@ -374,9 +374,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         running_engine = getattr(app.state, "push_engine", None)
         if running_engine is not None:
             await running_engine.aclose()
-        transport = getattr(app.state, "push_transport", None)
-        if isinstance(transport, RelayTransport):
-            await transport.aclose()
+        running_transport = getattr(app.state, "push_transport", None)
+        if isinstance(running_transport, RelayTransport):
+            await running_transport.aclose()
         client = getattr(app.state, "http_client", None)
         if client is not None:
             await client.aclose()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -28,11 +28,11 @@ _MEDIA_TYPES = {
 
 
 def _settings(request: Request) -> Settings:
-    return request.app.state.settings
+    return cast(Settings, request.app.state.settings)
 
 
 def _templates(request: Request) -> Jinja2Templates:
-    return request.app.state.templates
+    return cast(Jinja2Templates, request.app.state.templates)
 
 
 def _libraries(settings: Settings) -> list[str]:

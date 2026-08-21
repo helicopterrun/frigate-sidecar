@@ -6,7 +6,7 @@ and returns the same structured payload as JSON.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -27,7 +27,7 @@ router = APIRouter(prefix="/analysis", tags=["analysis"])
 
 
 def _settings(request: Request) -> Settings:
-    return request.app.state.settings
+    return cast(Settings, request.app.state.settings)
 
 
 @router.get("/score-histogram")

@@ -999,10 +999,10 @@ async def handle_delivery_event(
         # loop needs per-track map positions for distance-to-secure.
         _scale = policy.get("map_scale_ft")
         _aspect = ground.map_aspect(policy)
-        _positions: list = []
-        _clusters: list = []
+        from frigate_sidecar.push import fusion
+        _positions: list[fusion.TrackPos] = []
+        _clusters: list[fusion.Cluster] = []
         if _scale and _scale > 0:
-            from frigate_sidecar.push import fusion
             _positions = fusion.track_world_positions(
                 engine.tracks, policy, now=time.time(),
             )
@@ -1382,7 +1382,7 @@ async def handle_delivery_event(
     return mutated
 
 
-def resound_payload_for(card, context: dict[str, str]) -> dict:
+def resound_payload_for(card: Card, context: dict[str, str]) -> dict[str, Any]:
     """`delivery.sweep_urgent_resound`'s `payload_for_resound` callback:
     rebuilds the same copy the card's context implies, sound forced on.
     Same shape as a live `escalate`, since a re-sound is exactly that from
