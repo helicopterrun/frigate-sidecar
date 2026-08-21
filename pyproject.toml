@@ -50,6 +50,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.7",
     "mypy>=1.13",
+    "pytest-cov>=6",
     "types-PyYAML",
     # test_proxy_ws.py skips silently without this
     "websockets>=13",
@@ -101,3 +102,11 @@ module = "numpy.*"
 follow_imports = "skip"
 follow_imports_for_stubs = true
 ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["frigate_sidecar"]
+
+[tool.coverage.report]
+# Floor = measured total (78% on 2026-08-20) minus slack. Raise it as
+# coverage grows; never lower it to admit a regression.
+fail_under = 76
