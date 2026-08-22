@@ -65,6 +65,52 @@ watchdog:
   cooldown_s: 180.0              # ignore failures this long after a restart (boot)
   max_restarts_per_hour: 3       # safety cap; logs loudly instead of looping
 
+# Face-training-crop curation (B1). Scores Frigate's OWN auto-saved face crops
+# out of clips/faces/train and promotes the good ones into the named Face
+# Library via Frigate's API. Requires the optional [faces] extra (cv2/numpy).
+# NOTE: `enabled` here is currently inert -- nothing reads it; the feature is
+# gated by whether frigate-sidecar-faces.timer is installed.
+face:
+  enabled: false
+  auto_promote: false          # start observe-only; flip on after reading the histogram
+  quality_threshold: 0.0       # min combined quality_score to auto-promote
+  min_recog_score: 0.9
+  per_person_cap: 40
+
+# High-res cross-camera face capture (B2). When a person event fires on a
+# TRIGGER camera, grab the CAPTURE camera's full main-stream frame out of
+# Frigate's recordings at that moment, for human review at /faces/captures.
+#
+# One HTTP GET does it: /api/{camera}/recordings/{ts}/snapshot.jpg returns the
+# full main-stream frame -- no ffmpeg, no seek, no recordings-table lookup.
+#
+# Runs as a systemd oneshot (contrib/frigate-sidecar-face-capture.{service,timer}),
+# NOT in-process: that endpoint 404s until the segment covering the timestamp is
+# committed, and segments commit at their END, so the work is inherently
+# deferred by tens of seconds and an MQTT "grab it now" hook would 404 always.
+face_capture:
+  enabled: false
+  trigger_cameras: []          # [] = feature does nothing, even when enabled
+  capture_camera: ""           # the single supporting identification camera
+  trigger_labels: ["person"]
+  offsets_s: [-4.0, 0.0, 4.0]  # capture cam's own event starts a median 2.2s EARLY
+  capture_delay_s: 45.0        # ~4x the measured 5.4-9.4s recording publish lag
+  lookback_s: 3600.0
+  dedup_window_s: 60.0         # one visit fires on 3-4 cameras within seconds
+  max_visit_s: 300.0           # cap a gap-chained loiter
+  max_captures_per_run: 60
+  max_attempts: 3
+  apply_annotation_offset: true
+  crop_to_bbox: true           # preview only, and only from the CAPTURE cam's own box
+  head_fraction: 0.4
+  crop_pad: 0.25
+  thumb_max_edge: 480
+  # MUST be writable by the unit: ProtectSystem=strict with
+  # ReadWritePaths=/opt/frigate-sidecar means anything outside fails EROFS at
+  # WRITE time, not config load -- a silent no-op.
+  output_dir: /opt/frigate-sidecar/data/face-captures
+  retention_days: 30
+
 # Uniform-cadence sprite-sheet scrub cache (docs/scrub-cache-and-proxy-spec.md).
 # Off by default; opt-in per deployment. enabled=true starts the continuous
 # ~60s in-process generator (server.py lifespan, §5.4a) in addition to

@@ -30,6 +30,7 @@ from frigate_sidecar.push.transport import LogTransport, PushTransport, RelayTra
 from frigate_sidecar.routes import analysis as analysis_routes
 from frigate_sidecar.routes import debug as debug_routes
 from frigate_sidecar.routes import devices as devices_routes
+from frigate_sidecar.routes import face_captures as face_capture_routes
 from frigate_sidecar.routes import faces as faces_routes
 from frigate_sidecar.routes import fps_budget as fps_budget_routes
 from frigate_sidecar.routes import health as health_routes
@@ -292,6 +293,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     probe_task = asyncio.create_task(_probe_plus())
 
+    if settings.face_capture.enabled:
+        # Logged from the server too, not just from the timer job: a
+        # misconfigured output_dir under ProtectSystem=strict makes the feature
+        # a silent no-op and /faces/captures a permanent empty state, and the
+        # server's log is where someone looks first. No task is created -- the
+        # job runs in a separate process behind its own systemd timer.
+        from frigate_sidecar.faces import crosscam as _crosscam
+
+        _crosscam.check_inputs(settings)
+
     task: asyncio.Task[None] | None = None
     if settings.scrub.enabled:
         _check_scrub_inputs(settings)
@@ -445,6 +456,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(placement_routes.router)
     app.include_router(analysis_routes.router)
     app.include_router(faces_routes.router)
+    app.include_router(face_capture_routes.router)
     app.include_router(toybox_routes.router)
     app.include_router(scrub_routes.router)
     app.include_router(push_routes.router)

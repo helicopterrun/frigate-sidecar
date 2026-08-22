@@ -810,3 +810,16 @@ body.map-full-open .me-toolbar {
 }
 .me-lmdot.pending { background: var(--warn, #e3b341); }
 .me-lmreport { font-size: 11px; color: var(--text); font-family: var(--mono, monospace); display: flex; flex-direction: column; gap: 2px; }
+
+/* --- high-res cross-camera face captures (/faces/captures) --- */
+.capture-visit { margin: 0 0 1.25rem; border: 1px solid var(--line, #333); border-radius: 6px; }
+.capture-visit > header {
+  display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+  padding: .4rem .6rem; border-bottom: 1px solid var(--line, #333); font-size: .9rem;
+}
+.capture-visit > header .discard-visit { margin-left: auto; }
+.capture-strip { display: flex; gap: .5rem; overflow-x: auto; padding: .6rem; }
+.capture-card { margin: 0; flex: 0 0 auto; max-width: 320px; }
+.capture-card img { display: block; width: 100%; height: auto; border-radius: 4px; }
+.capture-card figcaption { font-size: .78rem; opacity: .85; padding-top: .25rem; }
+.capture-card figcaption .actions { display: inline-flex; gap: .25rem; margin-left: .4rem; }

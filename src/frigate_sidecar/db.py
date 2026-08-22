@@ -306,6 +306,75 @@ CREATE TABLE IF NOT EXISTS push_card_track_aliases (
     created_at REAL NOT NULL,
     PRIMARY KEY (camera, track_id)
 );
+
+-- High-res cross-camera face capture (config `face_capture`). One row per
+-- (trigger event, sample offset): a person event on a *trigger* camera makes
+-- us pull the *capture* camera's full main-stream frame out of Frigate's
+-- recordings at that moment and park it for human review.
+--
+-- A NEW table rather than columns on `face_attempts`, for a concrete reason:
+-- faces/scorer.py's histogram() runs an UNFILTERED "SELECT ... FROM
+-- face_attempts", and its output is the gate signal that face.quality_threshold
+-- was tuned against (0.55 here, chosen off a measured ~0.45 median). Rows of a
+-- different kind in that table silently move the median and therefore the
+-- auto-promote threshold. face_attempts is also PK'd on Frigate's crop filename,
+-- has no camera column, and its `decision` vocabulary is about promoting into
+-- Frigate's Face Library -- a different action space from keep/discard.
+--
+-- Keyed on its own autoincrement id, NOT on a filename: every file this feature
+-- serves is addressed by row id, so no client-supplied string ever reaches the
+-- filesystem. (routes/faces.py takes a filename because those files are
+-- Frigate's and are in no table of ours; these are, so the traversal class is
+-- removed rather than guarded.)
+--
+-- UNIQUE(trigger_event_id, offset_ms) is what makes the capture job idempotent:
+-- a re-run over an overlapping lookback window is a no-op, not a duplicate grab.
+--
+-- `status` distinguishes a transport failure (`error`, retried up to
+-- face_capture.max_attempts) from a clean 404 (`no_recording`, terminal -- no
+-- amount of waiting makes a recording appear where the camera was down). That
+-- distinction is load-bearing: the snapshot endpoint 404s until the segment
+-- covering the timestamp is COMMITTED, and segments commit at their end, so a
+-- capture attempted too early 404s for a reason that WILL resolve. The job only
+-- asks once face_capture.capture_delay_s has elapsed, which is what makes a 404
+-- at that point genuinely terminal.
+--
+-- NOTE for future edits: these columns arrive via CREATE TABLE IF NOT EXISTS,
+-- which is enough for a brand-new table. Any column ADDED later must go in BOTH
+-- this literal and `_ADDED_COLUMNS` below, or it is a production bug on every
+-- existing deployment -- that has already happened twice here.
+CREATE TABLE IF NOT EXISTS face_captures (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    trigger_event_id  TEXT NOT NULL,
+    trigger_camera    TEXT NOT NULL,
+    trigger_label     TEXT NOT NULL,
+    trigger_start_ts  REAL NOT NULL,
+    trigger_score     REAL,
+    visit_key         TEXT NOT NULL,
+    capture_camera    TEXT NOT NULL,
+    offset_ms         INTEGER NOT NULL,
+    frame_ts          REAL NOT NULL,
+    status            TEXT NOT NULL,
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    http_status       INTEGER,
+    detail            TEXT,
+    full_path         TEXT,
+    thumb_path        TEXT,
+    width             INTEGER,
+    height            INTEGER,
+    bytes             INTEGER,
+    crop_event_id     TEXT,
+    crop_box          TEXT,
+    review            TEXT NOT NULL DEFAULT 'pending',
+    reviewed_at       TEXT,
+    created_at        TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_face_capture_sample
+    ON face_captures(trigger_event_id, offset_ms);
+CREATE INDEX IF NOT EXISTS idx_face_capture_review
+    ON face_captures(review, trigger_start_ts);
+CREATE INDEX IF NOT EXISTS idx_face_capture_visit ON face_captures(visit_key);
+CREATE INDEX IF NOT EXISTS idx_face_capture_age   ON face_captures(trigger_start_ts);
 """
 
 # Columns added to `push_devices` / `push_handles` after those tables first

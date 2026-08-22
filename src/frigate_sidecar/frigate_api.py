@@ -112,6 +112,37 @@ class FrigateClient:
     def recordings_summary(self, camera: str) -> list[dict[str, Any]]:
         return cast("list[dict[str, Any]]", self._get_json(f"/api/{camera}/recordings/summary"))
 
+    def recording_snapshot(
+        self, camera: str, ts: float, *, timeout: float = 15.0
+    ) -> tuple[bytes | None, int]:
+        """Full-resolution main-stream frame at wall-clock `ts`.
+
+        Returns ``(jpeg_bytes, http_status)``; bytes is None when Frigate has no
+        recording covering that instant (404).
+
+        GET /api/{camera}/recordings/{ts:.3f}/snapshot.jpg serves a frame cut
+        straight out of the recording -- 2560x1440 / ~330 KB / ~0.45s on
+        gate-face here. Recordings are the MAIN stream, so this is full
+        resolution regardless of what the detect stream runs at.
+
+        A 404 is an expected, routine outcome, not an error: the endpoint 404s
+        until the segment covering `ts` has been COMMITTED, and segments commit
+        at their end (measured publish lag 5.4-9.4s per camera). Callers must
+        wait out that lag before treating a 404 as terminal. Anything else
+        non-2xx raises, so a broken upstream is retried rather than recorded as
+        "no recording exists".
+        """
+        url = f"{self.base_url}/api/{quote(camera, safe='')}/recordings/{ts:.3f}/snapshot.jpg"
+        try:
+            r = self._client.get(url, timeout=timeout)
+        except httpx.HTTPError as exc:
+            raise FrigateAPIError(f"GET {url}: {exc}") from exc
+        if r.status_code == 404:
+            return (None, 404)
+        if r.status_code != 200:
+            raise FrigateAPIError(f"GET {url}: HTTP {r.status_code}")
+        return (r.content, 200)
+
     def get_faces(self) -> dict[str, list[str]]:
         """Return Frigate's registered faces: {name: [filenames], 'train': [...]}.
 

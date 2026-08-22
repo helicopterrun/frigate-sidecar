@@ -103,6 +103,131 @@ class FaceSection(BaseModel):
     per_person_cap: int = 40  # don't let auto-promote overgrow one person's library
 
 
+class FaceCaptureSection(BaseModel):
+    """High-res cross-camera face capture (B2).
+
+    When a `person` event fires on a *trigger* camera, pull the *capture*
+    camera's full main-stream frame out of Frigate's recordings at that moment
+    and park it under `output_dir` for human review at /faces/captures.
+
+    The whole feature is one HTTP GET against `frigate.base_url`:
+    `/api/{camera}/recordings/{unix_ts:.3f}/snapshot.jpg` returns the full
+    main-stream frame (2560x1440, ~330 KB, ~0.45s on gate-face -- verified
+    live) with no ffmpeg, no -ss seek, no recordings-table lookup and no
+    container->host path mapping. Prior art: analysis/annotation_offset.py.
+
+    Distinct from `face:` above, which curates Frigate's OWN auto-saved face
+    crops. This section never touches Frigate's Face Library.
+    """
+
+    enabled: bool = False
+
+    # Cameras whose person events are worth a face grab. Empty means the
+    # feature does nothing even when enabled -- deliberately NOT "all cameras",
+    # which would grab a frame for every sidewalk pedestrian (the capture
+    # camera alone fires ~166 person events a day here).
+    trigger_cameras: list[str] = Field(default_factory=list)
+
+    # The single supporting identification camera whose main stream we grab.
+    # One camera, not a list: the point is an angle the triggers don't have.
+    capture_camera: str = ""
+
+    # `person` alone: a package or car event has no face to capture.
+    trigger_labels: list[str] = Field(default_factory=lambda: ["person"])
+
+    # Sample offsets from the trigger event's start_time, seconds. The capture
+    # camera's OWN person event starts a median 2.2s BEFORE the trigger's
+    # (p25 -6.8, p75 +5.7, measured over the six days both cameras have event
+    # history) -- the visitor crosses the sidewalk on the way in. A single
+    # sample at t=0 misses that pass often enough to matter; three samples 4s
+    # apart cover the p25..p75 band for ~1 MB per visit.
+    offsets_s: list[float] = Field(default_factory=lambda: [-4.0, 0.0, 4.0])
+
+    # How long after a sample timestamp before we try to fetch it. THE
+    # load-bearing setting: recordings/{ts}/snapshot.jpg 404s until the segment
+    # covering `ts` has been COMMITTED, and segments commit at their END.
+    # Measured publish lag here is 5.4-9.4s per camera (db.DEFAULT_PUBLISH_LAG_S
+    # = 6.2 is the reference constant). Verified live: ts=now-5s -> 404,
+    # ts=now-60s -> 200. 45s is ~4x the worst observed lag and costs nothing --
+    # this is not an interrupt path, which is also why an MQTT "grab it now"
+    # hook would 404 essentially every time.
+    capture_delay_s: float = 45.0
+
+    # How far back each run reconsiders trigger events. An hour of overlap makes
+    # the job self-healing: a run skipped by a restart, or one that hit a
+    # transient error, is picked up by the next with no cursor or queue state.
+    # Idempotency comes from the UNIQUE index, not from this window.
+    lookback_s: float = 3600.0
+
+    # Consecutive trigger events within this gap are ONE visit; only the first
+    # is captured. Real visits fire on 3-4 cameras within seconds: 325
+    # front-camera person events over 30 days collapse to 154 visits at a 60s
+    # gap (87 singletons, largest cluster 26 events). Without this, one visitor
+    # costs 26 x 3 = 78 full-res grabs and 78 review cards.
+    dedup_window_s: float = 60.0
+
+    # Hard ceiling on a gap-chained visit. Pure gap-chaining runs forever while
+    # someone loiters; capping at 5 minutes means a long presence yields a fresh
+    # capture every 5 minutes instead of one frame from the first second.
+    max_visit_s: float = 300.0
+
+    # Bound on one run, so a first run against a long lookback cannot hold the
+    # manual POST open for minutes or hammer Frigate. 60 captures ~= 27s of
+    # upstream time at the measured 0.45s.
+    max_captures_per_run: int = 60
+
+    # Transport failures (status='error') are retried on later runs; a clean 404
+    # (status='no_recording') never is. This bounds the retries so a permanently
+    # unreachable Frigate cannot spin.
+    max_attempts: int = 3
+
+    # Fold in the TRIGGER camera's detect.annotation_offset from Frigate's
+    # config. Convention, per analysis/annotation_offset.py's _measure_event
+    # (which probes recordings at `t_det + off_ms/1000`):
+    #     recording_time = detection_time + annotation_offset_ms / 1000
+    # doorbell's -1000 means its detections lead the video by 1.0s. The +-4s
+    # ladder mostly swamps a 1-3s correction, so this is a refinement -- but
+    # getting the sign wrong silently is not, hence the citation.
+    apply_annotation_offset: bool = True
+
+    # Crop the PREVIEW to the head, using the CAPTURE camera's OWN concurrent
+    # event box. The trigger camera's box is NOT usable and is never consulted:
+    # different camera, different FOV, and different detect aspect (doorbell
+    # 960x720 and package 1280x960 are 4:3; the capture camera is 16:9, exactly
+    # 2x the fetched frame, so ITS normalized coords map straight on). Only ~73%
+    # of trigger events have a concurrent capture-camera event, and only a box
+    # LIVE at the sample instant is used -- a box borrowed from 20s away crops
+    # the wrong part of the frame, worse than no crop. The full frame is always
+    # kept, so a bad crop costs a thumbnail, never the evidence.
+    crop_to_bbox: bool = True
+
+    # Fraction of the person box's height, from its top, taken as the head.
+    # A capture-camera person box measures ~428x856 px on the 2560x1440 frame,
+    # so 0.4 yields ~428x342 -- face plus shoulders. Deliberately loose:
+    # data.box is the box at event END, not at the sample instant, so the crop
+    # has to absorb real drift.
+    head_fraction: float = 0.4
+    crop_pad: float = 0.25  # expand the head box by this fraction of its own w/h
+
+    # Preview longest edge / quality. ~480px keeps a 60-card grid under ~2 MB
+    # while staying big enough to recognise a face without opening the full frame.
+    thumb_max_edge: int = 480
+    thumb_quality: int = 80
+
+    # MUST be under a path the systemd unit can write. The service runs
+    # ProtectSystem=strict with ReadWritePaths=/opt/frigate-sidecar only, so
+    # anything outside fails EROFS *at write time*, not at config load -- a
+    # silent no-op. check_inputs() probes writability to make that loud.
+    output_dir: Path = Path("/opt/frigate-sidecar/data/face-captures")
+
+    # ~5 visits/day x 3 samples x ~330 KB = ~5 MB/day, so 30 days is ~150 MB.
+    # Matched to Frigate's record.alerts.retain.days: 30 so a capture never
+    # outlives the footage it was cut from.
+    retention_days: int = 30
+
+    http_timeout_s: float = 15.0
+
+
 class WatchdogSection(BaseModel):
     """External health watchdog for the Frigate container.
 
@@ -562,6 +687,7 @@ class Settings(BaseSettings):
     frigate: FrigateSection = Field(default_factory=FrigateSection)
     sidecar: SidecarSection = Field(default_factory=SidecarSection)
     face: FaceSection = Field(default_factory=FaceSection)
+    face_capture: FaceCaptureSection = Field(default_factory=FaceCaptureSection)
     watchdog: WatchdogSection = Field(default_factory=WatchdogSection)
     scrub: ScrubSection = Field(default_factory=ScrubSection)
     proxy: ProxySection = Field(default_factory=ProxySection)

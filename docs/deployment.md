@@ -80,3 +80,36 @@ Tagging `vX.Y.Z` (matching `__version__` in `src/frigate_sidecar/__init__.py`)
 runs `.github/workflows/release.yml`: multi-arch image to
 `ghcr.io/helicopterrun/frigate-sidecar` (`latest`, `X.Y`, `vX.Y.Z`) plus an
 sdist/wheel attached to the GitHub Release.
+
+### High-res cross-camera face capture (optional)
+
+`frigate-sidecar-face-capture.timer` grabs the *capture* camera's full
+main-stream frame out of Frigate's recordings whenever a `person` event fires on
+a *trigger* camera, for human review at `/faces/captures`.
+
+```sh
+sudo install -m 0644 contrib/frigate-sidecar-face-capture.service \
+                     contrib/frigate-sidecar-face-capture.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now frigate-sidecar-face-capture.timer
+```
+
+Configure under `face_capture:` in `sidecar.yml` — at minimum `enabled`,
+`trigger_cameras`, `capture_camera`, and an `output_dir` **inside
+/opt/frigate-sidecar** (the main unit runs `ProtectSystem=strict` with
+`ReadWritePaths=/opt/frigate-sidecar`, so anything outside fails EROFS at write
+time rather than at config load).
+
+It is a **oneshot behind a timer, not an in-process loop, and deliberately not an
+MQTT hook**: `/api/{camera}/recordings/{ts}/snapshot.jpg` 404s until the segment
+covering that timestamp has been committed, and segments commit at their *end*
+(measured publish lag 5.4-9.4s per camera). `capture_delay_s` (default 45s) is
+what makes a 404 genuinely terminal rather than "asked too early".
+
+Its own unit rather than a second `ExecStart=` on
+`frigate-sidecar-faces.service`: `faces scan` exits 2 without the optional
+`[faces]` extra, and a failed `ExecStart` in a `Type=oneshot` unit aborts the
+rest.
+
+Checks: `python3 -m frigate_sidecar face-capture stats` (counts + last-run
+heartbeat), `face-capture scan` (one manual pass), `face-capture prune`.

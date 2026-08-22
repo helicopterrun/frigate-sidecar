@@ -20,10 +20,15 @@ app = typer.Typer(
 triage_app = typer.Typer(help="Sample borderline events and record tp/fp/skip labels.")
 analysis_app = typer.Typer(help="Read-only analyses over Frigate's DB and live API.")
 faces_app = typer.Typer(help="Score + curate Frigate's auto-saved face training crops.")
+face_capture_app = typer.Typer(
+    help="High-res cross-camera face capture: grab the ID camera's full-res frame "
+         "when a front camera sees a person."
+)
 scrub_app = typer.Typer(help="Uniform-cadence scrub-cache generation (sprite sheets).")
 app.add_typer(triage_app, name="triage")
 app.add_typer(analysis_app, name="analysis")
 app.add_typer(faces_app, name="faces")
+app.add_typer(face_capture_app, name="face-capture")
 app.add_typer(scrub_app, name="scrub")
 
 
@@ -288,6 +293,77 @@ def faces_stats(bins: int = typer.Option(10, min=2, max=50)) -> None:
     s = load_settings()
     result = scorer.histogram(s, bins=bins)
     typer.echo(json.dumps(result, indent=2))
+
+
+# ----- Face-capture subcommands -----
+
+
+@face_capture_app.command("scan")
+def face_capture_scan() -> None:
+    """Capture the ID camera's full-res frame for every new trigger event."""
+    from frigate_sidecar.faces import crosscam
+
+    s = load_settings()
+    summary = crosscam.scan(s)
+    typer.echo(json.dumps(summary))
+    if summary.get("problems"):
+        raise typer.Exit(code=2)
+
+
+@face_capture_app.command("prune")
+def face_capture_prune() -> None:
+    """Drop captures past face_capture.retention_days."""
+    from frigate_sidecar.faces import crosscam
+
+    typer.echo(json.dumps(crosscam.prune(load_settings())))
+
+
+@face_capture_app.command("stats")
+def face_capture_stats(days: int = typer.Option(7, min=1)) -> None:
+    """Counts by status/review plus the last-run heartbeat."""
+    import time
+
+    from frigate_sidecar import db
+    from frigate_sidecar.faces import crosscam
+
+    s = load_settings()
+    conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        since = time.time() - days * 86400
+        by_status = {
+            r["status"]: r["n"]
+            for r in conn.execute(
+                "SELECT status, COUNT(*) n FROM face_captures "
+                "WHERE trigger_start_ts >= ? GROUP BY status",
+                (since,),
+            )
+        }
+        by_review = {
+            r["review"]: r["n"]
+            for r in conn.execute(
+                "SELECT review, COUNT(*) n FROM face_captures "
+                "WHERE trigger_start_ts >= ? GROUP BY review",
+                (since,),
+            )
+        }
+        total_bytes = conn.execute(
+            "SELECT COALESCE(SUM(bytes), 0) b FROM face_captures WHERE trigger_start_ts >= ?",
+            (since,),
+        ).fetchone()["b"]
+    finally:
+        conn.close()
+    typer.echo(
+        json.dumps(
+            {
+                "days": days,
+                "by_status": by_status,
+                "by_review": by_review,
+                "bytes": total_bytes,
+                "last_run": crosscam.read_last_run(s),
+            },
+            indent=2,
+        )
+    )
 
 
 # ----- Analysis subcommands -----
