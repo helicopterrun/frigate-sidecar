@@ -6,7 +6,10 @@ routes: ["/scrub"]
 config: ["scrub"]
 ---
 
-[Scrub](/scrub) is the timeline viewer: drag across the strip and frames
+[Scrub](/scrub) is the timeline viewer. On desktop, drag across the
+horizontal strip; on a phone it becomes a vertical reel like the app's —
+drag down for earlier, fling for momentum, drag the image itself for
+frame-by-frame, and tap an event bar to jump to it. Frames
 render instantly, because the sidecar pre-renders recordings into
 **sprite sheets** — grids of small frames at a fixed cadence. The Elsinore
 app's Scrub reel uses exactly the same cache over the same API.
