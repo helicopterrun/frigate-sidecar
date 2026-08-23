@@ -29,8 +29,8 @@ def map_view(request: Request) -> Any:
     )
 
 
-@router.get("/cameras", include_in_schema=False)
 @router.get("/cameras2", include_in_schema=False)
 def cameras_alias() -> Any:
-    """Old names for this page (and its side-by-side rebuild alias)."""
+    """Old rebuild-era alias for the map page. /cameras is now the live
+    camera grid (routes/status.py)."""
     return RedirectResponse("/map", status_code=301)

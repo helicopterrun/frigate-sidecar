@@ -4,6 +4,17 @@
 
 {% block body %}
 <main>
+  <nav class="settings-nav" aria-label="Settings sections">
+    <a href="#zones" class="page-link">Zones</a>
+    <a href="#cameras" class="page-link">Cameras</a>
+    <a href="#push" class="page-link">Push</a>
+    <a href="#faces" class="page-link">Faces</a>
+    <a href="#services" class="page-link">Services</a>
+    <a href="#data" class="page-link">Data</a>
+    <a href="#appearance" class="page-link">Appearance</a>
+    <a href="#about" class="page-link">About</a>
+  </nav>
+
   <div id="zones-banner" class="help page-intro" style="display:none"></div> {# JS-toggled #}
 
   {# ---- Zones & routing (element ids shared with zones.js) ---- #}
@@ -62,7 +73,7 @@
         <td>{{ (c.hfov ~ '°') if c.hfov is not none else '—' }}</td>
         <td>{{ (c.mount_ft ~ ' ft') if c.mount_ft is not none else '—' }}</td>
         <td>{{ (c.tilt_deg ~ '°') if c.tilt_deg is not none else '—' }}</td>
-        <td><a class="btn-neutral" href="/cameras?landmark={{ c.camera | urlencode }}">Landmark calibrate</a></td>
+        <td><a class="btn-neutral" href="/map">Landmark calibrate</a></td>
       </tr>
     {% endfor %}
     </tbody>
@@ -122,6 +133,25 @@
     <a href="/faces" class="page-link">Faces page</a>.
   </p>
 
+  {# ---- Services (read-only YAML config surface) ---- #}
+  <h3 class="section-title" id="services">Services</h3>
+  <p class="help page-intro">
+    Feature switches from the sidecar's YAML config — read-only here; edit
+    <code>sidecar.yml</code> and restart to change them. Each link opens the
+    guide topic that explains the section.
+  </p>
+  <table class="motion-table services-table">
+    <tbody>
+    {% for row in service_rows %}
+      <tr>
+        <td>{{ row.name }}</td>
+        <td>{% if row.value in ('on', 'off') %}<span class="cell-class {{ 'ok' if row.value == 'on' else 'muted' }}">{{ row.value }}</span>{% else %}{{ row.value }}{% endif %}</td>
+        <td><a href="{{ row.guide }}" class="page-link">guide</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
   {# ---- Data ---- #}
   <h3 class="section-title" id="data">Data</h3>
   <p class="help page-intro">
@@ -137,6 +167,24 @@
     <input id="import-file" type="file" accept=".json,application/json" class="hidden">
   </label>
   <span id="sync-state" class="help save-state"></span>
+
+  {# ---- Appearance ---- #}
+  <h3 class="section-title" id="appearance">Appearance</h3>
+  <label class="theme-row">theme
+    <select id="theme-picker" class="theme-picker" aria-label="Theme">
+      <option value="">Elsinore</option>
+      <option value="kronborg-signal">Kronborg Signal</option>
+      <option value="moss-terracotta">Moss &amp; Terracotta</option>
+      <option value="oresund-harbor">Øresund Harbor</option>
+      <option value="midnight-fjord">Midnight Fjord</option>
+    </select>
+  </label>
+
+  {# ---- Help ---- #}
+  <h3 class="section-title" id="help">Help</h3>
+  <ul class="rec-list">
+    <li><a href="/guide">User guide</a> — every page and setting, with walkthroughs</li>
+  </ul>
 
   {# ---- About ---- #}
   <h3 class="section-title" id="about">About</h3>

@@ -51,6 +51,42 @@ def _camera_summary(settings: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def _service_rows(settings: Any) -> list[dict[str, str]]:
+    """Read-only summary of the YAML-only feature switches, so the settings
+    page reflects the whole configuration surface (edits happen in the
+    sidecar's config file; the guide link explains each one)."""
+
+    def onoff(flag: bool) -> str:
+        return "on" if flag else "off"
+
+    return [
+        {"name": "Scrub cache", "value": onoff(settings.scrub.enabled), "guide": "/guide/scrub"},
+        {
+            "name": "Push",
+            "value": f"{onoff(settings.push.enabled)} · {settings.push.transport}",
+            "guide": "/guide/push-notifications",
+        },
+        {
+            "name": "Face pipeline",
+            "value": onoff(settings.face.enabled),
+            "guide": "/guide/faces-pipeline",
+        },
+        {
+            "name": "Face capture",
+            "value": onoff(settings.face_capture.enabled),
+            "guide": "/guide/faces-pipeline",
+        },
+        {
+            "name": "Face enrichment",
+            "value": onoff(settings.face_enrich.enabled),
+            "guide": "/guide/identities",
+        },
+        {"name": "Watchdog", "value": onoff(settings.watchdog.enabled), "guide": "/guide/settings"},
+        {"name": "Proxy", "value": onoff(settings.proxy.enabled), "guide": "/guide/settings"},
+        {"name": "Log level", "value": settings.log_level, "guide": "/guide/first-run"},
+    ]
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_view(request: Request) -> Any:
     settings = request.app.state.settings
@@ -70,6 +106,7 @@ async def settings_view(request: Request) -> Any:
             "camera_rows": _camera_summary(settings),
             "face_auto_promote": settings.face.auto_promote,
             "face_quality_threshold": settings.face.quality_threshold,
+            "service_rows": _service_rows(settings),
             "version": __version__,
             "capabilities_json": json.dumps(caps, indent=2, sort_keys=True),
             "counts": {},

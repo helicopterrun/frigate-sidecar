@@ -20,6 +20,8 @@ the sidecar's own knobs in one place.
 - **Cameras** — per-camera rig facts (position, heading, FOV, calibration
   quality) with deep links into the [Map](/map) landmark editor.
 - **Faces** — a read-only view of the face pipeline configuration.
+- **Appearance** — the theme picker (five palettes shared with the app).
+- **Help** — a link to this guide; on phones this is the guide's front door.
 - **About** — version and debug links.
 
 ## Configuration
