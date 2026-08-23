@@ -42,9 +42,9 @@
   <span class="stats">{{ summary or '' }}
     {% if counts and (counts.get('tp') or counts.get('fp') or counts.get('skip')) %}
       &nbsp;·&nbsp; labeled:
-      <span class="badge tp">{{ counts.get('tp', 0) }} TP</span>
-      <span class="badge fp">{{ counts.get('fp', 0) }} FP</span>
-      <span class="badge skip">{{ counts.get('skip', 0) }} SKIP</span>
+      <span class="badge tp">{{ counts.get('tp', 0) }} real</span>
+      <span class="badge fp">{{ counts.get('fp', 0) }} false alarm</span>
+      <span class="badge skip">{{ counts.get('skip', 0) }} skip</span>
     {% endif %}
   </span>
   <span class="header-right">

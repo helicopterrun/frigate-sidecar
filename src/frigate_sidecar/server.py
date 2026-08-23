@@ -462,6 +462,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "fmt_score": fmt.fmt_score,
             "fmt_duration": fmt.fmt_duration,
             "fmt_bytes": fmt.fmt_bytes,
+            # Display names for stored triage labels (tp/fp/skip stay the
+            # wire/DB values — the app and API depend on them).
+            "triage_name": {"tp": "real", "fp": "false alarm", "skip": "skip"}.get,
         }
     )
     app.state.plus_enabled = False

@@ -11,16 +11,16 @@ with [Triage](/triage) labels, it turns threshold setting from guesswork
 into a measurement.
 
 The logic: false positives cluster at low scores, real detections at high
-scores. Labeling a batch of events TP/FP shows you where the two
+scores. Labeling a batch of events real/false-alarm shows you where the two
 populations separate — that's your threshold.
 
 ## Walkthrough: tune a threshold
 
 ```walkthrough
 - Pick the camera + label that's producing junk alerts
-- Open Triage filtered to that camera/label and label 30-50 events TP/FP
+- Open Triage filtered to that camera/label and label 30-50 events real/false-alarm
 - Open the Scores page for the same camera/label
-- Find where FP density falls off and TP density holds
+- Find where false-alarm density falls off and real density holds
 - Set that value as the label's threshold in Frigate's config for the camera
 - Restart Frigate and re-check the feed over the next day or two
 ```
