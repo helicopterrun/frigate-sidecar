@@ -148,21 +148,73 @@ def classify_subject(event: ReviewEvent) -> str:
     return "thing"
 
 
-def classify_place(event: ReviewEvent, zone_classes: dict[str, str]) -> str:
-    """`zone_classes` (Elsinore Phase 4: `push/policy_settings.py`,
+def zone_place(zone: str, zone_classes: dict[str, str]) -> str:
+    """One zone's place class.
+
+    `zone_classes` (Elsinore Phase 4: `push/policy_settings.py`,
     `settings.zone_classes`) is the user's explicit zone -> place-class
-    assignment; a zone not in it falls back to the same name-guessing
-    heuristic the settings API's `available_zones` uses
-    (`policy_settings.guess_zone_class`), rather than the flat "yard" this
-    used to default to -- new zones (a camera the user just added) get a
-    reasonable class immediately instead of going silent until explicitly
-    configured."""
-    for zone in event.zones:
-        if zone in zone_classes:
-            return zone_classes[zone]
-    if event.zones:
-        return policy_settings.guess_zone_class(event.zones[0])
-    return "street"
+    assignment; a zone not in it falls back to the same name-guessing heuristic
+    the settings API's `available_zones` uses (`policy_settings.guess_zone_class`),
+    rather than the flat "yard" this used to default to -- new zones (a camera
+    the user just added) get a reasonable class immediately instead of going
+    silent until explicitly configured.
+    """
+    if zone in zone_classes:
+        return zone_classes[zone]
+    return policy_settings.guess_zone_class(zone)
+
+
+def most_severe_zone(
+    zones: Sequence[str], *, subject: str, zone_classes: dict[str, str]
+) -> tuple[str, str]:
+    """The zone that routes loudest for this subject, and its place class.
+
+    Frigate lists an object's zones in its own order, and a tight zone is
+    normally listed after the broad one containing it: `charger` is a small
+    polygon inside `parking_area`/`back_walkway`, so it always trails one of
+    them. Taking zones[0] therefore made the most specific -- and most severe --
+    zone on the property unreachable. A person standing at the Tesla wall
+    charger evaluated as **quiet**: `parking_area` supplied the place class
+    *and* the zone-override key, and `zone_overrides[parking_area][person] =
+    quiet` short-circuits `evaluate_ladder` before the table is ever consulted.
+    `charger` alone evaluates to urgent. Discovered by the first recorded
+    fixture (`cap-charger-person-two-cams`); the hand-written scenarios could
+    not find it, because every zone they name is a singleton.
+
+    Ranking runs through `ladder.base_level`, the same override -> off-cell ->
+    table precedence the evaluator itself applies, so the winner is the zone
+    that will genuinely route loudest. Ranking on place class alone would not
+    be enough: a quiet zone's explicit override beats a loud zone's table cell,
+    and the user's override is their most specific statement.
+
+    Ties keep the earliest zone, so an event whose zones are all equally severe
+    behaves exactly as it did before this existed.
+    """
+    from frigate_sidecar.push import ladder, ladder_policy
+
+    if not zones:
+        return "", "street"
+
+    best_zone, best_place, best_rank = "", "street", -2
+    for zone in zones:
+        if not zone:
+            continue
+        place = zone_place(zone, zone_classes)
+        level, _ = ladder.base_level(subject, place, zone)
+        rank = -1 if level == ladder.SUPPRESSED else ladder_policy.LEVELS.index(level)
+        if rank > best_rank:
+            best_zone, best_place, best_rank = zone, place, rank
+    if best_rank == -2:  # every entry was blank
+        return "", "street"
+    return best_zone, best_place
+
+
+def classify_place(event: ReviewEvent, zone_classes: dict[str, str]) -> str:
+    """The place class the event routes on. See `most_severe_zone` for why this
+    is no longer simply the first zone Frigate happened to list."""
+    return most_severe_zone(
+        event.zones, subject=classify_subject(event), zone_classes=zone_classes
+    )[1]
 
 
 def snapshot_from_review(
@@ -178,8 +230,12 @@ def snapshot_from_review(
     place_class)` since the payload contract needs the classification
     alongside the level the snapshot evaluates to."""
     subject_kind = classify_subject(event)
-    place_class = classify_place(event, zone_classes)
-    zone = event.zones[0] if event.zones else ""
+    # One decision, used twice: the place class and the zone-override key must
+    # name the SAME zone, or a fix to one is undone by the other (see
+    # `most_severe_zone`).
+    zone, place_class = most_severe_zone(
+        event.zones, subject=subject_kind, zone_classes=zone_classes
+    )
     label = event.labels[0] if event.labels else ""
     snapshot = Snapshot(
         subject=subject_kind, place=place_class, zone=zone, label=label,

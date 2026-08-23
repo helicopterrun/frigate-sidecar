@@ -93,6 +93,29 @@ class Snapshot:
     detector_confirmed: bool = True
 
 
+def base_level(subject: str, place: str, zone: str) -> tuple[str, bool]:
+    """The level before nudges, floors and caps: zone override, then off-cell,
+    then the base table. Returns `(level, came_from_a_zone_override)` because an
+    override short-circuits the rest of the ladder and a table hit does not.
+
+    Extracted so `delivery_wire.most_severe_zone` can rank candidate zones by
+    exactly the precedence the evaluator will then apply. Ranking by anything
+    else -- place class alone, say -- could pick a zone that evaluates
+    differently, because a quiet zone's explicit override outranks a loud
+    zone's table cell.
+    """
+    override = policy.ZONE_OVERRIDES.get(zone, {}).get(subject)
+    if override is not None:
+        return override, True
+    if (subject, place) in policy.OFF_CELLS:
+        return SUPPRESSED, False
+    if subject in policy.TABLE:
+        table_subject = subject
+    else:
+        table_subject = _V2_TO_V1.get(subject) or _V1_TO_V2.get(subject) or subject
+    return policy.TABLE[table_subject][place], False
+
+
 def evaluate_ladder(snapshot: Snapshot) -> str:
     """Return one of `ladder_policy.LEVELS`, or `SUPPRESSED`."""
     if snapshot.muted:
@@ -106,19 +129,14 @@ def evaluate_ladder(snapshot: Snapshot) -> str:
     if snapshot.label in policy.DANGEROUS_ANIMAL_LABELS:
         subject = "person" if "person" in policy.TABLE else "stranger"
 
-    override = policy.ZONE_OVERRIDES.get(snapshot.zone, {}).get(subject)
-    if override is not None:
-        return override
-
-    if (subject, snapshot.place) in policy.OFF_CELLS:
+    level, overridden = base_level(subject, snapshot.place, snapshot.zone)
+    if overridden:
+        return level
+    if level == SUPPRESSED:
         return SUPPRESSED
 
     levels = policy.LEVELS
-    if subject in policy.TABLE:
-        table_subject = subject
-    else:
-        table_subject = _V2_TO_V1.get(subject) or _V1_TO_V2.get(subject) or subject
-    idx = levels.index(policy.TABLE[table_subject][snapshot.place])
+    idx = levels.index(level)
 
     if subject != "animal":
         worry = sum(1 for r in policy.WORRY_REASONS if getattr(snapshot, r))
