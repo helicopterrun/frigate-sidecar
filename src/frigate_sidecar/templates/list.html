@@ -5,6 +5,26 @@
 
 {% block body %}
 <main>
+  {% set untriaged = events | selectattr('triage_label', 'none') | list %}
+  <div class="triage-intro">
+    <p class="page-intro">Label detections as <b>TP</b> (real) or <b>FP</b>
+      (false alarm) — labels feed Frigate+ training and
+      <a href="/guide/tuning-scores">threshold tuning</a>.</p>
+    <div class="triage-progress">
+      <span class="badge tp">{{ counts.get('tp', 0) }} TP</span>
+      <span class="badge fp">{{ counts.get('fp', 0) }} FP</span>
+      <span class="badge skip">{{ counts.get('skip', 0) }} SKIP</span>
+      <span class="help">· {{ events|length }} matching, {{ untriaged|length }} untriaged</span>
+      {% if untriaged %}
+      <a class="btn-primary triage-start"
+         href="/event/{{ untriaged[0].id }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+        Start review ({{ untriaged|length }}) &rarr;</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <details class="filters-wrap" open>
+    <summary class="page-link">Filters</summary>
   <form class="filters" method="get" action="/triage">
     <label>camera
       <select name="camera">
@@ -42,6 +62,7 @@
     <button type="submit">apply</button>
     <button type="button" class="secondary" onclick="window.location='/triage'">reset</button>
   </form>
+  </details>
 
   {% if events %}
   <div class="grid">

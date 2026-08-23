@@ -13,6 +13,11 @@ guessing.
 
 ## Using it
 
+**Start review.** The button at the top opens the first untriaged event in
+your current filter — label it and the page auto-advances to the next one,
+so a labeling session is just: tap Start review, then TP/FP/skip through
+the queue.
+
 **The list.** Filter by camera, object label, triage state, time window, and
 sort order. A **session** field in the filter bar lets you tag a batch of
 labels (e.g. `2026-08-23a`) so you can tell labeling passes apart later; on

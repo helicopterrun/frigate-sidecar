@@ -245,6 +245,20 @@ details.advanced summary:hover { color: var(--text); }
   .metrics { gap: 5px 12px; font-size: 12px; }
 }
 
+/* Triage intro: what the page is for + labeling progress. */
+.triage-intro { margin-bottom: 12px; }
+.triage-intro .page-intro { margin: 0 0 8px; }
+.triage-progress { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.triage-start { margin-left: auto; text-decoration: none; }
+/* Filters live behind a disclosure; desktop pins it open (summary hidden,
+   `open` set server-side), phones collapse it via list.js. */
+.filters-wrap > summary { display: none; list-style: none; cursor: pointer; user-select: none; width: max-content; margin-bottom: 8px; border: 1px solid var(--stroke); }
+.filters-wrap > summary::-webkit-details-marker { display: none; }
+.filters-wrap > summary::after { content: " ▾"; font-size: 9px; color: var(--muted-2); }
+@media (max-width: 720px) {
+  .filters-wrap > summary { display: inline-block; }
+  .triage-start { margin-left: 0; width: 100%; text-align: center; }
+}
 .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
 .filters label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
 .filters select, .filters input { background: var(--surface); color: var(--text); border: 1px solid var(--stroke); padding: 4px 8px; border-radius: var(--radius-sm); font-size: 13px; }
