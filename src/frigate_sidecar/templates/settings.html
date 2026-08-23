@@ -124,6 +124,60 @@
     <div class="empty">no devices registered — pair the Elsinore app with this server to register one</div>
   {% endif %}
 
+  <h4 class="sub-title">How notifications are decided</h4>
+  <p class="help page-intro">
+    Every detection is scored on the <b>attention ladder</b>: who was seen
+    (unknown person, known person, animal, vehicle/thing) crossed with the
+    <b>place class</b> of the zone it happened in. The result is one of four
+    levels — <b>Log</b> (recorded, no alert), <b>Glance</b> (silent
+    notification), <b>Notify</b> (sound), <b>Alarm</b> (critical, breaks
+    through Focus). Context nudges the level up (nobody home, night,
+    lingering, approaching the secure area) or down (known face, low
+    confidence, leaving). Per-zone overrides set in
+    <a href="#zones" class="page-link">Zones &amp; routing</a> win over the
+    table. Full detail in the
+    <a href="/guide/push-notifications" class="page-link">guide</a>.
+  </p>
+  <table class="motion-table ladder-table">
+    <thead><tr><th></th>{% for p in ladder.places %}<th>{{ p }}</th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for row in ladder.rows %}
+      <tr>
+        <td>{{ row.subject }}</td>
+        {% for cell in row.cells %}
+        <td><span class="lvl lvl-{{ cell.level }}">{{ cell.label }}</span></td>
+        {% endfor %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if ladder.overrides %}
+  <p class="help">Zone overrides in effect:
+    {% for o in ladder.overrides %}
+      <span class="lvl-override">{{ o.zone }}: {{ o.subject }} → {{ o.label }}</span>{% if not loop.last %} · {% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
+
+  <h4 class="sub-title">What they look like</h4>
+  <p class="help page-intro">
+    Rendered by the same code that writes the real notifications — titles and
+    bodies here are exactly what the phone shows for these situations.
+  </p>
+  <div class="notif-examples">
+    {% for ex in notif_examples %}
+    <div class="notif-example">
+      <span class="notif-icon">{{ ex.emoji }}</span>
+      <span class="notif-text">
+        <span class="notif-title">{{ ex.primary }}</span>
+        {% if ex.secondary %}<span class="notif-body">{{ ex.secondary }}</span>{% endif %}
+        <span class="notif-meta">{{ ex.situation }}</span>
+      </span>
+      <span class="lvl lvl-{{ ex.level }}">{{ ex.level_label }}</span>
+    </div>
+    {% endfor %}
+  </div>
+
   {# ---- Faces ---- #}
   <h3 class="section-title" id="faces">Faces</h3>
   <p class="help page-intro">

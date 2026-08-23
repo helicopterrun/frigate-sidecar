@@ -77,6 +77,74 @@
     </div>
   </div>
 
+  {% set hw = status.hardware %}
+  {% if hw.available or hw.host %}
+  <h2 class="section-h">Hardware</h2>
+  <div class="stat-row">
+    {% for name, ms in (hw.detectors or {}).items() %}
+    <div class="stat-card">
+      <div class="stat-label">{{ name }} inference</div>
+      <div class="stat-value" data-hw-det="{{ name }}">
+        <span class="cell-class {{ 'ok' if ms < 15 else 'warn' if ms < 30 else 'noise' }}">{{ ms }} ms</span>
+      </div>
+    </div>
+    {% endfor %}
+    {% if hw.detection_fps is defined %}
+    <div class="stat-card">
+      <div class="stat-label">Detection FPS</div>
+      <div class="stat-value" data-hw="detection-fps">{{ hw.detection_fps }}</div>
+    </div>
+    {% endif %}
+    {% if hw.frigate_cpu is defined %}
+    <div class="stat-card">
+      <div class="stat-label">Frigate CPU / mem</div>
+      <div class="stat-value" data-hw="frigate-cpu">{{ hw.frigate_cpu }}% · {{ hw.frigate_mem }}%</div>
+    </div>
+    {% endif %}
+    {% if hw.gpu %}
+    <div class="stat-card">
+      <div class="stat-label">GPU ({{ hw.gpu.name }})</div>
+      <div class="stat-value" data-hw="gpu">{{ hw.gpu.usage }}</div>
+    </div>
+    {% endif %}
+    {% if hw.host.load_1m is defined %}
+    <div class="stat-card">
+      <div class="stat-label">Host load ({{ hw.host.cpus }} cpus)</div>
+      <div class="stat-value" data-hw="load">{{ hw.host.load_1m }} · {{ hw.host.load_5m }}</div>
+    </div>
+    {% endif %}
+    {% if hw.host.mem_pct is defined %}
+    <div class="stat-card">
+      <div class="stat-label">Host memory</div>
+      <div class="stat-value" data-hw="mem">{{ hw.host.mem_pct }}%</div>
+    </div>
+    {% endif %}
+    {% if hw.host.disk_pct is defined %}
+    <div class="stat-card">
+      <div class="stat-label">Host disk</div>
+      <div class="stat-value" data-hw="disk">{{ hw.host.disk_pct }}%</div>
+    </div>
+    {% endif %}
+    {% if hw.host.rss_bytes is defined %}
+    <div class="stat-card">
+      <div class="stat-label">Sidecar RSS</div>
+      <div class="stat-value" data-hw="rss">{{ fmt_bytes(hw.host.rss_bytes) }}</div>
+    </div>
+    {% endif %}
+  </div>
+  {% if hw.storage %}
+  <div class="hw-storage">
+    {% for mount, row in hw.storage.items() %}
+    <div class="hw-mount" data-hw-mount="{{ mount }}">
+      <span class="hw-mount-name">{{ mount.rstrip('/').split('/')[-1] or mount }}</span>
+      <span class="hw-bar"><span class="hw-bar-fill {{ 'noise' if row.pct > 90 else 'warn' if row.pct > 75 else 'ok' }}" style="width: {{ row.pct }}%"></span></span>
+      <span class="hw-mount-nums">{{ fmt_bytes(row.used_bytes) }} / {{ fmt_bytes(row.total_bytes) }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% endif %}
+
   {% if status.cameras %}
   <h2 class="section-h">
     <a href="/cameras" class="section-link">Cameras &rarr;</a>
