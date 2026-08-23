@@ -1,20 +1,25 @@
-"""Identity clusters from face enrichment: list, name, merge, delete.
+"""Identity clusters from face enrichment: review, name, merge, repair.
 
 The page's data is `face_clusters` + `face_enrichments` (faces/enrich.py).
-Naming a cluster is the promotion path — it becomes a KNOWN person and later
-matches write the event's sub_label back to Frigate. Naming and merging both
-rebuild the centroid exactly from the stored per-event embeddings rather than
-trusting the running mean.
+Naming a cluster is the promotion path — it becomes a KNOWN person, later
+matches write the event's sub_label back to Frigate, and (by design) naming
+also RETRO-writes the sub_label onto the cluster's past events still in
+Frigate's retention. Naming, merging, and evicting a sighting all rebuild the
+centroid exactly from the stored per-event embeddings rather than trusting the
+running mean.
 
 Thumbnails come from Frigate's event thumbnail endpoint, proxied server-side:
 the sidecar's base_url origin is unauthenticated and server-to-server only, so
-the browser can never be pointed at it directly.
+the browser can never be pointed at it directly. Full-size snapshots, by
+contrast, go through the transparent proxy (routes/proxy.py) with the user's
+own Frigate session — /api/events/{id}/snapshot.jpg straight from the page.
 """
 
 from __future__ import annotations
 
+import logging
 import sqlite3
-from datetime import datetime, timezone
+import time
 from typing import Any, cast
 
 import httpx
@@ -26,9 +31,20 @@ from pydantic import BaseModel
 from frigate_sidecar.config import Settings
 from frigate_sidecar.db import open_sidecar
 from frigate_sidecar.faces import enrich
-from frigate_sidecar.frigate_api import get_async_client
+from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient, get_async_client
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["enrich"])
+
+# Sightings shown per cluster. Eight is enough to judge coherence at a glance
+# and keeps the phone strip a single comfortable swipe.
+_SIGHTINGS_PER_CLUSTER = 8
+
+# Centroid cosine distance under which two clusters get a "looks like" merge
+# hint. Deliberately looser than face_enrich.cluster_threshold (0.55): the
+# hint is a human-confirmed suggestion, not an automatic join.
+_SUGGEST_THRESHOLD = 0.6
 
 
 def _settings(request: Request) -> Settings:
@@ -40,22 +56,76 @@ def _templates(request: Request) -> Jinja2Templates:
 
 
 def _clusters(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Clusters (named first, then by recency) with their best sightings."""
     rows = [
         dict(r)
         for r in conn.execute(
-            "SELECT c.cluster_id, c.name, c.observation_count, c.created_at, c.last_seen_at, "
-            "       (SELECT fe.event_id FROM face_enrichments fe "
-            "         WHERE fe.cluster_id = c.cluster_id "
-            "         ORDER BY fe.best_quality DESC LIMIT 1) AS sample_event_id "
-            "  FROM face_clusters c ORDER BY (c.name IS NULL), c.last_seen_at DESC"
+            "SELECT cluster_id, name, observation_count, created_at, last_seen_at "
+            "  FROM face_clusters ORDER BY (name IS NULL), last_seen_at DESC"
         )
     ]
     for r in rows:
-        ts = float(r.get("last_seen_at") or 0.0)
-        r["last_seen"] = datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
-            "%Y-%m-%d %H:%M UTC"
-        )
+        r["sightings"] = [
+            dict(s)
+            for s in conn.execute(
+                "SELECT event_id, event_start_ts, distance, best_quality "
+                "  FROM face_enrichments WHERE cluster_id = ? "
+                " ORDER BY best_quality DESC LIMIT ?",
+                (r["cluster_id"], _SIGHTINGS_PER_CLUSTER),
+            )
+        ]
+        r["sample_event_id"] = r["sightings"][0]["event_id"] if r["sightings"] else None
     return rows
+
+
+def _similar_pairs(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
+    """cluster_id -> its closest other cluster under the suggest threshold.
+
+    O(n²) over centroids is fine at this table's size (tens of clusters); the
+    UI wants at most one hint per cluster, so keep only the best partner.
+    """
+    cents = [
+        (
+            int(r["cluster_id"]),
+            r["name"],
+            enrich.l2_normalize(enrich.unpack_embedding(r["centroid"])),
+        )
+        for r in conn.execute("SELECT cluster_id, name, centroid FROM face_clusters")
+    ]
+    best: dict[int, dict[str, Any]] = {}
+    for i, (cid_a, _name_a, cent_a) in enumerate(cents):
+        for cid_b, name_b, cent_b in cents[i + 1 :]:
+            dist = enrich.cosine_distance(cent_a, cent_b)
+            if dist > _SUGGEST_THRESHOLD:
+                continue
+            for cid, other_id, other_name in ((cid_a, cid_b, name_b), (cid_b, cid_a, _name_a)):
+                cur = best.get(cid)
+                if cur is None or dist < cur["distance"]:
+                    best[cid] = {
+                        "cluster_id": other_id,
+                        "name": other_name,
+                        "distance": round(dist, 3),
+                    }
+    return best
+
+
+def _stats(conn: sqlite3.Connection, request: Request) -> dict[str, Any]:
+    """Last-7-days pipeline counts + worker liveness, for the toolbar."""
+    since = time.time() - 7 * 86400
+    counts = {
+        str(r["status"]): int(r["n"])
+        for r in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM face_enrichments "
+            " WHERE event_start_ts >= ? GROUP BY status",
+            (since,),
+        )
+    }
+    last_cycle = getattr(request.app.state, "face_enrich_last_cycle", None)
+    return {
+        "counts": counts,
+        "processed": sum(counts.values()),
+        "cycle_age_s": round(time.time() - last_cycle, 1) if last_cycle else None,
+    }
 
 
 @router.get("/enrich/clusters", response_class=HTMLResponse)
@@ -64,6 +134,8 @@ def clusters_view(request: Request) -> Any:
     conn = open_sidecar(s.sidecar.db_path)
     try:
         clusters = _clusters(conn)
+        similar = _similar_pairs(conn)
+        stats = _stats(conn, request)
     finally:
         conn.close()
     return _templates(request).TemplateResponse(
@@ -71,6 +143,9 @@ def clusters_view(request: Request) -> Any:
         "enrich.html",
         {
             "clusters": clusters,
+            "similar": similar,
+            "stats": stats,
+            "known_names": sorted({c["name"] for c in clusters if c["name"]}),
             "enabled": s.face_enrich.enabled,
             "cameras": s.face_enrich.cameras,
         },
@@ -82,14 +157,20 @@ def clusters_json(request: Request) -> JSONResponse:
     s = _settings(request)
     conn = open_sidecar(s.sidecar.db_path)
     try:
-        return JSONResponse({"clusters": _clusters(conn)})
+        return JSONResponse(
+            {
+                "clusters": _clusters(conn),
+                "similar": {str(k): v for k, v in _similar_pairs(conn).items()},
+                "stats": _stats(conn, request),
+            }
+        )
     finally:
         conn.close()
 
 
 @router.get("/enrich/thumb/{event_id}")
 async def cluster_thumb(event_id: str, request: Request) -> Response:
-    """Proxy Frigate's event thumbnail for a cluster's best sample event."""
+    """Proxy Frigate's event thumbnail for an enriched event."""
     s = _settings(request)
     conn = open_sidecar(s.sidecar.db_path)
     try:
@@ -110,7 +191,43 @@ async def cluster_thumb(event_id: str, request: Request) -> Response:
         raise HTTPException(status_code=502, detail="frigate unreachable") from exc
     if r.status_code != 200:
         raise HTTPException(status_code=404, detail="no thumbnail")
-    return Response(content=r.content, media_type="image/jpeg")
+    return Response(
+        content=r.content,
+        media_type="image/jpeg",
+        # An event's thumbnail never changes once written.
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
+
+
+def _retro_label(
+    conn: sqlite3.Connection, settings: Settings, cluster_id: int, name: str
+) -> int:
+    """Write `name` as the sub_label onto the cluster's past events.
+
+    Best-effort per event: an event that has aged out of Frigate's retention
+    404s and is skipped — that must never fail the rename itself. Returns how
+    many events were actually labeled.
+    """
+    event_ids = [
+        str(r["event_id"])
+        for r in conn.execute(
+            "SELECT event_id FROM face_enrichments WHERE cluster_id = ?", (cluster_id,)
+        )
+    ]
+    labeled = 0
+    with FrigateClient(settings.frigate.base_url) as fc:
+        for eid in event_ids:
+            try:
+                fc.set_sub_label(eid, name)
+            except FrigateAPIError as exc:
+                logger.info("enrich: retro-label skipped for %s: %s", eid, exc)
+                continue
+            conn.execute(
+                "UPDATE face_enrichments SET sub_label_written = ? WHERE event_id = ?",
+                (name, eid),
+            )
+            labeled += 1
+    return labeled
 
 
 class NamePayload(BaseModel):
@@ -131,8 +248,9 @@ def cluster_name(cluster_id: int, payload: NamePayload, request: Request) -> JSO
         if not cur.rowcount:
             raise HTTPException(status_code=404, detail="cluster not found")
         enrich.rebuild_centroid(conn, cluster_id)
+        relabeled = _retro_label(conn, s, cluster_id, name)
         conn.commit()
-        return JSONResponse({"ok": True})
+        return JSONResponse({"ok": True, "relabeled": relabeled})
     finally:
         conn.close()
 
@@ -180,5 +298,43 @@ def cluster_delete(cluster_id: int, request: Request) -> JSONResponse:
         if not cur.rowcount:
             raise HTTPException(status_code=404, detail="cluster not found")
         return JSONResponse({"ok": True})
+    finally:
+        conn.close()
+
+
+@router.post("/enrich/events/{event_id}/remove")
+def sighting_remove(event_id: str, request: Request) -> JSONResponse:
+    """Evict one sighting from its cluster — the repair tool for a bad join.
+
+    The enrichment row keeps its status (it mirrors Frigate's event history)
+    but loses its cluster assignment and embedding, so the centroid rebuild
+    forgets it. A cluster that just lost its last sighting is deleted rather
+    than left as an empty shell with a stale centroid.
+    """
+    s = _settings(request)
+    conn = open_sidecar(s.sidecar.db_path)
+    try:
+        row = conn.execute(
+            "SELECT cluster_id FROM face_enrichments WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if row is None or row["cluster_id"] is None:
+            raise HTTPException(status_code=404, detail="sighting not in a cluster")
+        cluster_id = int(row["cluster_id"])
+        conn.execute(
+            "UPDATE face_enrichments SET cluster_id = NULL, embedding = NULL "
+            "WHERE event_id = ?",
+            (event_id,),
+        )
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS n FROM face_enrichments WHERE cluster_id = ?", (cluster_id,)
+        ).fetchone()
+        cluster_deleted = False
+        if int(remaining["n"]) == 0:
+            conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (cluster_id,))
+            cluster_deleted = True
+        else:
+            enrich.rebuild_centroid(conn, cluster_id)
+        conn.commit()
+        return JSONResponse({"ok": True, "cluster_deleted": cluster_deleted})
     finally:
         conn.close()
