@@ -22,6 +22,7 @@ from frigate_sidecar.auth import FrigateAuthMiddleware
 from frigate_sidecar.config import Settings, load_settings
 from frigate_sidecar.db import FrigateDBMissingError
 from frigate_sidecar.frigate_api import FrigateClient
+from frigate_sidecar.guide import load_guide
 from frigate_sidecar.push import delivery, delivery_wire
 from frigate_sidecar.push import store as push_store
 from frigate_sidecar.push.engine import PushEngine
@@ -34,6 +35,7 @@ from frigate_sidecar.routes import enrich as enrich_routes
 from frigate_sidecar.routes import face_captures as face_capture_routes
 from frigate_sidecar.routes import faces as faces_routes
 from frigate_sidecar.routes import fps_budget as fps_budget_routes
+from frigate_sidecar.routes import guide as guide_routes
 from frigate_sidecar.routes import health as health_routes
 from frigate_sidecar.routes import login_page as login_page_routes
 from frigate_sidecar.routes import map_page as map_page_routes
@@ -463,6 +465,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
     )
     app.state.plus_enabled = False
+    # User guide topics (guide_content/*.md): loaded in the factory, not the
+    # lifespan, so a malformed topic fails `create_app()` — and tests — fast.
+    app.state.guide = load_guide()
     # /healthz uses this as the grace window before a never-completed scrub
     # cycle counts as stale.
     app.state.started_at = time.time()
@@ -510,6 +515,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(settings_page_routes.router)
     app.include_router(map_page_routes.router)
     app.include_router(login_page_routes.router)
+    app.include_router(guide_routes.router)
 
     # Everything registered so far is the sidecar's own surface and requires a
     # Frigate session; the proxy catch-all below must not (Frigate does its own

@@ -24,6 +24,7 @@ dependencies = [
     "httpx>=0.27,<1",
     "pillow>=10.4,<12",
     "paho-mqtt>=2.1,<3",
+    "markdown-it-py>=3,<5",
 ]
 
 [project.optional-dependencies]

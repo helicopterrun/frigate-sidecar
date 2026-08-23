@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% set active_page = 'guide' %}
+{% set summary = section_title %}
+{% block title %}{{ topic.meta.title }} · Guide · frigate-sidecar{% endblock %}
+
+{% block body %}
+<main class="guide-page" data-slug="{{ topic.slug }}">
+  <div class="faces-bar">
+    <a href="/guide" class="page-link">&larr; Guide</a>
+    <span class="mode">{{ section_title }}</span>
+    {% if topic.meta.routes %}
+    <a href="{{ topic.meta.routes[0] }}" class="page-link guide-open">
+      Open {{ topic.meta.routes[0] }} &rarr;</a>
+    {% endif %}
+  </div>
+
+  <article class="guide-body">
+    <h1>{{ topic.meta.title }}</h1>
+    {{ topic.html|safe }}
+  </article>
+
+  <nav class="guide-pager">
+    {% if prev_topic %}
+    <a href="/guide/{{ prev_topic.slug }}" class="page-link">&larr; {{ prev_topic.meta.title }}</a>
+    {% else %}<span></span>{% endif %}
+    {% if next_topic %}
+    <a href="/guide/{{ next_topic.slug }}" class="page-link">{{ next_topic.meta.title }} &rarr;</a>
+    {% endif %}
+  </nav>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/guide.js?v={{ asset_v }}" defer></script>
+{% endblock %}
