@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% set active_page = 'guide' %}
+{% set summary = topic_count ~ ' topic' ~ ('s' if topic_count != 1 else '') %}
+{% block title %}Guide · frigate-sidecar{% endblock %}
+
+{% block body %}
+<main class="guide-index">
+  <div class="faces-bar">
+    <span class="mode">User guide — sidecar &amp; Elsinore</span>
+    <input type="search" id="guide-filter" placeholder="filter topics…"
+           aria-label="Filter topics">
+  </div>
+
+  {% for slug, title, topics in sections %}
+  <section class="guide-section" data-section="{{ slug }}">
+    <h2>{{ title }}</h2>
+    <ul class="guide-toc">
+      {% for t in topics %}
+      <li data-title="{{ t.meta.title|lower }}">
+        <a href="/guide/{{ t.slug }}">{{ t.meta.title }}</a>
+        {% if t.walkthrough_steps %}<span class="badge guide-walk"
+          title="has a step-by-step walkthrough">walkthrough</span>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endfor %}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/guide.js?v={{ asset_v }}" defer></script>
+{% endblock %}
