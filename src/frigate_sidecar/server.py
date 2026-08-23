@@ -30,6 +30,7 @@ from frigate_sidecar.push.transport import LogTransport, PushTransport, RelayTra
 from frigate_sidecar.routes import analysis as analysis_routes
 from frigate_sidecar.routes import debug as debug_routes
 from frigate_sidecar.routes import devices as devices_routes
+from frigate_sidecar.routes import enrich as enrich_routes
 from frigate_sidecar.routes import face_captures as face_capture_routes
 from frigate_sidecar.routes import faces as faces_routes
 from frigate_sidecar.routes import fps_budget as fps_budget_routes
@@ -242,6 +243,32 @@ async def _activity_sweep_loop(app: FastAPI) -> None:
             logger.exception("push: activity sweep failed")
 
 
+async def _face_enrich_loop(app: FastAPI) -> None:
+    """Drive faces/enrich.py's run_cycle on a fixed cadence.
+
+    The cycle itself is sync (onnx inference, HTTP fetches, SQLite) and runs
+    via asyncio.to_thread, so a slow event never blocks the event loop; the
+    loop body is the same shape as `_activity_sweep_loop`. Sets
+    `app.state.face_enrich_last_cycle` for /healthz staleness.
+    """
+    from frigate_sidecar.faces import enrich
+
+    settings: Settings = app.state.settings
+    interval = settings.face_enrich.interval_s
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await asyncio.to_thread(enrich.run_cycle, settings)
+            app.state.face_enrich_last_cycle = time.time()
+        except asyncio.CancelledError:
+            raise
+        except enrich.EnrichUnavailable:
+            logger.exception("face_enrich: dependencies missing; stopping the worker")
+            return
+        except Exception:
+            logger.exception("face_enrich: cycle failed")
+
+
 async def _delivery_resound_sweep_loop(app: FastAPI) -> None:
     """The urgent-only re-sound timer (design doc §3): an `urgent` card
     still unhandled after `delivery_urgent_resound_s` gets exactly one more
@@ -371,10 +398,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         sweep_task = asyncio.create_task(_activity_sweep_loop(app))
         delivery_sweep_task = asyncio.create_task(_delivery_resound_sweep_loop(app))
 
+    enrich_task: asyncio.Task[None] | None = None
+    if settings.face_enrich.enabled:
+        from frigate_sidecar.faces import enrich as _enrich
+
+        try:
+            _enrich.check_available()
+        except _enrich.EnrichUnavailable:
+            # Loud at startup, not a silent every-15s failure loop.
+            logger.exception("face_enrich enabled but its dependencies are missing")
+        else:
+            enrich_task = asyncio.create_task(_face_enrich_loop(app))
+
     try:
         yield
     finally:
-        for pending in (task, probe_task, push_task, sweep_task, delivery_sweep_task):
+        for pending in (
+            task, probe_task, push_task, sweep_task, delivery_sweep_task, enrich_task
+        ):
             if pending is not None:
                 pending.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -457,6 +498,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(analysis_routes.router)
     app.include_router(faces_routes.router)
     app.include_router(face_capture_routes.router)
+    app.include_router(enrich_routes.router)
     app.include_router(toybox_routes.router)
     app.include_router(scrub_routes.router)
     app.include_router(push_routes.router)

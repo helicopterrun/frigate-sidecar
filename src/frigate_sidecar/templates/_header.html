@@ -4,7 +4,7 @@
    'score_histogram', 'fps_budget', 'placement', 'zone_hits', 'debug',
    'toybox'. #}
 {% set _active = active_page|default('') %}
-{% set _analysis_pages = ('motion', 'faces', 'face_captures', 'score_histogram', 'fps_budget', 'placement', 'zone_hits', 'replay') %}
+{% set _analysis_pages = ('motion', 'faces', 'face_captures', 'enrich', 'score_histogram', 'fps_budget', 'placement', 'zone_hits', 'replay') %}
 {# Inline icon sprite: line icons on currentColor, echoing the app's SF
    Symbols vocabulary (server.rack, film.stack, checklist, video, map). #}
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
@@ -28,6 +28,7 @@
         <a href="/motion" class="page-link{% if _active == 'motion' %} active{% endif %}">Motion</a>
         <a href="/faces" class="page-link{% if _active == 'faces' %} active{% endif %}">Faces</a>
         <a href="/faces/captures" class="page-link{% if _active == 'face_captures' %} active{% endif %}">Face captures</a>
+        <a href="/enrich/clusters" class="page-link{% if _active == 'enrich' %} active{% endif %}">Identities</a>
         <a href="/score-histogram" class="page-link{% if _active == 'score_histogram' %} active{% endif %}">Scores</a>
         <a href="/fps-budget" class="page-link{% if _active == 'fps_budget' %} active{% endif %}">FPS budget</a>
         <a href="/placement" class="page-link{% if _active == 'placement' %} active{% endif %}">Placement</a>

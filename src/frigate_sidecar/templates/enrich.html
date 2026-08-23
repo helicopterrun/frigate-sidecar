@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% set active_page = 'enrich' %}
+{% set _n = clusters|length %}
+{% set summary = _n ~ ' cluster' ~ ('s' if _n != 1 else '') %}
+{% block title %}Identity clusters · frigate-sidecar{% endblock %}
+
+{% block body %}
+<main>
+  <div class="faces-bar">
+    <span class="mode">
+      {{ cameras|join(', ') or 'no cameras' }} · <b>{{ 'ON' if enabled else 'OFF' }}</b>
+    </span>
+    <a href="/faces/captures" class="page-link">Face captures →</a>
+  </div>
+
+  {% if not clusters %}
+    <p class="empty">
+      No identity clusters yet.
+      {% if not enabled %}<br><b>face_enrich.enabled is false.</b>{% endif %}
+    </p>
+  {% endif %}
+
+  {% for c in clusters %}
+  <section class="capture-visit" data-cluster="{{ c.cluster_id }}">
+    <header>
+      {% if c.name %}<b>{{ c.name }}</b>{% else %}<b>unknown #{{ c.cluster_id }}</b>{% endif %}
+      · {{ c.observation_count }} sighting{{ 's' if c.observation_count != 1 else '' }}
+      · last seen <time>{{ c.last_seen }}</time>
+      <span class="actions">
+        <input type="text" class="cluster-name" placeholder="name…"
+               value="{{ c.name or '' }}" data-id="{{ c.cluster_id }}">
+        <button type="button" class="name-cluster" data-id="{{ c.cluster_id }}">
+          {{ 'rename' if c.name else 'name' }}</button>
+        <button type="button" class="merge-cluster" data-id="{{ c.cluster_id }}">merge into…</button>
+        <button type="button" class="delete-cluster" data-id="{{ c.cluster_id }}">delete</button>
+      </span>
+    </header>
+    {% if c.sample_event_id %}
+    <div class="capture-strip">
+      <figure class="capture-card">
+        <img loading="lazy" src="/enrich/thumb/{{ c.sample_event_id }}"
+             alt="best sample for cluster {{ c.cluster_id }}">
+      </figure>
+    </div>
+    {% endif %}
+  </section>
+  {% endfor %}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/enrich.js" defer></script>
+{% endblock %}

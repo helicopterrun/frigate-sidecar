@@ -375,6 +375,49 @@ CREATE INDEX IF NOT EXISTS idx_face_capture_review
     ON face_captures(review, trigger_start_ts);
 CREATE INDEX IF NOT EXISTS idx_face_capture_visit ON face_captures(visit_key);
 CREATE INDEX IF NOT EXISTS idx_face_capture_age   ON face_captures(trigger_start_ts);
+
+-- Face enrichment (config `face_enrich`). One identity cluster per row:
+-- `centroid` is the running mean of member embeddings (512 little-endian f32,
+-- L2-normalized — faces/enrich.py pack_embedding). `name IS NOT NULL` makes it
+-- a KNOWN person: matches write the event's sub_label back to Frigate. Unnamed
+-- clusters accumulate recurring strangers and are reaped after
+-- face_enrich.cluster_ttl_days without a sighting; named clusters never expire.
+CREATE TABLE IF NOT EXISTS face_clusters (
+    cluster_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    name              TEXT,
+    centroid          BLOB NOT NULL,
+    observation_count INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT NOT NULL,
+    last_seen_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_face_cluster_seen ON face_clusters(last_seen_at);
+
+-- One row per Frigate person event the enrichment worker has settled or is
+-- retrying — this table IS the queue state: enrich.find_candidates LEFT JOINs
+-- it against Frigate's event table over a lookback window (crosscam's
+-- find_candidates pattern), so an absent row means "pending", `status='error'`
+-- retries up to face_enrich.max_attempts, and anything else is terminal.
+-- `embedding` keeps the event's aggregated embedding so naming or merging a
+-- cluster can rebuild an exact centroid instead of trusting the running mean.
+-- Statuses: enriched | no_faces | no_frames | error.
+CREATE TABLE IF NOT EXISTS face_enrichments (
+    event_id          TEXT PRIMARY KEY,
+    camera            TEXT NOT NULL,
+    event_start_ts    REAL NOT NULL,
+    cluster_id        INTEGER,
+    distance          REAL,
+    faces_found       INTEGER NOT NULL DEFAULT 0,
+    faces_used        INTEGER NOT NULL DEFAULT 0,
+    best_quality      REAL,
+    embedding         BLOB,
+    sub_label_written TEXT,
+    status            TEXT NOT NULL,
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    detail            TEXT,
+    processed_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_face_enrich_cluster ON face_enrichments(cluster_id);
+CREATE INDEX IF NOT EXISTS idx_face_enrich_age     ON face_enrichments(event_start_ts);
 """
 
 # Columns added to `push_devices` / `push_handles` after those tables first

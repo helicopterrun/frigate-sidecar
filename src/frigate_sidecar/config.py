@@ -228,6 +228,86 @@ class FaceCaptureSection(BaseModel):
     http_timeout_s: float = 15.0
 
 
+class FaceEnrichSection(BaseModel):
+    """Face enrichment (B3): embeddings, temporal aggregation, clustering.
+
+    For each ended `person` event on an enrolled camera, sample full-res
+    frames from the recording (the same recordings/{ts}/snapshot.jpg endpoint
+    `face_capture` uses), detect faces + landmarks, quality-score them
+    (sharpness x size x frontality), embed the best N with ArcFace, aggregate
+    into one embedding per event, then either match a NAMED cluster (-> write
+    the event's sub_label back to Frigate) or fold it into an unnamed cluster.
+    Unnamed clusters accumulate recurring strangers and are promotable to
+    known people by naming them at /enrich/clusters.
+
+    Needs the `[enrich]` extra (insightface + onnxruntime + cv2/numpy).
+    Inference is CPU-only by design: the OpenVINO/iGPU path produced a
+    multi-day embeddings OOM cycle on this host and is not to be revisited.
+
+    Like `face_capture`, work is found by a lookback query over Frigate's
+    events table rather than an MQTT hook: recordings commit at segment END
+    (measured lag 5.4-9.4s), so the work is inherently deferred and the
+    lookback makes it self-healing across restarts with idempotency coming
+    from the `face_enrichments` table, not from cursor state.
+    """
+
+    enabled: bool = False
+
+    # Cameras whose person events get enriched. gate-face is the designated
+    # identification camera; empty list = feature does nothing even if enabled.
+    cameras: list[str] = Field(default_factory=list)
+
+    # Worker cadence. Enrichment is offline — seconds of latency is fine.
+    interval_s: float = 15.0
+
+    # Don't process an event until this long after its END: the last frames of
+    # the event live in a segment that commits ~5-10s after the fact
+    # (face_capture.capture_delay_s has the full measurement story).
+    process_delay_s: float = 45.0
+
+    # How far back each cycle reconsiders ended events. Self-healing overlap;
+    # idempotency comes from face_enrichments, not from this window.
+    lookback_s: float = 3600.0
+
+    # Frame sampling across the event window: at most `max_frames`, at least
+    # `min_sample_gap_s` apart. 40 frames of a long loiter is plenty; a 5s
+    # walk-through yields ~5.
+    max_frames: int = 40
+    min_sample_gap_s: float = 1.0
+
+    # Quality gates and the best-N cut feeding aggregation.
+    best_n: int = 5
+    # Face box area in px on the 2560x1440 main-stream frame. A capture-camera
+    # face at identification distance measures well above this; sidewalk
+    # passers-by mostly fall below it.
+    min_face_area_px: int = 4000
+    min_quality: float = 0.15
+
+    # Cosine DISTANCE thresholds (1 - cosine similarity) on L2-normalized
+    # ArcFace embeddings. Named clusters get the tighter bar: a wrong
+    # sub_label is worse than a missed one.
+    match_threshold: float = 0.45
+    cluster_threshold: float = 0.55
+
+    # Unnamed clusters not seen for this long are reaped (with their stored
+    # embeddings). Named clusters never expire.
+    cluster_ttl_days: int = 60
+
+    # insightface model-pack cache (buffalo_l, ~300 MB on first download).
+    # Must be writable by the service user under ProtectSystem=strict.
+    model_dir: Path = Path("/opt/frigate-sidecar/data/models")
+
+    # Bounds one cycle so a first run against a long lookback can't hog the
+    # shared 4-core host; the lookback picks up the rest next cycle.
+    max_events_per_cycle: int = 10
+
+    # Transport/inference failures are retried on later cycles up to this cap;
+    # a processed event (even "no faces found") is terminal.
+    max_attempts: int = 3
+
+    http_timeout_s: float = 15.0
+
+
 class WatchdogSection(BaseModel):
     """External health watchdog for the Frigate container.
 
@@ -688,6 +768,7 @@ class Settings(BaseSettings):
     sidecar: SidecarSection = Field(default_factory=SidecarSection)
     face: FaceSection = Field(default_factory=FaceSection)
     face_capture: FaceCaptureSection = Field(default_factory=FaceCaptureSection)
+    face_enrich: FaceEnrichSection = Field(default_factory=FaceEnrichSection)
     watchdog: WatchdogSection = Field(default_factory=WatchdogSection)
     scrub: ScrubSection = Field(default_factory=ScrubSection)
     proxy: ProxySection = Field(default_factory=ProxySection)

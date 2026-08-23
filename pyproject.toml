@@ -37,6 +37,14 @@ faces = [
     "opencv-python-headless>=4.10",
     "numpy>=1.26",
 ]
+enrich = [
+    # faces.enrich: SCRFD detection + ArcFace embeddings (buffalo_l pack),
+    # CPU-only by design — see FaceEnrichSection for the OpenVINO/iGPU story.
+    "insightface>=0.7",
+    "onnxruntime>=1.17",
+    "opencv-python-headless>=4.10",
+    "numpy>=1.26",
+]
 http2 = [
     # Lets push.transport.RelayTransport hold one long-lived HTTP/2
     # connection to the relay. Optional: without it the client falls back to

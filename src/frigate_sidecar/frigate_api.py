@@ -143,6 +143,24 @@ class FrigateClient:
             raise FrigateAPIError(f"GET {url}: HTTP {r.status_code}")
         return (r.content, 200)
 
+    def set_sub_label(self, event_id: str, sub_label: str, *, score: float | None = None) -> None:
+        """POST /api/events/{id}/sub_label — write an event's sub_label.
+
+        The sidecar is the sole sub_label author on enrolled cameras (Frigate's
+        own face recognition is disabled there), so there is no writer to race.
+        Frigate caps sub_label at 100 chars; `subLabelScore` is optional 0..1.
+        """
+        url = f"{self.base_url}/api/events/{quote(event_id, safe='')}/sub_label"
+        body: dict[str, Any] = {"subLabel": sub_label[:100]}
+        if score is not None:
+            body["subLabelScore"] = round(max(0.0, min(1.0, score)), 3)
+        try:
+            r = self._client.post(url, json=body)
+        except httpx.HTTPError as exc:
+            raise FrigateAPIError(f"POST {url}: {exc}") from exc
+        if r.status_code not in (200, 201):
+            raise FrigateAPIError(f"POST {url}: HTTP {r.status_code}")
+
     def get_faces(self) -> dict[str, list[str]]:
         """Return Frigate's registered faces: {name: [filenames], 'train': [...]}.
 
