@@ -25,7 +25,7 @@
     <h2 class="section-h">Zone hits (last {{ result.days }} days)</h2>
     {% if result.hits %}
     <table class="motion-table">
-      <thead><tr><th>camera</th><th>zone</th><th>label</th><th>events</th><th>FP in triage</th></tr></thead>
+      <thead><tr><th>camera</th><th>zone</th><th>label</th><th>events</th><th>false alarms in triage</th></tr></thead>
       <tbody>
       {% for h in result.hits %}
         <tr>

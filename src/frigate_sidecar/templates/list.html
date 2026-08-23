@@ -7,13 +7,13 @@
 <main>
   {% set untriaged = events | selectattr('triage_label', 'none') | list %}
   <div class="triage-intro">
-    <p class="page-intro">Label detections as <b>TP</b> (real) or <b>FP</b>
-      (false alarm) — labels feed Frigate+ training and
+    <p class="page-intro">Label detections as <b>real</b> or a
+      <b>false alarm</b> — labels feed Frigate+ training and
       <a href="/guide/tuning-scores">threshold tuning</a>.</p>
     <div class="triage-progress">
-      <span class="badge tp">{{ counts.get('tp', 0) }} TP</span>
-      <span class="badge fp">{{ counts.get('fp', 0) }} FP</span>
-      <span class="badge skip">{{ counts.get('skip', 0) }} SKIP</span>
+      <span class="badge tp">{{ counts.get('tp', 0) }} real</span>
+      <span class="badge fp">{{ counts.get('fp', 0) }} false alarm</span>
+      <span class="badge skip">{{ counts.get('skip', 0) }} skip</span>
       <span class="help">· {{ events|length }} matching, {{ untriaged|length }} untriaged</span>
       {% if untriaged %}
       <a class="btn-primary triage-start"
@@ -45,7 +45,7 @@
     <label>triage
       <select name="triage">
         {% for v in ['any', 'untriaged', 'triaged', 'tp', 'fp', 'skip'] %}
-          <option value="{{ v }}"{% if v == filters.triage %} selected{% endif %}>{{ v }}</option>
+          <option value="{{ v }}"{% if v == filters.triage %} selected{% endif %}>{{ triage_name(v) or v }}</option>
         {% endfor %}
       </select>
     </label>
@@ -77,7 +77,7 @@
         <div class="row">
           <span class="cam">{{ ev.camera }}</span>
           {% if ev.triage_label %}
-            <span class="badge {{ ev.triage_label }}">{{ ev.triage_label }}</span>
+            <span class="badge {{ ev.triage_label }}">{{ triage_name(ev.triage_label) }}</span>
           {% else %}
             <span class="badge untriaged">untriaged</span>
           {% endif %}

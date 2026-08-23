@@ -90,7 +90,7 @@
       <div class="panel">
         <h2>Triage
           {% if event.triage_label %}
-            <span class="badge {{ event.triage_label }}">{{ event.triage_label }}</span>
+            <span class="badge {{ event.triage_label }}">{{ triage_name(event.triage_label) }}</span>
           {% else %}
             <span class="badge untriaged">untriaged</span>
           {% endif %}
@@ -101,9 +101,9 @@
           {% endif %}
         </h2>
         <div class="label-buttons">
-          <button class="btn-tp {% if event.triage_label == 'tp' %}active{% endif %}" data-label="tp">TP (t)</button>
-          <button class="btn-fp {% if event.triage_label == 'fp' %}active{% endif %}" data-label="fp">FP (f)</button>
-          <button class="btn-skip {% if event.triage_label == 'skip' %}active{% endif %}" data-label="skip">skip (s)</button>
+          <button class="btn-tp {% if event.triage_label == 'tp' %}active{% endif %}" data-label="tp">Real (t)</button>
+          <button class="btn-fp {% if event.triage_label == 'fp' %}active{% endif %}" data-label="fp">False alarm (f)</button>
+          <button class="btn-skip {% if event.triage_label == 'skip' %}active{% endif %}" data-label="skip">Skip (s)</button>
         </div>
         <div class="panel-gap">
           <button class="btn-clear btn-clear-full" data-clear>clear (c)</button>
