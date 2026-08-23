@@ -27,9 +27,14 @@ Right now this sidecar has been up **{{stat:uptime}}** and Frigate has logged
 | Tuning | [Scores](/score-histogram), [Motion](/motion), [FPS budget](/fps-budget), [Zone hits](/zone-hits), [Placement](/placement) |
 | Phone | [Settings](/settings) for push devices and zone routing, [Replay](/replay) for testing alerts |
 
-Every topic page in this guide has an **Open** button in its header that
-jumps straight to the live page it describes. Topics marked *walkthrough*
-include a tickable checklist — your progress is saved on this device.
+## How to use this guide
+
+- The **sidebar** (desktop) lists every chapter; the **search box** searches
+  the full text of the guide, not just titles.
+- Every topic has an **Open** link in its breadcrumb that jumps straight to
+  the live page it describes.
+- Topics marked *walkthrough* include a tickable checklist — your progress
+  is saved on this device.
 
 Start with [First run](/guide/first-run) if you're setting up a new install,
 or jump to the topic for the page you're curious about.

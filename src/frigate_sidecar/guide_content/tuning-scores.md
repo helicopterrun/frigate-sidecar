@@ -14,6 +14,8 @@ The logic: false positives cluster at low scores, real detections at high
 scores. Labeling a batch of events TP/FP shows you where the two
 populations separate — that's your threshold.
 
+## Walkthrough: tune a threshold
+
 ```walkthrough
 - Pick the camera + label that's producing junk alerts
 - Open Triage filtered to that camera/label and label 30-50 events TP/FP
@@ -23,5 +25,10 @@ populations separate — that's your threshold.
 - Restart Frigate and re-check the feed over the next day or two
 ```
 
+## Keeping it tuned
+
 Re-run the loop seasonally — foliage, light, and camera changes shift score
-distributions over time.
+distributions over time. If a camera's histogram shows no separation at all,
+the problem is usually upstream: masking and placement
+([Motion & zones](/guide/motion-and-zones),
+[Camera health](/guide/camera-health)) before thresholds.

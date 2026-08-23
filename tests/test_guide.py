@@ -177,6 +177,37 @@ def test_stats_json_covers_all_keys(client: TestClient) -> None:
     assert stats["clusters_total"] == "0"
 
 
+def test_search_json_indexes_every_topic(
+    client: TestClient, registry: GuideRegistry
+) -> None:
+    resp = client.get("/guide/search.json")
+    assert resp.status_code == 200
+    entries = {t["slug"]: t for t in resp.json()["topics"]}
+    assert set(entries) == set(registry.topics)
+    for entry in entries.values():
+        assert entry["text"], f"{entry['slug']}: empty search text"
+        assert entry["number"].count(".") == 1
+
+
+def test_topic_page_has_anchors_and_onpage_toc(
+    client: TestClient, registry: GuideRegistry
+) -> None:
+    topic = next(t for t in registry.topics.values() if len(t.headings) >= 2)
+    resp = client.get(f"/guide/{topic.slug}")
+    assert "On this page" in resp.text
+    for anchor, _text in topic.headings:
+        assert f'id="{anchor}"' in resp.text
+        assert f'href="#{anchor}"' in resp.text
+
+
+def test_sidebar_marks_current_topic(client: TestClient, registry: GuideRegistry) -> None:
+    slug = next(iter(registry.topics))
+    resp = client.get(f"/guide/{slug}")
+    assert 'class="current"' in resp.text
+    numbers = registry.numbers()
+    assert numbers[slug] in resp.text
+
+
 def test_walkthrough_renders_checklist(client: TestClient, registry: GuideRegistry) -> None:
     walk_topics = [t for t in registry.topics.values() if t.walkthrough_steps]
     assert walk_topics, "expected at least one walkthrough in the guide"
@@ -232,6 +263,19 @@ def test_loader_renders_stats_and_walkthroughs(tmp_path: Path) -> None:
     assert topic.walkthrough_steps == 1
     assert "step &lt;two&gt;" in topic.html
     assert topic.internal_links == {"/triage"}
+
+
+def test_loader_extracts_headings_and_search_text(tmp_path: Path) -> None:
+    _write_topic(
+        tmp_path,
+        "ok.md",
+        "---\ntitle: X\nsection: sidecar\norder: 1\n---\n"
+        "intro words\n\n## Using it\n\nbody\n\n## Using it\n\nagain\n",
+    )
+    topic = load_guide(tmp_path).topics["ok"]
+    assert topic.headings == (("using-it", "Using it"), ("using-it-1", "Using it"))
+    assert 'id="using-it"' in topic.html and 'id="using-it-1"' in topic.html
+    assert "intro words" in topic.search_text and "<" not in topic.search_text
 
 
 def test_neighbors_follow_section_order(tmp_path: Path) -> None:

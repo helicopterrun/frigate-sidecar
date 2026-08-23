@@ -10,7 +10,7 @@ cameras, aim them, draw the secure area, and optionally trace over an
 uploaded floorplan image. A calibrated map is what powers spatially-aware
 features like approach direction in push notifications.
 
-## What you can do
+## Using it
 
 - **Place & aim** — drag a camera onto the canvas, rotate its field-of-view
   wedge to match reality. Lens presets prefill the horizontal FOV.
@@ -19,6 +19,8 @@ features like approach direction in push notifications.
   point correspondences: mark a spot in the camera image and the same spot
   on the map, a few times, and let auto-tune solve the rest.
 - **Secure area** — draw the boundary that counts as "on the property".
+
+## Walkthrough: calibrate a camera
 
 ```walkthrough
 - Open the Map page and add your camera if it isn't placed yet
@@ -29,5 +31,9 @@ features like approach direction in push notifications.
 - Save, then verify the camera's rig facts on the Settings page
 ```
 
+## If it goes wrong
+
+A solve that lands the camera somewhere absurd almost always means one
+landmark pair is mismatched — delete the outlier pair and re-solve.
 Calibration state per camera is summarized on [Settings](/settings), which
 deep-links back into the map's landmark editor.

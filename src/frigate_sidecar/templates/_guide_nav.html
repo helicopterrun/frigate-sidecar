@@ -1,0 +1,24 @@
+{# Persistent guide sidebar: search + numbered chapter tree. Included by
+   guide_index.html and guide_topic.html; expects `sections`, `numbers`,
+   `current_slug` in context. Hidden under 720px (the index page is the
+   phone's navigation surface). #}
+<aside class="guide-side">
+  <div class="guide-search-wrap">
+    <input type="search" class="guide-search" placeholder="Search the guide…"
+           aria-label="Search the guide" autocomplete="off">
+    <div class="guide-results" hidden></div>
+  </div>
+  <nav class="guide-tree" aria-label="Guide contents">
+    {% for slug, title, topics in sections %}
+    <div class="guide-tree-sec"><span class="num">{{ loop.index }}.</span> {{ title }}</div>
+    <ul>
+      {% for t in topics %}
+      <li{% if t.slug == current_slug %} class="current"{% endif %}>
+        <a href="/guide/{{ t.slug }}">
+          <span class="num">{{ numbers[t.slug] }}</span> {{ t.meta.title }}</a>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endfor %}
+  </nav>
+</aside>
