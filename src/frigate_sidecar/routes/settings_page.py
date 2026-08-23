@@ -87,6 +87,82 @@ def _service_rows(settings: Any) -> list[dict[str, str]]:
     ]
 
 
+#: Shared display vocabulary (mirrors zones.js / the app).
+_PLACES = ("street", "yard", "doors", "private", "off_limits")
+_PLACE_LABELS = {
+    "street": "Public", "yard": "Semi-private", "doors": "Entry / exit",
+    "private": "Private", "off_limits": "Restricted",
+}
+_LEVEL_LABELS = {"log": "Log", "quiet": "Glance", "notify": "Notify", "urgent": "Alarm"}
+_SUBJECT_LABELS = {
+    "stranger": "Unknown person", "known": "Known person",
+    "animal": "Animal", "thing": "Vehicle / thing",
+}
+
+
+def _ladder_matrix() -> dict[str, Any]:
+    """The live attention-ladder table for display: subject rows x place
+    columns -> level chips, plus any per-zone overrides in effect."""
+    from frigate_sidecar.push import ladder_policy as policy
+
+    rows = []
+    for subject, cells in policy.TABLE.items():
+        rows.append(
+            {
+                "subject": _SUBJECT_LABELS.get(subject, subject),
+                "cells": [
+                    {"level": cells.get(p, "log"), "label": _LEVEL_LABELS[cells.get(p, "log")]}
+                    for p in _PLACES
+                ],
+            }
+        )
+    overrides = [
+        {"zone": zone, "subject": _SUBJECT_LABELS.get(subj, subj), "label": _LEVEL_LABELS[lvl]}
+        for zone, per_subject in policy.ZONE_OVERRIDES.items()
+        for subj, lvl in per_subject.items()
+    ]
+    return {
+        "places": [_PLACE_LABELS[p] for p in _PLACES],
+        "rows": rows,
+        "overrides": overrides,
+    }
+
+
+def _notification_examples() -> list[dict[str, str]]:
+    """Rendered example notifications, produced by the real copy composer
+    (`delivery_wire._copy`) and the real ladder — so what's shown here is
+    exactly what the phone would say for these situations."""
+    from frigate_sidecar.push import ladder
+    from frigate_sidecar.push.delivery_wire import _copy, _glyph_for
+
+    scenarios = [
+        # (subject, label, camera, zone, place, elapsed_s, identity, story)
+        ("stranger", "person", "doorbell", "front_door", "doors", 40, "", ""),
+        ("known", "person", "gate-face", "walkway", "doors", 0, "Sam", ""),
+        ("animal", "dog", "alley-wide", "back_yard", "yard", 130, "", ""),
+        ("thing", "car", "street", "driveway", "yard", 0, "", ""),
+    ]
+    emoji = {"person": "🧍", "dog": "🐕", "car": "🚗", "package": "📦"}
+    out = []
+    for subject, label, camera, zone, place, elapsed, identity, story in scenarios:
+        primary, secondary = _copy(
+            subject, label, camera, zone, elapsed, identity=identity, story=story
+        )
+        level, _ = ladder.base_level(subject, place, zone)
+        out.append(
+            {
+                "glyph": _glyph_for(subject, label),
+                "emoji": emoji.get(label, "〰️"),
+                "primary": primary,
+                "secondary": secondary,
+                "level": level,
+                "level_label": _LEVEL_LABELS[level],
+                "situation": f"{_SUBJECT_LABELS[subject]} · {_PLACE_LABELS[place]}",
+            }
+        )
+    return out
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_view(request: Request) -> Any:
     settings = request.app.state.settings
@@ -107,6 +183,8 @@ async def settings_view(request: Request) -> Any:
             "face_auto_promote": settings.face.auto_promote,
             "face_quality_threshold": settings.face.quality_threshold,
             "service_rows": _service_rows(settings),
+            "ladder": _ladder_matrix(),
+            "notif_examples": _notification_examples(),
             "version": __version__,
             "capabilities_json": json.dumps(caps, indent=2, sort_keys=True),
             "counts": {},

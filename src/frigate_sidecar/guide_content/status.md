@@ -17,6 +17,8 @@ The page refreshes itself every few seconds and shows:
   worker that stops completing cycles turns red even if the process is alive.
 - **Scrub generator** — cycle recency, sheet count, cache size, and the
   worst live-edge lag across cameras.
+- **Hardware** — Coral inference speed, detection FPS, Frigate CPU/GPU,
+  host load/memory/disk, and per-mount storage bars.
 - **Storage** — database and cache sizes.
 - **Recent activity** — the latest Frigate events as thumbnails.
 

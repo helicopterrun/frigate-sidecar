@@ -15,8 +15,10 @@ the sidecar's own knobs in one place.
   zones matter for alerts, zone neighbor relationships, and export/import of
   the whole policy as JSON.
 - **Push devices** (`/settings#push`) — every registered phone, with per-
-  device **Test** buttons. Currently **{{stat:push_devices}}** device(s)
-  are registered. See [Push notifications](/guide/push-notifications).
+  device **Test** buttons, plus the live attention-ladder table and example
+  notifications rendered by the real pipeline. Currently
+  **{{stat:push_devices}}** device(s) are registered. See
+  [Push notifications](/guide/push-notifications).
 - **Cameras** — per-camera rig facts (position, heading, FOV, calibration
   quality) with deep links into the [Map](/map) landmark editor.
 - **Faces** — a read-only view of the face pipeline configuration.

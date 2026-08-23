@@ -9,7 +9,8 @@ The sidecar — not Frigate — decides when your phone buzzes. It subscribes to
 Frigate's review items over MQTT, evaluates each against your rules, and
 sends Apple push notifications through a relay. **{{stat:push_devices}}**
 device(s) are currently registered (manage them at
-[Settings → Push](/settings#push)).
+[Settings → Push](/settings#push), which also shows your live ladder table
+and example notifications rendered by the real pipeline).
 
 ## The attention ladder
 
