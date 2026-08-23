@@ -110,13 +110,17 @@ button:active, .btn:active, .page-link:active, .tabbar .tab:active { opacity: 0.
 header { padding: calc(12px + env(safe-area-inset-top, 0px)) max(20px, env(safe-area-inset-right, 0px)) 12px max(20px, env(safe-area-inset-left, 0px)); background: var(--surface); border-bottom: 1px solid var(--stroke); display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
 header h1 { margin: 0; font-size: 16px; font-weight: 600; }
 header .stats { font-size: 12px; color: var(--muted); }
-header .session { font-size: 12px; }
-header input[type=text] { background: var(--panel); color: var(--text); border: 1px solid var(--stroke); padding: 4px 8px; border-radius: var(--radius-sm); font-size: 12px; }
+/* Triage session tag (list filter bar + detail sidebar). */
+.session label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+.session input[type=text] { background: var(--panel); color: var(--text); border: 1px solid var(--stroke); padding: 4px 8px; border-radius: var(--radius-sm); font-size: 13px; }
 header h1 a { color: inherit; text-decoration: none; }
 header .pages { display: flex; gap: 4px; align-items: center; }
 header .header-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 header .page-link.util { color: var(--muted-2); }
 .theme-picker { background: var(--panel); color: var(--muted); border: 1px solid var(--stroke); border-radius: var(--radius-sm); padding: 3px 6px; font-size: 11px; }
+/* Settings › Appearance row. */
+.theme-row { font-size: 12px; color: var(--muted); display: inline-flex; flex-direction: column; gap: 4px; }
+.theme-row .theme-picker { font-size: 13px; padding: 6px 8px; }
 /* Analysis dropdown: <details> so it needs no JS. */
 .nav-group { position: relative; }
 .nav-group summary { list-style: none; cursor: pointer; user-select: none; }
@@ -152,9 +156,11 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
   .tabbar .tab.active { color: var(--accent); }
   /* Content must never hide behind the bar. */
   body { padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px)); }
-  /* The top bar shrinks to title + summary + theme; the tab bar owns nav. */
-  header .pages { display: none; }
-  header .page-link.util { display: none; }
+  /* Phones drop the top bar entirely — the tab bar owns nav, and Settings
+     carries the theme picker and Guide/Debug links. The body takes over the
+     header's job of padding past a standalone-mode status bar. */
+  header { display: none; }
+  body { padding-top: env(safe-area-inset-top, 0px); }
 }
 
 /* Motion page */
@@ -174,11 +180,20 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 code { background: var(--panel); padding: 2px 6px; border-radius: 3px; font-family: ui-monospace, monospace; font-size: 12px; color: var(--text); }
 
 /* FPS-budget + score-histogram pages */
-.stat-row { display: flex; gap: 12px; margin: 8px 0 24px; flex-wrap: wrap; }
-.stat-card { background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); padding: 14px 18px; min-width: 140px; flex: 1; }
-.stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 6px; }
-.stat-value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.stat-value.cell-class { display: inline-block; padding: 2px 12px; }
+.stat-row { display: flex; gap: 10px; margin: 8px 0 20px; flex-wrap: wrap; }
+.stat-card { background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); padding: 10px 14px; min-width: 120px; flex: 1; }
+.stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 4px; }
+.stat-value { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat-value.cell-class { display: inline-block; padding: 2px 10px; }
+@media (max-width: 720px) {
+  /* Phones: a tight 3-up grid instead of two fat cards per row — the whole
+     health band should fit in one glance. */
+  .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 6px 0 16px; }
+  .stat-card { padding: 8px 10px; min-width: 0; }
+  .stat-label { font-size: 10px; letter-spacing: 0.3px; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stat-value { font-size: 15px; }
+  .stat-value.cell-class { padding: 1px 8px; }
+}
 .section-h { font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin: 24px 0 8px; }
 .rec-list { padding-left: 20px; color: var(--text); font-size: 13px; line-height: 1.6; }
 .rec-list code { display: inline-block; }
@@ -335,10 +350,6 @@ a { color: var(--accent); }
 
   /* Toast must clear the bottom tab bar. */
   .sc-toast { bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
-  /* Push session input back into the main row instead of margin-left:auto
-     so it doesn't get pinned to the right edge on a narrow header. */
-  header .session { margin-left: 0; width: 100%; }
-  header .session input[type=text] { width: 100%; }
 
   /* Stack the detail page: media on top, controls below. */
   .detail-grid { grid-template-columns: 1fr; gap: 12px; }

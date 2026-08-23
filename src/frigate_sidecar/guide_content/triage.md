@@ -14,9 +14,9 @@ guessing.
 ## Using it
 
 **The list.** Filter by camera, object label, triage state, time window, and
-sort order. The header shows running TP/FP/SKIP counts, and a **session**
-field lets you tag a batch of labels (e.g. `2026-08-23a`) so you can tell
-labeling passes apart later.
+sort order. A **session** field in the filter bar lets you tag a batch of
+labels (e.g. `2026-08-23a`) so you can tell labeling passes apart later; on
+desktop the header shows running TP/FP/SKIP counts.
 
 **The event page.** Tap any event to open `/event/{id}`:
 

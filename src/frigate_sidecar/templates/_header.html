@@ -47,14 +47,6 @@
     {% endif %}
   </span>
   <span class="header-right">
-    {% if _active == 'triage' %}<span class="session">session: <input id="session" type="text" placeholder="2026-05-09a" size="14"></span>{% endif %}
-    <select id="theme-picker" class="theme-picker" title="Theme" aria-label="Theme">
-      <option value="">Elsinore</option>
-      <option value="kronborg-signal">Kronborg Signal</option>
-      <option value="moss-terracotta">Moss &amp; Terracotta</option>
-      <option value="oresund-harbor">Øresund Harbor</option>
-      <option value="midnight-fjord">Midnight Fjord</option>
-    </select>
     <a href="/guide" class="page-link util{% if _active == 'guide' %} active{% endif %}">Guide</a>
     <a href="/debug" class="page-link util{% if _active in ('debug', 'toybox') %} active{% endif %}">Debug</a>
   </span>
