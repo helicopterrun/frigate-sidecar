@@ -228,13 +228,19 @@ Collapses the three-or-four parallel requests the reel makes to paint one window
   ],
   "motion": { "start": …, "interval": 10, "values": [0,4,61,88,…] },
   "events": [ { "id": "…", "label": "person", "zones": ["driveway"],
-               "start": 1785381200, "end": null, "score": 0.81 } ]
+               "start": 1785381200, "end": null, "score": 0.81,
+               "sub_label": "amazon", "has_clip": true, "has_snapshot": true } ],
+  "reviews": [ { "id": "…", "start": 1785381195, "end": 1785381260,
+                "severity": "alert", "objects": ["person"], "zones": ["charger"],
+                "detections": ["…"] } ]
 }
 ```
 
 - **`motion.values` is a bare array on a declared grid** — `value[i]` covers `[start + i·interval, start + (i+1)·interval)`. An hour at `scale=10` is 360 numbers, not 360 timestamped objects. Biggest byte win on the page and it costs nothing to produce.
 - **`frames` is an array of descriptors, not one descriptor.** A single reel window commonly straddles the recent/aged thinning boundary (§5.5), so one `{start, interval, count}` can't express two different cadences inside the same response — it needed the same shape as `/v1/scrub/{camera}/coverage`'s `buckets[]` (§4.2), so make it identical: an array. Each descriptor is the same start/interval/count triple, and the client places cells by arithmetic per-bucket exactly as it does against §4.2. `frames` excludes derived tiers (§5.8) the same way `/v1/scrub/{camera}/coverage` excludes them from `buckets` — same `grid.exclude_derived_buckets` helper, so the two endpoints never disagree about which rows are in play for an overlapping-tier window.
 - **`events[].end` is nullable and `null` means "still in progress."** An event that hasn't closed yet (the object is still present) has no end time. The client's `ObjectTrack` keys `sawExit` off a nullable end and deliberately draws no exit cap when it's null — the server must emit `null`, not omit the field or send a placeholder timestamp, or the client draws a false exit.
+- **`events[].sub_label`, `has_clip`, `has_snapshot` are column-gated** (added 2026-08-23). They are read straight off Frigate's `event` schema, so a Frigate build without a column yields `null`/`false` rather than a 500 — the same posture `zones` already had. `sub_label` is the recognised face, plate or carrier and is the entire point of an identification camera; the media flags are the difference between a track a client can open and one it cannot.
+- **`reviews` is Frigate's own alert/detection decision** (added 2026-08-23), from `reviewsegment`. It is on this endpoint because it answers the one question `events` cannot: which of these tracks was the fleet meant to notify about. Confidence cannot stand in for it here — measured on this fleet the Frigate+ model's scores are bimodal and high (p10 0.83, median 0.87), so `score` separates almost nothing while severity separates cleanly. `reviews[].end` is nullable with exactly the meaning `events[].end` has. `detections` carries the review's member event ids, so a client can join back to `events[]` without a second query; it is always a list, never `null`. A Frigate with no `reviewsegment` table returns `[]` — a reel with no severity spine, not a broken endpoint.
 - **`queried` is inclusive of `start`, exclusive of `end`** — `[start, end)`, matching how `recorded` and bucket spans are already documented (§4.2, §4.4). Stated explicitly here since it wasn't spelled out originally and both sides need to agree.
 - Deletes client-side: three window caches, three in-flight guards, and the `ReelDataSource` latest-wins pump that exists only because those three sources could disagree about which window they described.
 - **ETag** as §4.0.

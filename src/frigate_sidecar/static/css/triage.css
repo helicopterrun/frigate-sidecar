@@ -26,6 +26,10 @@
   /* Shared semantic roles (identical in every app theme). */
   --live: #FF5D57;
   --gap-c: #765B4C;
+  /* Reel: the tide (motion) and the row rules. Per-theme below, because the
+     app tunes both against each theme's own ground. */
+  --tide: #5F7185;
+  --gridline: #5D6570;
   --lane-person: #66B9EE;
   --lane-vehicle: #B594E8;
   --lane-animal: #69C48B;
@@ -66,6 +70,7 @@
   --text: #C8D2DA; --muted: #91A2AF; --muted-2: #71869A; --muted-3: #53687C;
   --accent: #FF5A1F; --accent-2: #FF6B2C;
   --btn-neutral: #23486B; --btn-neutral-hover: #2E567C;
+  --tide: #31566B; --gridline: #3B536C;
 }
 :root[data-theme="moss-terracotta"] {
   --panel: #1D2920; --surface: #27362A; --surface-2: #324535;
@@ -73,6 +78,9 @@
   --text: #D6D8CF; --muted: #9EA59D; --muted-2: #879387; --muted-3: #66735F;
   --accent: #D87352; --accent-2: #E17F5E;
   --btn-neutral: #3B4E3E; --btn-neutral-hover: #475D4A;
+  /* Locked to the app's 2026-08-05 Theme Lab export: the reel was tuned
+     against the shared neutral gridline, not a moss-tinted one. */
+  --tide: #54634F; --gridline: #5D6570;
 }
 :root[data-theme="oresund-harbor"] {
   --panel: #0A263E; --surface: #11324D; --surface-2: #193F5D;
@@ -80,6 +88,7 @@
   --text: #C9D9E2; --muted: #91A4B2; --muted-2: #71889A; --muted-3: #546A7D;
   --accent: #68A9CA; --accent-2: #78B8D6;
   --btn-neutral: #24506E; --btn-neutral-hover: #2E5F80;
+  --tide: #36556A; --gridline: #3E586C;
 }
 :root[data-theme="midnight-fjord"] {
   --panel: #071826; --surface: #0C2335; --surface-2: #123149;
@@ -87,6 +96,7 @@
   --text: #C2D0D8; --muted: #8D9EAA; --muted-2: #6F8594; --muted-3: #526676;
   --accent: #39AAA7; --accent-2: #4DBDB9;
   --btn-neutral: #1E4258; --btn-neutral-hover: #275069;
+  --tide: #2E5061; --gridline: #3C5668;
 }
 
 /* ============================================================ base */
@@ -398,18 +408,70 @@ a { color: var(--accent); }
   .kv dd { font-size: 13px; }
 }
 
-/* ----- Scrub viewer ----- */
-.sv-timeline { width: 100%; display: block; border: 1px solid var(--stroke); border-radius: var(--radius-md); margin-top: 12px; cursor: crosshair; touch-action: none; }
+/* ----- Scrub viewer: the reel -----
+   The frame and what is in it on the left; the reel standing beside it. The
+   reel is vertical on every screen (it already was on phones), which is why
+   there is one layout here and not a desktop/phone pair. */
+.sv-rig { display: grid; grid-template-columns: minmax(0, 1fr) 336px; gap: var(--space-3); margin-top: var(--space-3); }
+.sv-viewer { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.sv-frame-wrap { padding: 0; overflow: hidden; border: 1px solid var(--stroke); border-radius: var(--radius-md); }
+.sv-frame { width: 100%; aspect-ratio: 16/9; background: var(--deep) no-repeat; background-size: cover; display: flex; align-items: center; justify-content: center; color: var(--muted-3); font-size: 13px; }
+
+.sv-reelcol { display: flex; gap: var(--space-2); min-width: 0; }
+.sv-reel-shell { flex: 1; min-width: 0; background: var(--deep); border: 1px solid var(--stroke); border-radius: var(--radius-md); overflow: hidden; }
+.sv-reel { display: block; width: 100%; height: max(360px, calc(100dvh - 300px)); touch-action: none; cursor: ns-resize; }
+
+/* The rung ladder: one notch per sprite tier the cache generates. */
+.sv-rungs { display: flex; flex-direction: column; gap: 3px; justify-content: center; }
+.sv-rungs button { font-family: var(--font-mono); font-size: 10px; width: 34px; padding: 6px 0; background: transparent; color: var(--muted-3); border: 1px solid var(--stroke-soft); border-radius: var(--radius-sm); cursor: pointer; }
+.sv-rungs button:hover { color: var(--muted); border-color: var(--stroke); }
+.sv-rungs button[aria-pressed="true"] { color: var(--accent-2); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+
+/* Moment card: who is here, in which zone, how sure, and whether Frigate
+   called it an alert -- the question the 72px strip could not answer. */
+.sv-moment { background: var(--deep); border: 1px solid var(--stroke); border-radius: var(--radius-md); padding: 12px 14px; min-height: 150px; font-family: var(--font-mono); display: flex; flex-direction: column; gap: 10px; }
+.sv-moment-head { display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; }
+.sv-moment-t { font-size: 18px; color: var(--text); font-variant-numeric: tabular-nums; }
+.sv-moment-rel { font-size: 11px; color: var(--muted-3); }
+.sv-moment-empty { color: var(--muted-3); font-size: 12px; margin: 10px 0 0; }
+.sv-sev { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; padding: 2px 7px; border-radius: var(--radius-sm); border: 1px solid; }
+.sv-sev.alert { color: var(--accent-2); border-color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 9%, transparent); }
+.sv-sev.detection { color: var(--muted-2); border-color: var(--stroke); background: var(--surface); }
+.sv-sev.none { color: var(--muted-3); border-color: var(--stroke-soft); }
+.sv-sev.gap { color: var(--gap-c); border-color: var(--gap-c); }
+
+.sv-tracklist { display: flex; flex-direction: column; gap: 6px; }
+.sv-trk { display: grid; grid-template-columns: 9px auto 1fr auto; gap: 9px; align-items: center; width: 100%; text-align: left; font-family: inherit; font-size: 12px; color: inherit; padding: 5px 8px; border-radius: var(--radius-sm); background: var(--surface); border: 1px solid transparent; cursor: pointer; }
+.sv-trk:hover { border-color: var(--stroke); }
+.sv-trk.on { border-color: var(--accent); background: var(--surface-2); }
+.sv-swatch { width: 9px; height: 9px; border-radius: 2px; }
+.sv-lbl { color: var(--text); }
+.sv-sub { color: var(--accent-2); }
+.sv-zone { color: var(--muted-2); font-size: 11px; border: 1px solid var(--stroke-soft); padding: 0 5px; border-radius: 2px; justify-self: start; }
+.sv-meta { color: var(--muted-3); font-size: 11px; justify-self: end; text-align: right; }
+
+.sv-ctl { display: flex; gap: var(--space-4); align-items: center; flex-wrap: wrap; margin-top: var(--space-3); }
+.sv-ctl-g { display: flex; gap: var(--space-2); align-items: center; font-size: 12px; color: var(--muted); }
+.sv-lanes { display: flex; gap: 6px; flex-wrap: wrap; }
+.sv-chip { font-family: var(--font-mono); font-size: 11px; padding: 4px 9px; cursor: pointer; background: var(--surface); color: var(--muted-2); border: 1px solid var(--stroke); border-radius: var(--radius-sm); display: inline-flex; align-items: center; gap: 6px; }
+.sv-chip:hover { color: var(--text); }
+.sv-chip[aria-pressed="true"] { color: var(--text); border-color: var(--muted-3); }
+.sv-dot { width: 8px; height: 8px; border-radius: 2px; opacity: 0.3; }
+.sv-chip[aria-pressed="true"] .sv-dot { opacity: 1; }
+.sv-clock { margin-left: auto; font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; align-self: center; }
+.sv-status-row { display: flex; gap: var(--space-4); align-items: baseline; flex-wrap: wrap; }
+.sv-status-row #sv-status { font-family: var(--font-mono); color: var(--muted-2); }
+
 .sv-hint-phone { display: none; }
-@media (max-width: 720px) {
-  /* Vertical reel: the drum fills the space under the image. */
-  .sv-timeline { height: max(260px, calc(100dvh - 64px - 100vw * 9 / 16 - 170px)); margin-top: 8px; }
+@media (max-width: 860px) {
+  /* One column: the reel goes under the frame, still vertical, still the
+     same instrument -- only the rig stacks. */
+  .sv-rig { grid-template-columns: 1fr; }
+  .sv-reel { height: max(300px, calc(100dvh - 64px - 100vw * 9 / 16 - 260px)); }
   .sv-hint-phone { display: block; }
   .sv-hint-desktop { display: none; }
+  .sv-clock { margin-left: 0; }
 }
-.sv-frame-wrap { padding: 0; overflow: hidden; }
-.sv-frame { width: 100%; aspect-ratio: 16/9; background: var(--deep) no-repeat; background-size: cover; display: flex; align-items: center; justify-content: center; color: var(--muted-3); font-size: 13px; }
-.sv-clock { margin-left: auto; font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; align-self: center; }
 
 /* ----- Buttons: one component -----
    .btn is the base; .btn-primary (accent), .btn-neutral, .btn-danger are the
