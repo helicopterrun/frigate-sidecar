@@ -8,12 +8,15 @@ scenarios through the sidecar's own MQTT connection.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -35,8 +38,16 @@ REPLAY_ID_PREFIX = "replay-"
 # ---------------------------------------------------------------------------
 
 def list_scenarios() -> list[dict[str, str]]:
+    """Every scenario in the packaged set.
+
+    Globs `*.json` rather than `card-*.json`: captures exported from the flight
+    recorder are named `cap-*` so the picker can tell recorded traffic from a
+    hand-written template at a glance, and they would otherwise be invisible.
+    The directory is dedicated package data, so there is nothing else in it to
+    pick up by accident.
+    """
     results = []
-    for p in sorted(SCENARIOS_DIR.glob("card-*.json")):
+    for p in sorted(SCENARIOS_DIR.glob("*.json")):
         try:
             data = json.loads(p.read_text())
         except (json.JSONDecodeError, OSError):
@@ -44,6 +55,7 @@ def list_scenarios() -> list[dict[str, str]]:
         results.append({
             "name": p.stem,
             "description": data.get("description", ""),
+            "kind": str(data.get("kind") or "steps"),
         })
     return results
 
@@ -62,6 +74,8 @@ def resolve_scenario_path(name: str) -> Path:
 
 def load_scenario(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text())
+    if data.get("kind") == "capture":
+        return _load_capture_scenario(path, data)
     steps = data.get("steps")
     if not isinstance(steps, list) or not steps:
         raise ValueError(f"{path}: scenario must define a non-empty 'steps' list")
@@ -74,6 +88,353 @@ def load_scenario(path: Path) -> dict[str, Any]:
     return cast("dict[str, Any]", data)
 
 
+# ---------------------------------------------------------------------------
+# Capture-derived scenarios
+#
+# A `steps` scenario is a template: `build_messages` synthesises a payload from
+# a handful of fields (zones, severity, objects), and everything it does not
+# name -- score, box, sub_label, path_data, thumbnails -- simply is not there.
+# That gap is what `push/capture.py` was written about: "the gap between a
+# canned scenario and a real walk kept hiding bugs (family gating, copy echo,
+# demotion -- all found live, none by replay)".
+#
+# A `capture` scenario is the other thing: the recorded wire, every field
+# verbatim, with real inter-message timing. Two rewrites make it replayable
+# rather than merely readable -- ids are moved into the `replay-` namespace so
+# a replay starts a fresh card instead of resuming the original, and wall-clock
+# timestamps are shifted so the story happens now.
+# ---------------------------------------------------------------------------
+
+#: A number in this range is a wall-clock timestamp, not data. Checked against
+#: 534 captured messages: every `start_time` / `end_time` / `frame_time` /
+#: `thumb_time`, and every timestamp buried in `path_data`, lands inside it, and
+#: nothing else in a Frigate payload does (scores are 0-1, boxes and areas are
+#: orders of magnitude below 1e9). Range-testing rather than key-matching is
+#: what reaches the timestamps inside `path_data`'s anonymous [[x, y], ts]
+#: pairs, which no key name would find.
+_EPOCH_MIN = 1_000_000_000.0
+_EPOCH_MAX = 20_000_000_000.0
+
+_SAFE_STEM = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _load_capture_scenario(path: Path, data: dict[str, Any]) -> dict[str, Any]:
+    messages = data.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise ValueError(f"{path}: capture scenario must define a non-empty 'messages' list")
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            raise ValueError(f"{path}: messages[{i}] must be an object")
+        if msg.get("topic") not in ("frigate/reviews", "frigate/events"):
+            raise ValueError(
+                f"{path}: messages[{i}].topic must be frigate/reviews or frigate/events"
+            )
+        if not isinstance(msg.get("payload"), dict):
+            raise ValueError(f"{path}: messages[{i}].payload must be an object")
+    return data
+
+
+def _shift_epochs(obj: Any, delta: float) -> Any:
+    """Move every wall-clock timestamp in a payload by `delta`.
+
+    Relative distances survive exactly, so a replayed story keeps the durations
+    it really had -- which is the whole reason to replay a capture instead of a
+    hand-written approximation. Mutates dicts and lists in place and returns
+    `obj` so scalars can be reassigned by the caller.
+    """
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            obj[key] = _shift_epochs(value, delta)
+        return obj
+    if isinstance(obj, list):
+        for i, value in enumerate(obj):
+            obj[i] = _shift_epochs(value, delta)
+        return obj
+    # bool is an int subclass; check it first or True becomes 1000000001.0.
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, (int, float)) and _EPOCH_MIN <= obj < _EPOCH_MAX:
+        return obj + delta
+    return obj
+
+
+def _capture_ids(messages: list[dict[str, Any]]) -> list[str]:
+    """Every Frigate id a captured window refers to, in first-seen order.
+
+    Both the `id` fields and the review's `data.detections` list, because a
+    review and its object events cross-reference each other: rewriting one and
+    not the other severs the link the card pipeline follows to enrich a card.
+    """
+    seen: dict[str, None] = {}
+    for msg in messages:
+        payload = msg.get("payload") or {}
+        for side in ("before", "after"):
+            body = payload.get(side)
+            if not isinstance(body, dict):
+                continue
+            ident = body.get("id")
+            if isinstance(ident, str) and ident:
+                seen.setdefault(ident, None)
+            data = body.get("data")
+            if isinstance(data, dict):
+                for det in data.get("detections") or []:
+                    if isinstance(det, str) and det:
+                        seen.setdefault(det, None)
+    return list(seen)
+
+
+def _substitute_strings(obj: Any, mapping: dict[str, str]) -> Any:
+    """Whole-string replacement only -- never substring.
+
+    An id or a camera name is replaced when a field *is* that value, so a
+    description or a path that merely contains it is left alone.
+    """
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            obj[key] = _substitute_strings(value, mapping)
+        return obj
+    if isinstance(obj, list):
+        for i, value in enumerate(obj):
+            obj[i] = _substitute_strings(value, mapping)
+        return obj
+    if isinstance(obj, str):
+        return mapping.get(obj, obj)
+    return obj
+
+
+def _scenario_stem(name: str) -> str:
+    """A filename that cannot leave the scenarios directory.
+
+    Same hardening as `faces/crosscam.py`: dot runs collapse and leading dots
+    are stripped, so neither `..` nor a name that would hide the file (or
+    collide with a dotfile) can be talked into existence by a `--export`
+    argument.
+    """
+    stem = _SAFE_STEM.sub("-", name.strip())
+    stem = re.sub(r"\.{2,}", ".", stem)
+    stem = re.sub(r"-{2,}", "-", stem).strip("-.")
+    if stem.endswith(".json"):
+        stem = stem[: -len(".json")]
+    if not stem:
+        stem = "capture"
+    # `cap-` marks recorded traffic in the picker; `card-` are the templates.
+    if not stem.startswith(("cap-", "card-")):
+        stem = f"cap-{stem}"
+    return stem
+
+
+def prune_to_story(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Keep the reviews and the object events they actually reference.
+
+    A busy minute on this property is ~400 messages, ~1.3 MB, and almost all of
+    it is other cameras' concurrent object updates -- a fixture that carried it
+    all would be 2.7 MB of noise wrapped around a 6-message story, and the
+    packaged wheel would grow by more than its own size per scenario.
+
+    The card pipeline reaches an object event through a review's
+    `data.detections`, so an event no review in the window names cannot affect
+    the story. Every retained message is still byte-for-byte what Frigate sent;
+    this drops whole messages, never fields.
+
+    Returns `(kept, dropped_per_camera)`. If no review names any detection --
+    an older Frigate, or a window with no reviews at all -- nothing is dropped,
+    because then this rule has no evidence to act on.
+    """
+    referenced: set[str] = set()
+    for row in rows:
+        if not str(row.get("topic", "")).endswith("reviews"):
+            continue
+        payload = row.get("payload") or {}
+        for side in ("before", "after"):
+            body = payload.get(side)
+            if not isinstance(body, dict):
+                continue
+            data = body.get("data")
+            if isinstance(data, dict):
+                for det in data.get("detections") or []:
+                    if isinstance(det, str):
+                        referenced.add(det)
+    if not referenced:
+        return list(rows), {}
+
+    kept: list[dict[str, Any]] = []
+    dropped: dict[str, int] = {}
+    for row in rows:
+        if str(row.get("topic", "")).endswith("reviews"):
+            kept.append(row)
+            continue
+        payload = row.get("payload") or {}
+        ids = {
+            body.get("id")
+            for side in ("before", "after")
+            if isinstance(body := payload.get(side), dict)
+        }
+        if ids & referenced:
+            kept.append(row)
+        else:
+            after = payload.get("after")
+            cam = after.get("camera") if isinstance(after, dict) else None
+            key = cam if isinstance(cam, str) else "?"
+            dropped[key] = dropped.get(key, 0) + 1
+    return kept, dropped
+
+
+def summarize_capture(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """What a window contains -- the provenance block, and the material for an
+    auto-description. Kept separate from `export_capture` so a caller can show
+    it before deciding to freeze the window."""
+    from frigate_sidecar.push.capture import _camera_of
+
+    cameras: dict[str, int] = {}
+    zones: dict[str, None] = {}
+    labels: dict[str, None] = {}
+    reviews = 0
+    for row in rows:
+        cam = _camera_of(row)
+        if cam:
+            cameras[cam] = cameras.get(cam, 0) + 1
+        payload = row.get("payload") or {}
+        after = payload.get("after")
+        if not isinstance(after, dict):
+            continue
+        if str(row.get("topic", "")).endswith("reviews"):
+            reviews += 1
+            data = after.get("data")
+            if isinstance(data, dict):
+                for zone in data.get("zones") or []:
+                    if isinstance(zone, str):
+                        zones.setdefault(zone, None)
+                for obj in data.get("objects") or []:
+                    if isinstance(obj, str):
+                        labels.setdefault(obj, None)
+        else:
+            lbl = after.get("label")
+            if isinstance(lbl, str):
+                labels.setdefault(lbl, None)
+
+    first, last = float(rows[0]["ts"]), float(rows[-1]["ts"])
+    return {
+        "cameras": dict(sorted(cameras.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "zones": list(zones),
+        "labels": list(labels),
+        "reviews": reviews,
+        "events": len(rows) - reviews,
+        "messages": len(rows),
+        "window_s": round(last - first, 3),
+        "captured_from": datetime.fromtimestamp(first, tz=timezone.utc).isoformat(),
+        "captured_to": datetime.fromtimestamp(last, tz=timezone.utc).isoformat(),
+    }
+
+
+def identities_in(rows: list[dict[str, Any]]) -> list[str]:
+    """Recognized names a window would publish.
+
+    Face recognition puts the person's actual name in `sub_label`, and this
+    repository is public. A fixture is checked in forever, so "no names in this
+    particular window" has to be established at export time rather than assumed
+    -- the six hand-written scenarios predate recognition being enabled and the
+    question never came up.
+    """
+    found: dict[str, None] = {}
+    for row in rows:
+        payload = row.get("payload") or {}
+        for side in ("before", "after"):
+            body = payload.get(side)
+            if not isinstance(body, dict):
+                continue
+            candidates = [body.get("sub_label")]
+            data = body.get("data")
+            if isinstance(data, dict):
+                candidates.extend(data.get("sub_labels") or [])
+            for value in candidates:
+                if isinstance(value, str) and value.strip():
+                    found.setdefault(value, None)
+    return list(found)
+
+
+def export_capture(
+    rows: list[dict[str, Any]],
+    *,
+    name: str,
+    description: str = "",
+    out_dir: Path | None = None,
+    overwrite: bool = False,
+    relevant_only: bool = True,
+    allow_identities: bool = False,
+) -> Path:
+    """Freeze a window of the MQTT flight recorder into a checked-in scenario.
+
+    This is the step the flight recorder was missing. `tools/replay_capture.py`
+    could already republish a window, but a window is not a fixture: the
+    recorder is size-rotated and holds hours, so a real situation ages out long
+    before anyone can build a test around it. Writing it into the packaged
+    scenario set makes it permanent, named, reviewable in a diff, and runnable
+    from the same picker as the hand-written ones.
+
+    Payloads are stored verbatim -- no distillation into the `steps` schema,
+    which would throw away exactly the fields (score, box, sub_label,
+    path_data) that make a capture worth keeping.
+    """
+    if not rows:
+        raise ValueError("nothing to export: the window is empty")
+
+    dropped: dict[str, int] = {}
+    if relevant_only:
+        rows, dropped = prune_to_story(rows)
+        if not rows:
+            raise ValueError("nothing to export: the window has no reviews to build a story from")
+
+    if not allow_identities and (names := identities_in(rows)):
+        raise ValueError(
+            f"window contains recognized identities ({', '.join(sorted(names))}); "
+            "pass allow_identities to export it anyway"
+        )
+
+    stem = _scenario_stem(name)
+    target_dir = Path(out_dir) if out_dir is not None else SCENARIOS_DIR
+    path = target_dir / f"{stem}.json"
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"{path} already exists (pass overwrite to replace it)")
+
+    source = summarize_capture(rows)
+    camera = next(iter(source["cameras"]), "") or ""
+    labels = source["labels"]
+    if not description:
+        zones = ", ".join(source["zones"]) or "no zones"
+        description = (
+            f"Captured {source['captured_from'][:16].replace('T', ' ')}Z: "
+            f"{camera or 'multi-camera'} {'/'.join(labels) or 'traffic'} at {zones} -- "
+            f"{source['reviews']} reviews / {source['events']} events "
+            f"over {source['window_s']:.0f}s of real wire."
+        )
+
+    document = {
+        "id": stem,
+        "kind": "capture",
+        "camera": camera,
+        "label": labels[0] if labels else "",
+        "description": description,
+        "source": {
+            **source,
+            # Provenance, so the fixture itself records that it is the story and
+            # not the whole minute -- and exactly how much was set aside.
+            "dropped_unreferenced": dropped,
+            "exported_at": datetime.now(tz=timezone.utc).isoformat(),
+        },
+        "messages": [
+            {"ts": float(row["ts"]), "topic": row["topic"], "payload": row["payload"]}
+            for row in rows
+        ],
+    }
+    target_dir.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(document, indent=2) + "\n")
+    tmp.replace(path)
+    return path
+
+
 def build_messages(
     scenario: dict[str, Any],
     *,
@@ -83,8 +444,12 @@ def build_messages(
 ) -> list[dict[str, Any]]:
     """Expand a scenario into ordered MQTT messages.
 
-    Each returned item: `{"delay_s": float, "topic": str, "payload": dict}`.
+    Each returned item: `{"delay_s": float, "topic": str, "payload": dict}`,
+    plus `"capture_base"` for capture scenarios (see `stamp_now`).
     """
+    if scenario.get("kind") == "capture":
+        return _build_capture_messages(scenario, camera=camera, label=label, run_id=run_id)
+
     camera = camera or scenario.get("camera") or "doorbell"
     label = label or scenario.get("label") or "person"
     run_id = run_id or uuid.uuid4().hex[:8]
@@ -149,7 +514,80 @@ def build_messages(
     return messages
 
 
-def stamp_now(payload: dict[str, Any], *, start_time: float, clock: Callable[[], float]) -> None:
+def _build_capture_messages(
+    scenario: dict[str, Any],
+    *,
+    camera: str | None = None,
+    label: str | None = None,
+    run_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Recorded wire -> replayable messages: ids renamespaced, timing derived.
+
+    Timestamps are deliberately NOT shifted here. `build_messages` runs once up
+    front for every scenario in a run, but `start_run` staggers them, so a shift
+    applied at build time would land the later stories in the past. The runner
+    shifts at publish time using `capture_base`.
+    """
+    if label:
+        raise ValueError(
+            "a capture scenario's labels are recorded wire, not a template -- "
+            "drop --label, or export a window that has the label you want"
+        )
+    run_id = run_id or uuid.uuid4().hex[:8]
+    scenario_id = str(scenario.get("id") or "capture")
+    recorded = copy.deepcopy(cast("list[dict[str, Any]]", scenario["messages"]))
+
+    # One replacement pass, exact-match: the ids, plus the camera if the caller
+    # is retargeting the story at a different one.
+    #
+    # Whole-string only, which deliberately leaves the original id where it is
+    # EMBEDDED in an asset path -- `thumb_path` is
+    # ".../thumb-stairway-wide-1787442590.078477-figu26.webp". That looks like a
+    # miss and is not one: nothing in the push pipeline reads `thumb_path` (it
+    # is Frigate's own pointer), the card is keyed on the review `id`, which is
+    # rewritten, and leaving it means a replayed card still points at the real
+    # thumbnail the story produced rather than a file that never existed.
+    replacements = {
+        original: f"{REPLAY_ID_PREFIX}{scenario_id}-{run_id}-{i + 1}"
+        for i, original in enumerate(_capture_ids(recorded))
+    }
+    recorded_camera = scenario.get("camera")
+    if camera and isinstance(recorded_camera, str) and camera != recorded_camera:
+        replacements[recorded_camera] = camera
+
+    base = float(recorded[0].get("ts") or 0.0)
+    messages: list[dict[str, Any]] = []
+    previous = base
+    for row in recorded:
+        ts = float(row.get("ts") or previous)
+        messages.append({
+            "delay_s": max(0.0, ts - previous),
+            "topic": row["topic"],
+            "payload": _substitute_strings(row["payload"], replacements),
+            "capture_base": base,
+        })
+        previous = ts
+    return messages
+
+
+def stamp_now(
+    payload: dict[str, Any],
+    *,
+    start_time: float,
+    clock: Callable[[], float],
+    capture_base: float | None = None,
+) -> None:
+    """Put a message on the current clock.
+
+    For a template scenario that means assigning `start_time` (and an end stamp
+    on the closing message) -- there is nothing else in the payload to move. For
+    a capture, assignment would be destructive: the payload carries real times in
+    a dozen places and their offsets *from each other* are the fixture. So the
+    whole payload shifts by one delta instead.
+    """
+    if capture_base is not None:
+        _shift_epochs(payload, start_time - capture_base)
+        return
     after = payload.get("after", {})
     after["start_time"] = start_time
     if payload.get("type") == "end":
@@ -171,7 +609,10 @@ def run_scenario(
         delay = msg["delay_s"] / speed
         if delay > 0:
             sleep(delay)
-        stamp_now(msg["payload"], start_time=start_time, clock=clock)
+        stamp_now(
+            msg["payload"], start_time=start_time, clock=clock,
+            capture_base=msg.get("capture_base"),
+        )
         publish(msg["topic"], json.dumps(msg["payload"]))
 
 
@@ -262,7 +703,10 @@ async def dry_run_scenario(
             delay = msg["delay_s"] / speed
             if delay > 0:
                 await asyncio.sleep(delay)
-            stamp_now(msg["payload"], start_time=start_time, clock=time.time)
+            stamp_now(
+                msg["payload"], start_time=start_time, clock=time.time,
+                capture_base=msg.get("capture_base"),
+            )
 
             topic = msg["topic"]
             payload = msg["payload"]
@@ -483,7 +927,10 @@ async def _execute_run(
                             delay = msg["delay_s"] / speed
                             if delay > 0:
                                 await asyncio.sleep(delay)
-                            stamp_now(msg["payload"], start_time=start_time, clock=time.time)
+                            stamp_now(
+                                msg["payload"], start_time=start_time, clock=time.time,
+                                capture_base=msg.get("capture_base"),
+                            )
                             publisher(msg["topic"], json.dumps(msg["payload"]))
                             run.messages_sent += 1
                 finally:

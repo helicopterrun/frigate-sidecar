@@ -33,8 +33,14 @@ import argparse
 import asyncio
 import sys
 import uuid
+from pathlib import Path
 
-from frigate_sidecar.push.replay import (
+# Same as tools/replay_capture.py: run the checkout, not whatever was last
+# pip-installed. Without this the two tools disagree about which scenarios
+# exist -- an export lands in src/ and this one cannot see it.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from frigate_sidecar.push.replay import (  # noqa: E402
     REPLAY_ID_PREFIX,
     MqttPublisher,
     build_messages,
@@ -95,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         scenarios = list_scenarios()
         if not scenarios:
-            print("no card-* scenarios found")
+            print("no scenarios found")
             return 0
         for s in scenarios:
             print(f"  {s['name']}")

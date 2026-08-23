@@ -14,7 +14,7 @@
       <div class="stat-value">
         <select id="scenario">
           {% for s in scenarios %}
-          <option value="{{ s.name }}">{{ s.name }}{% if s.description %} — {{ s.description[:60] }}{% endif %}</option>
+          <option value="{{ s.name }}">{% if s.kind == 'capture' %}[recorded] {% endif %}{{ s.name }}{% if s.description %} — {{ s.description[:60] }}{% endif %}</option>
           {% endfor %}
         </select>
       </div>
@@ -42,7 +42,7 @@
       <label>Second scenario:
         <select id="scenario2">
           {% for s in scenarios %}
-          <option value="{{ s.name }}">{{ s.name }}</option>
+          <option value="{{ s.name }}">{% if s.kind == 'capture' %}[recorded] {% endif %}{{ s.name }}</option>
           {% endfor %}
         </select>
       </label>

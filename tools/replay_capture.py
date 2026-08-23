@@ -18,6 +18,17 @@ Replayed review/event ids collide with their originals in card stores —
 replaying a story the sidecar has already seen resumes/duplicates that card
 rather than starting a fresh one. Fine for a dev instance with fresh state;
 on production prefer a dry look at the capture first.
+
+Freeze a window into a permanent, checked-in scenario instead:
+    python tools/replay_capture.py --from "2026-08-23 01:12" --to "2026-08-23 01:14" \
+        --camera gate-face --export gate-face-sidewalk-pass
+
+The recorder is size-rotated and holds hours, so a real situation is gone by
+tomorrow; --export writes it into the packaged scenario set, where it is
+named, diffable, and runnable from the same /replay picker as the templates.
+Unlike a raw replay, an exported scenario has its ids moved into the `replay-`
+namespace and its timestamps shifted to run time, so replaying it starts a
+fresh card instead of resuming the original.
 """
 from __future__ import annotations
 
@@ -32,6 +43,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from frigate_sidecar.push import replay  # noqa: E402
 from frigate_sidecar.push.capture import _camera_of, read_window  # noqa: E402
 
 
@@ -83,6 +95,24 @@ def main() -> None:
     ap.add_argument("--mqtt-host", default="localhost")
     ap.add_argument("--mqtt-port", type=int, default=1883)
     ap.add_argument("--mqtt-username")
+    ap.add_argument(
+        "--export", metavar="NAME",
+        help="Freeze this window into the packaged scenario set as cap-<NAME>.json "
+             "instead of replaying it.",
+    )
+    ap.add_argument("--description", help="Scenario description (auto-generated if omitted).")
+    ap.add_argument("--out-dir", help="Write the scenario here instead of the packaged set.")
+    ap.add_argument("--force", action="store_true", help="Overwrite an existing scenario.")
+    ap.add_argument(
+        "--allow-identities", action="store_true",
+        help="Export even though the window contains recognized names (sub_label). "
+             "The scenario set is checked into a PUBLIC repo -- be sure.",
+    )
+    ap.add_argument(
+        "--all-traffic", action="store_true",
+        help="Export every message in the window, not just the reviews and the object "
+             "events they reference. Much larger; use when the noise IS the point.",
+    )
     args = ap.parse_args()
 
     rows = read_window(
@@ -91,6 +121,33 @@ def main() -> None:
         end_ts=parse_ts(args.end) if args.end else None,
         camera=args.camera,
     )
+    if args.export:
+        if not args.start:
+            raise SystemExit("--export needs a window: pass --from (and usually --to)")
+        if not rows:
+            raise SystemExit("nothing to export in that window")
+        summarize(rows)
+        path = replay.export_capture(
+            rows,
+            name=args.export,
+            description=args.description or "",
+            out_dir=Path(args.out_dir) if args.out_dir else None,
+            overwrite=args.force,
+            relevant_only=not args.all_traffic,
+            allow_identities=args.allow_identities,
+        )
+        doc = json.loads(path.read_text())
+        dropped = doc["source"].get("dropped_unreferenced") or {}
+        if dropped:
+            total = sum(dropped.values())
+            detail = ", ".join(f"{cam} {n}" for cam, n in sorted(dropped.items()))
+            print(f"\nkept {len(doc['messages'])} of {len(rows)} messages "
+                  f"— dropped {total} unreferenced object events ({detail})")
+            print("  pass --all-traffic to keep them")
+        print(f"\nexported → {path}  ({path.stat().st_size / 1024:.0f} KB)")
+        print(f"replay it with: python tools/replay_card.py --scenario {path.stem} --dry-run")
+        return
+
     if args.list or not args.start:
         summarize(rows)
         if not args.list:
