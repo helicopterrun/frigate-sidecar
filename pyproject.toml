@@ -77,6 +77,15 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM"]
 testpaths = ["tests"]
 addopts = "-ra"
 asyncio_mode = "auto"
+# Test the working tree, not whatever was last pip-installed. CI installs
+# editable so the two coincide there, but every prod install is a plain copy
+# (install.sh, `pip install /opt/frigate-sidecar`), and on such a box a bare
+# `pytest` imported dist-packages instead -- green on stale code, or red on code
+# the checkout had already fixed. Cost of this: the suite no longer exercises
+# the built artifact at all, so a data file that fails to ship in the wheel is
+# invisible here. Assert packaging invariants against the package root instead
+# (see test_scenarios_ship_inside_the_package_not_the_repo).
+pythonpath = ["src"]
 
 [tool.mypy]
 # Prod (bare-metal LXC) runs 3.10 — typecheck against the oldest supported runtime.
