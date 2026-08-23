@@ -21,7 +21,7 @@ fizzles resolves quietly instead of leaving a stale alarm. You configure the
 ladder in the Elsinore app (Settings → Alerts) and the app's choices sync to
 the sidecar.
 
-## Setup
+## Configuration
 
 The `push:` config section:
 
@@ -29,10 +29,14 @@ The `push:` config section:
   relay, `mock` for development.
 - `relay_base_url` — where the relay lives.
 - `mqtt` host/port — the sidecar must see Frigate's MQTT broker, or no
-  events arrive at all (check `/healthz`, `mqtt` component).
+  events arrive at all.
 
 Devices register themselves: install Elsinore, complete onboarding, and the
 phone appears in the device table with a **Test** button.
 
-Use [Replay](/replay) to exercise the whole path end-to-end with canned
-scenarios before trusting it with real alerts.
+## If it goes wrong
+
+Check `/healthz` (`mqtt` component) first — no MQTT means no events at all.
+Then confirm `transport` isn't still `mock`. Use [Replay](/replay) to
+exercise the whole path end-to-end with canned scenarios; its dry-run mode
+shows what the ladder *would* send without notifying.

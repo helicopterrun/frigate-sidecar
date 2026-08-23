@@ -122,8 +122,31 @@ def guide_index(request: Request) -> object:
         "guide_index.html",
         {
             "sections": registry.by_section(),
+            "numbers": registry.numbers(),
+            "current_slug": None,
             "topic_count": len(registry.topics),
         },
+    )
+
+
+@router.get("/guide/search.json")
+def guide_search(request: Request) -> JSONResponse:
+    """Full-text index for the client-side search box: one entry per topic."""
+    registry = _registry(request)
+    numbers = registry.numbers()
+    return JSONResponse(
+        {
+            "topics": [
+                {
+                    "slug": t.slug,
+                    "title": t.meta.title,
+                    "number": numbers.get(t.slug, ""),
+                    "section": SECTION_TITLES.get(t.meta.section, t.meta.section),
+                    "text": t.search_text,
+                }
+                for t in registry.ordered()
+            ]
+        }
     )
 
 
@@ -146,6 +169,7 @@ def guide_topic(request: Request, slug: str) -> object:
     if topic is None:
         raise HTTPException(status_code=404, detail="unknown guide topic")
     prev_t, next_t = registry.neighbors(slug)
+    numbers = registry.numbers()
     return _templates(request).TemplateResponse(
         request,
         "guide_topic.html",
@@ -153,6 +177,10 @@ def guide_topic(request: Request, slug: str) -> object:
             "topic": topic,
             "prev_topic": prev_t,
             "next_topic": next_t,
+            "sections": registry.by_section(),
+            "numbers": numbers,
+            "current_slug": slug,
+            "number": numbers.get(slug, ""),
             "section_title": SECTION_TITLES.get(topic.meta.section, topic.meta.section),
         },
     )

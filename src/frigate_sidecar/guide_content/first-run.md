@@ -10,7 +10,19 @@ The sidecar reads one YAML file, `config/sidecar.yml` (copy it from
 variables using the `FRIGATE_SIDECAR_` prefix and `__` for nesting
 (`FRIGATE_SIDECAR_FRIGATE__BASE_URL=…`).
 
-## The `frigate:` section — how the sidecar reaches Frigate
+## Setup checklist
+
+```walkthrough
+- Copy config/sidecar.example.yml to config/sidecar.yml
+- Set frigate.base_url and frigate.proxy_base_url to your Frigate ports
+- Point frigate.db_path at Frigate's frigate.db
+- Start the service and open the Status page
+- Check /healthz shows every component "ok" or "disabled"
+```
+
+## Configuration
+
+**The `frigate:` section — how the sidecar reaches Frigate**
 
 - `base_url` — Frigate's **unauthenticated** port (usually `:5000`). Used for
   server-to-server calls only; browsers are never pointed here.
@@ -24,24 +36,19 @@ variables using the `FRIGATE_SIDECAR_` prefix and `__` for nesting
   sidecar's point of view. If scrubbing shows no images, this mapping is the
   most common culprit.
 
-## The `sidecar:` section — the sidecar itself
+**The `sidecar:` section — the sidecar itself**
 
 - `db_path` — the sidecar's own SQLite file (labels, scrub cache index,
   push devices, faces). Created automatically.
 - `host` / `port` — where the web app listens.
 - `require_frigate_auth` — when on, every sidecar page requires signing in
-  with your Frigate account (see [Troubleshooting](/guide/troubleshooting)).
+  with your Frigate account.
 
 `log_level` (top level) defaults to `INFO`.
 
-```walkthrough
-- Copy config/sidecar.example.yml to config/sidecar.yml
-- Set frigate.base_url and frigate.proxy_base_url to your Frigate ports
-- Point frigate.db_path at Frigate's frigate.db
-- Start the service and open the Status page
-- Check /healthz shows every component "ok" or "disabled"
-```
+## If it goes wrong
 
-When something looks wrong, `/healthz` is the first stop — it reports each
-subsystem (database, MQTT, scrub cache, face enrichment) with a one-word
-status.
+`/healthz` is the first stop — it reports each subsystem (database, MQTT,
+scrub cache, face enrichment) with a one-word status. The
+[Troubleshooting](/guide/troubleshooting) chapter maps common symptoms to
+their usual causes.

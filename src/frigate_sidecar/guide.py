@@ -45,6 +45,8 @@ SECTIONS: tuple[tuple[str, str], ...] = (
 SECTION_TITLES = dict(SECTIONS)
 
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+_H2_RE = re.compile(r"<h2>(.*?)</h2>")
+_TAG_RE = re.compile(r"<[^>]+>")
 _STAT_RE = re.compile(r"\{\{stat:([a-z0-9_]+)\}\}")
 _WALKTHROUGH_RE = re.compile(r"^```walkthrough\n(.*?)^```$", re.DOTALL | re.MULTILINE)
 _LINK_RE = re.compile(r"\]\((/[^)\s#?]*)")
@@ -70,6 +72,10 @@ class Topic:
     stats_used: frozenset[str]
     walkthrough_steps: int
     internal_links: frozenset[str]
+    # (anchor, plain text) per h2, for the "On this page" box and deep anchors.
+    headings: tuple[tuple[str, str], ...]
+    # Tag-stripped body text for client-side full-text search.
+    search_text: str
 
 
 @dataclass(frozen=True)
@@ -90,6 +96,14 @@ class GuideRegistry:
 
     def ordered(self) -> list[Topic]:
         return [t for _, _, topics in self.by_section() for t in topics]
+
+    def numbers(self) -> dict[str, str]:
+        """slug -> "2.4"-style chapter number, following section order."""
+        out: dict[str, str] = {}
+        for si, (_slug, _title, topics) in enumerate(self.by_section(), start=1):
+            for ti, topic in enumerate(topics, start=1):
+                out[topic.slug] = f"{si}.{ti}"
+        return out
 
     def neighbors(self, slug: str) -> tuple[Topic | None, Topic | None]:
         flat = self.ordered()
@@ -153,6 +167,21 @@ def _load_topic(path: Path) -> Topic:
     )
 
     rendered_html = MarkdownIt("commonmark").enable("table").render(body)
+
+    # Anchor every h2 and collect them for the topic page's "On this page"
+    # box. Anchors are slugified heading text, de-duplicated with a suffix.
+    headings: list[tuple[str, str]] = []
+
+    def _h2_sub(match: re.Match[str]) -> str:
+        plain = _TAG_RE.sub("", match.group(1)).strip()
+        anchor = re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-") or "section"
+        if any(a == anchor for a, _ in headings):
+            anchor = f"{anchor}-{len(headings)}"
+        headings.append((anchor, plain))
+        return f'<h2 id="{anchor}">{match.group(1)}</h2>'
+
+    rendered_html = _H2_RE.sub(_h2_sub, rendered_html)
+    search_text = " ".join(_TAG_RE.sub(" ", rendered_html).split())
     return Topic(
         slug=path.stem,
         meta=meta,
@@ -160,6 +189,8 @@ def _load_topic(path: Path) -> Topic:
         stats_used=stats_used,
         walkthrough_steps=counter,
         internal_links=internal_links,
+        headings=tuple(headings),
+        search_text=search_text,
     )
 
 

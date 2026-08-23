@@ -7,7 +7,9 @@ config: ["watchdog", "proxy"]
 ---
 
 [Settings](/settings) mirrors the Elsinore app's settings screen and gathers
-the sidecar's own knobs in one place:
+the sidecar's own knobs in one place.
+
+## Using it
 
 - **Zones** (`/settings#zones`) — the zone routing policy that decides which
   zones matter for alerts, zone neighbor relationships, and export/import of
@@ -20,7 +22,7 @@ the sidecar's own knobs in one place:
 - **Faces** — a read-only view of the face pipeline configuration.
 - **About** — version and debug links.
 
-## Related config sections
+## Configuration
 
 - `watchdog:` — an optional external health watchdog that can restart the
   Frigate container when it wedges. It runs as its own systemd unit and is

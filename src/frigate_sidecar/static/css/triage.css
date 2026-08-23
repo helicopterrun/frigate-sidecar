@@ -874,28 +874,88 @@ body.map-full-open .me-toolbar {
 }
 
 /* --- Guide (/guide) --- */
-.guide-index, .guide-page { max-width: 860px; margin: 0 auto; padding: 0 12px 24px; }
-#guide-filter {
-  margin-left: auto; background: var(--surface); color: var(--text);
-  border: 1px solid var(--stroke); border-radius: 8px; padding: 6px 10px;
-  font: inherit; min-width: 180px;
+.guide-shell {
+  display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 28px;
+  max-width: 1080px; margin: 0 auto; padding: 0 16px 32px;
 }
-.guide-section h2 {
-  font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--muted); margin: 20px 0 6px;
+.guide-main { min-width: 0; }
+
+/* Sidebar: search + numbered chapter tree, sticky on desktop. */
+.guide-side {
+  position: sticky; top: 12px; align-self: start;
+  max-height: calc(100vh - 24px); overflow-y: auto; padding-top: 12px;
 }
+.guide-search-wrap { position: relative; margin-bottom: 14px; }
+.guide-search {
+  width: 100%; box-sizing: border-box; background: var(--surface);
+  color: var(--text); border: 1px solid var(--stroke); border-radius: 8px;
+  padding: 7px 10px; font: inherit;
+}
+.guide-results {
+  position: absolute; z-index: 30; left: 0; right: 0; top: calc(100% + 4px);
+  background: var(--surface); border: 1px solid var(--stroke);
+  border-radius: 10px; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+}
+.guide-result {
+  display: block; padding: 8px 12px; text-decoration: none;
+  border-bottom: 1px solid var(--stroke-soft);
+}
+.guide-result:last-child { border-bottom: none; }
+.guide-result:hover { background: var(--surface-2); }
+.guide-result-title { display: block; color: var(--accent); }
+.guide-result-snippet {
+  display: block; color: var(--muted); font-size: var(--text-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.guide-result-none { padding: 8px 12px; color: var(--muted); }
+
+.guide-tree-sec {
+  font-size: var(--text-sm); text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--muted); margin: 14px 0 4px;
+}
+.guide-tree ul { list-style: none; margin: 0; padding: 0; }
+.guide-tree a {
+  display: block; color: var(--text); text-decoration: none;
+  padding: 4px 8px; border-radius: 6px; border-left: 2px solid transparent;
+}
+.guide-tree a:hover { background: var(--surface); }
+.guide-tree li.current > a {
+  border-left-color: var(--accent); background: var(--surface); color: var(--accent);
+}
+.guide-tree .num, .guide-toc .num { color: var(--muted-2); font-variant-numeric: tabular-nums; margin-right: 4px; }
+
+/* Breadcrumb */
+.guide-crumbs {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  color: var(--muted); padding: 14px 0 4px; font-size: var(--text-sm);
+}
+.guide-crumbs a { color: var(--muted); }
+.guide-crumbs b { color: var(--text); font-weight: 600; }
+.guide-crumbs .sep { color: var(--muted-3); }
+.guide-crumbs .guide-open { margin-left: auto; }
+
+/* Index */
+.guide-index h1 { font-size: 1.5rem; margin: 8px 0 6px; }
+.guide-lede { color: var(--muted); margin: 0 0 16px; max-width: 60ch; }
+.guide-search-phone { display: none; }
+.guide-section h2 { font-size: 1rem; margin: 22px 0 6px; }
 .guide-toc { list-style: none; margin: 0; padding: 0; }
 .guide-toc li {
   display: flex; align-items: center; gap: 10px;
-  border-bottom: 1px solid var(--stroke); min-height: 44px;
+  border-bottom: 1px solid var(--stroke-soft); min-height: 44px;
 }
 .guide-toc a { color: var(--text); text-decoration: none; flex: 1; padding: 10px 0; }
 .guide-toc a:hover { color: var(--accent); }
 .badge.guide-walk { background: var(--surface-2); color: var(--accent); }
 
+/* Topic body */
 .guide-body { line-height: 1.55; }
-.guide-body h1 { font-size: 1.35rem; margin: 14px 0 10px; }
-.guide-body h2 { font-size: 1.05rem; margin: 22px 0 8px; color: var(--accent); }
+.guide-body h1 { font-size: 1.45rem; margin: 8px 0 12px; }
+.guide-body h1 .num { color: var(--muted-2); margin-right: 6px; }
+.guide-body h2 {
+  font-size: 1.05rem; margin: 24px 0 8px; color: var(--accent);
+  scroll-margin-top: 12px;
+}
 .guide-body h3 { font-size: 0.95rem; margin: 16px 0 6px; }
 .guide-body p, .guide-body ul, .guide-body ol { margin: 0 0 10px; }
 .guide-body ul, .guide-body ol { padding-left: 22px; }
@@ -909,7 +969,7 @@ body.map-full-open .me-toolbar {
   padding: 10px 12px; overflow-x: auto;
 }
 .guide-body pre code { background: none; border: none; padding: 0; }
-.guide-body table { border-collapse: collapse; margin: 0 0 10px; }
+.guide-body table { border-collapse: collapse; margin: 0 0 10px; max-width: 100%; }
 .guide-body th, .guide-body td {
   border: 1px solid var(--stroke); padding: 5px 9px; text-align: left;
 }
@@ -923,6 +983,19 @@ body.map-full-open .me-toolbar {
   font-variant-numeric: tabular-nums;
 }
 
+/* "On this page" box */
+.guide-onpage {
+  background: var(--surface); border: 1px solid var(--stroke);
+  border-radius: 10px; padding: 10px 14px; margin: 0 0 16px;
+  font-size: var(--text-sm);
+}
+.guide-onpage b { color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-size: var(--text-xs); }
+.guide-onpage ul { list-style: none; margin: 6px 0 0; padding: 0; }
+.guide-onpage li { padding: 2px 0; }
+.guide-onpage a { color: var(--text); text-decoration: none; }
+.guide-onpage a:hover { color: var(--accent); }
+
+/* Walkthrough checklist */
 .walkthrough {
   background: var(--surface); border: 1px solid var(--stroke);
   border-radius: 10px; padding: 10px 14px; margin: 0 0 12px;
@@ -937,8 +1010,8 @@ body.map-full-open .me-toolbar {
   color: var(--muted); padding: 4px 10px; cursor: pointer; font: inherit;
   font-size: 0.8rem;
 }
-.walkthrough ol { list-style: none; margin: 0; padding: 0; counter-reset: step; }
-.walkthrough li { border-bottom: 1px solid var(--stroke); }
+.walkthrough ol { list-style: none; margin: 0; padding: 0; }
+.walkthrough li { border-bottom: 1px solid var(--stroke-soft); }
 .walkthrough li:last-child { border-bottom: none; }
 .walkthrough label {
   display: flex; align-items: flex-start; gap: 10px; padding: 9px 0;
@@ -954,7 +1027,10 @@ body.map-full-open .me-toolbar {
   margin-top: 20px; border-top: 1px solid var(--stroke); padding-top: 12px;
 }
 
-@media (max-width: 720px) {
-  #guide-filter { min-width: 0; flex: 1; }
+@media (max-width: 900px) {
+  .guide-shell { grid-template-columns: minmax(0, 1fr); }
+  .guide-side { display: none; }
+  .guide-search-phone { display: block; }
   .guide-pager a { min-height: 44px; display: inline-flex; align-items: center; }
+  .guide-crumbs .guide-open { margin-left: 0; width: 100%; }
 }

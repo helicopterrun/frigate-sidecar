@@ -7,10 +7,9 @@ config: ["face_enrich"]
 ---
 
 [Identities](/enrich/clusters) is where face recognition becomes useful. A
-background worker (config `face_enrich:`, needs the `enrich` install extra)
-watches person events on enrolled cameras, samples recording frames, scores
-face quality, computes embeddings, and groups recurring people into
-**clusters** — no training, no photo upload.
+background worker watches person events on enrolled cameras, samples
+recording frames, scores face quality, computes embeddings, and groups
+recurring people into **clusters** — no training, no photo upload.
 
 Right now there are **{{stat:clusters_total}}** clusters,
 **{{stat:clusters_named}}** of them named.
@@ -23,6 +22,8 @@ A cluster starts **unknown**. The moment you give it a name, it becomes a
 the name is retro-written onto the cluster's past events still in retention.
 Unnamed clusters that stop appearing expire on their own after
 `cluster_ttl_days`.
+
+## Walkthrough: name your first identity
 
 ```walkthrough
 - Wait until a cluster shows several sightings of the same person
@@ -42,5 +43,16 @@ Unnamed clusters that stop appearing expire on their own after
   similar.
 - **delete** — dissolve a cluster entirely (events keep their history).
 
+## Configuration
+
+The `face_enrich:` section (needs the `enrich` install extra): `enabled`,
+`cameras` to enroll, quality/matching thresholds, and `cluster_ttl_days`.
 Keep Frigate's own face recognition **disabled** on enrolled cameras — the
 sidecar is the sole author of `sub_label`, and two writers would fight.
+
+## If it goes wrong
+
+Clusters never appearing: check `face_enrich` in `/healthz`, confirm the
+camera is enrolled, and confirm the `enrich` extra is installed. The stats
+bar on the page shows the last-7-days pipeline outcomes (no-face, no-frame,
+errors), which usually points at the stage that's starving.

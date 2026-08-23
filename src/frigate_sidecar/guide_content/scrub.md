@@ -14,14 +14,16 @@ app's Scrub reel uses exactly the same cache over the same API.
 In the last 24 hours the cache generated **{{stat:scrub_sheets_24h}}**
 sprite sheets.
 
-## Using the page
+## Using it
 
 - Pick a camera with `?camera=` or the selector.
 - The timeline shows recording coverage; gaps mean Frigate recorded nothing.
 - Scrubbing near "now" works too — the cache continuously follows the live
   edge, so the newest minute is only a few seconds behind.
 
-## The `scrub:` config section
+## Configuration
+
+The `scrub:` config section:
 
 - `enabled` + `cameras` — which cameras get cached. Each camera costs disk
   and steady CPU, so enroll the ones you actually scrub.
@@ -32,6 +34,9 @@ sprite sheets.
   retention pruning runs automatically.
 - `preserve_source_aspect` / `format` control how cells are rendered.
 
-If the page shows empty strips, check `/healthz` (`scrub` component) and the
+## If it goes wrong
+
+Empty strips: check `/healthz` (`scrub` component) and the
 `media_path`/`recordings_path` mapping described in
-[First run](/guide/first-run).
+[First run](/guide/first-run). A camera missing from the picker usually
+isn't enrolled in `scrub.cameras`.
