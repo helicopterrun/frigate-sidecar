@@ -680,6 +680,16 @@ body.map-full-open { overflow: hidden; }
 .snap-card:hover { border-color: var(--accent); }
 .snap-name { position: absolute; left: 0; right: 0; bottom: 0; padding: 3px 8px; font-size: 11px; color: var(--text); background: color-mix(in srgb, var(--deep) 72%, transparent); }
 .snap-lag { position: absolute; top: 6px; right: 6px; }
+/* Hardware band: storage usage bars. */
+.hw-storage { display: flex; flex-direction: column; gap: 6px; margin: 0 0 20px; }
+.hw-mount { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.hw-mount-name { width: 90px; color: var(--muted); text-align: right; }
+.hw-bar { flex: 1; height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.hw-bar-fill { display: block; height: 100%; border-radius: 4px; }
+.hw-bar-fill.ok { background: var(--ok); }
+.hw-bar-fill.warn { background: var(--warn); }
+.hw-bar-fill.noise { background: var(--danger); }
+.hw-mount-nums { min-width: 130px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
 .section-h .section-link { color: var(--text); text-decoration: none; }
 .section-h .section-link:hover { color: var(--accent); }
 .event-strip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 8px; }

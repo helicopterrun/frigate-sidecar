@@ -65,6 +65,38 @@
     var worstCell = document.querySelector('[data-k="worst-lag"]');
     if (worstCell) worstCell.innerHTML = lagHtml(worst);
 
+    // Hardware band (present only when Frigate/host stats resolved).
+    var hw = s.hardware || {};
+    Object.keys(hw.detectors || {}).forEach(function (name) {
+      var cell = document.querySelector('[data-hw-det="' + name + '"]');
+      if (!cell) return;
+      var ms = hw.detectors[name];
+      var cls = ms < 15 ? "ok" : ms < 30 ? "warn" : "noise";
+      cell.innerHTML = '<span class="cell-class ' + cls + '">' + ms + " ms</span>";
+    });
+    function setHw(k, text) {
+      var n = document.querySelector('[data-hw="' + k + '"]');
+      if (n && text !== undefined && text !== null) n.textContent = text;
+    }
+    setHw("detection-fps", hw.detection_fps);
+    if (hw.frigate_cpu !== undefined) setHw("frigate-cpu", hw.frigate_cpu + "% · " + hw.frigate_mem + "%");
+    if (hw.gpu) setHw("gpu", hw.gpu.usage);
+    var host = hw.host || {};
+    if (host.load_1m !== undefined) setHw("load", host.load_1m + " · " + host.load_5m);
+    if (host.mem_pct !== undefined) setHw("mem", host.mem_pct + "%");
+    if (host.disk_pct !== undefined) setHw("disk", host.disk_pct + "%");
+    if (host.rss_bytes !== undefined) setHw("rss", fmtBytes(host.rss_bytes));
+    Object.keys(hw.storage || {}).forEach(function (mount) {
+      var wrap = document.querySelector('[data-hw-mount="' + CSS.escape(mount) + '"]');
+      if (!wrap) return;
+      var row = hw.storage[mount];
+      var fill = wrap.querySelector(".hw-bar-fill");
+      fill.style.width = row.pct + "%";
+      fill.className = "hw-bar-fill " + (row.pct > 90 ? "noise" : row.pct > 75 ? "warn" : "ok");
+      wrap.querySelector(".hw-mount-nums").textContent =
+        fmtBytes(row.used_bytes) + " / " + fmtBytes(row.total_bytes);
+    });
+
     // Per-camera lag badges (cameras page).
     (s.scrub.cameras || []).forEach(function (c) {
       var badge = document.querySelector('[data-cam-lag="' + c.camera + '"]');

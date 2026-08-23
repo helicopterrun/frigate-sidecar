@@ -97,6 +97,85 @@ def _dir_size_capped(root: object, max_files: int = 50_000) -> tuple[int | None,
     return total, False
 
 
+def _frigate_hardware(settings: Any) -> dict[str, Any]:
+    """Detector / CPU / GPU / storage numbers from Frigate's /api/stats.
+
+    Everything degrades to absent keys — the status page never 500s over a
+    slow or missing Frigate."""
+    from frigate_sidecar.frigate_api import FrigateClient
+
+    hw: dict[str, Any] = {"available": False}
+    try:
+        with FrigateClient(settings.frigate.base_url, timeout=_PROBE_TIMEOUT_S) as client:
+            stats = client.stats()
+    except Exception:  # noqa: BLE001 -- unreachable Frigate is just "no data"
+        return hw
+    hw["available"] = True
+    with contextlib.suppress(Exception):
+        hw["detectors"] = {
+            name: round(float(d.get("inference_speed", 0.0)), 1)
+            for name, d in stats.get("detectors", {}).items()
+        }
+    with contextlib.suppress(Exception):
+        hw["detection_fps"] = stats.get("detection_fps")
+        sys_row = stats.get("cpu_usages", {}).get("frigate.full_system", {})
+        hw["frigate_cpu"] = float(sys_row["cpu"])
+        hw["frigate_mem"] = float(sys_row["mem"])
+    with contextlib.suppress(Exception):
+        gpus = stats.get("gpu_usages") or {}
+        name, row = next(iter(gpus.items()))
+        hw["gpu"] = {"name": name, "usage": row.get("gpu")}
+    with contextlib.suppress(Exception):
+        storage = {}
+        for mount, row in (stats.get("service", {}).get("storage") or {}).items():
+            total = float(row.get("total") or 0)
+            used = float(row.get("used") or 0)
+            if total:
+                # Frigate reports MB.
+                storage[mount] = {
+                    "total_bytes": int(total * 1024 * 1024),
+                    "used_bytes": int(used * 1024 * 1024),
+                    "pct": round(100 * used / total, 1),
+                }
+        hw["storage"] = storage
+        hw["frigate_uptime_s"] = stats.get("service", {}).get("uptime")
+    return hw
+
+
+def _host_stats(settings: Any) -> dict[str, Any]:
+    """Sidecar-host vitals, stdlib only (LXC/Docker on Linux; dev on macOS)."""
+    host: dict[str, Any] = {}
+    with contextlib.suppress(OSError):
+        load1, load5, _ = os.getloadavg()
+        host["load_1m"] = round(load1, 2)
+        host["load_5m"] = round(load5, 2)
+        host["cpus"] = os.cpu_count()
+    with contextlib.suppress(Exception):
+        import shutil
+
+        du = shutil.disk_usage(str(settings.sidecar.db_path.parent))
+        host["disk_total_bytes"] = du.total
+        host["disk_used_bytes"] = du.total - du.free
+        host["disk_pct"] = round(100 * (du.total - du.free) / du.total, 1)
+    with contextlib.suppress(Exception):
+        # Linux only; absent on the dev Mac. MemAvailable is the honest number.
+        info: dict[str, int] = {}
+        with open("/proc/meminfo", encoding="ascii") as fh:
+            for line in fh:
+                key, _, rest = line.partition(":")
+                info[key] = int(rest.split()[0]) * 1024
+        host["mem_total_bytes"] = info["MemTotal"]
+        host["mem_used_bytes"] = info["MemTotal"] - info["MemAvailable"]
+        host["mem_pct"] = round(100 * host["mem_used_bytes"] / info["MemTotal"], 1)
+    with contextlib.suppress(Exception):
+        import resource
+
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Linux reports KB, macOS bytes.
+        host["rss_bytes"] = rss * 1024 if rss < 1 << 32 else rss
+    return host
+
+
 def _push_status(app_state: Any, settings: Any) -> dict[str, Any]:
     push: dict[str, Any] = {
         "enabled": settings.push.enabled,
@@ -138,6 +217,8 @@ async def _gather_status(request: Request) -> dict[str, Any]:
         _scrub_status, settings, now, getattr(request.app.state, "scrub_last_cycle", None)
     )
     push = await asyncio.to_thread(_push_status, request.app.state, settings)
+    hardware = await asyncio.to_thread(_frigate_hardware, settings)
+    hardware["host"] = await asyncio.to_thread(_host_stats, settings)
     return {
         "version": __version__,
         "time": now,
@@ -146,6 +227,7 @@ async def _gather_status(request: Request) -> dict[str, Any]:
         "proxy_enabled": settings.proxy.enabled,
         "scrub": scrub,
         "push": push,
+        "hardware": hardware,
         "sizes": {
             "sidecar_db": _file_size(settings.sidecar.db_path),
             "frigate_db": _file_size(settings.frigate.db_path),
