@@ -19,6 +19,7 @@ from frigate_sidecar.config import (
     SidecarSection,
 )
 from frigate_sidecar.faces import enrich
+from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient
 from frigate_sidecar.server import create_app
 from tests.conftest import FRIGATE_EVENT_SCHEMA
 
@@ -76,12 +77,37 @@ def test_clusters_json_orders_named_first(client: TestClient) -> None:
     assert clusters[0]["sample_event_id"] == "ev-a"
 
 
-def test_naming_promotes_and_rebuilds_centroid(client: TestClient) -> None:
+def test_naming_promotes_rebuilds_and_retro_labels(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    written: list[tuple[str, str]] = []
+
+    def _fake_set(self: Any, event_id: str, sub_label: str, *, score: Any = None) -> None:
+        if event_id == "ev-expired":
+            raise FrigateAPIError("HTTP 404")
+        written.append((event_id, sub_label))
+
+    monkeypatch.setattr(FrigateClient, "set_sub_label", _fake_set)
     r = client.post("/enrich/clusters/2/name", json={"name": "mail carrier"})
     assert r.status_code == 200
+    # Cluster 2 has one sighting (ev-b); it gets retro-labeled.
+    assert r.json()["relabeled"] == 1
+    assert written == [("ev-b", "mail carrier")]
     listing = client.get("/enrich/clusters.json").json()["clusters"]
     names = {c["cluster_id"]: c["name"] for c in listing}
     assert names[2] == "mail carrier"
+
+
+def test_retro_label_survives_expired_events(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _always_404(self: Any, event_id: str, sub_label: str, *, score: Any = None) -> None:
+        raise FrigateAPIError("HTTP 404")
+
+    monkeypatch.setattr(FrigateClient, "set_sub_label", _always_404)
+    r = client.post("/enrich/clusters/1/name", json={"name": "alice"})
+    assert r.status_code == 200
+    assert r.json()["relabeled"] == 0
 
 
 def test_naming_rejects_blank_and_missing(client: TestClient) -> None:
@@ -104,6 +130,46 @@ def test_delete_clears_assignments(client: TestClient) -> None:
 
 def test_thumb_rejects_unknown_event(client: TestClient) -> None:
     assert client.get("/enrich/thumb/not-ours").status_code == 404
+
+
+def test_page_shows_sightings_stats_and_similar_hint(client: TestClient) -> None:
+    r = client.get("/enrich/clusters")
+    assert r.status_code == 200
+    # Sighting strip: both seeded events render thumbnails + snapshot links.
+    assert "/enrich/thumb/ev-a" in r.text
+    assert "/api/events/ev-a/snapshot.jpg" in r.text
+    # Stats bar renders (both seeded rows have event_start_ts=0, outside 7d).
+    assert "enriched" in r.text and "worker:" in r.text
+    # Seeded centroids are orthogonal — no similarity hint.
+    assert "looks like" not in r.text
+
+
+def test_similar_hint_appears_for_close_centroids(client: TestClient) -> None:
+    # Pull cluster 2's centroid next to cluster 1's.
+    conn = sqlite3.connect(client.app.state.settings.sidecar.db_path)  # type: ignore[attr-defined]
+    conn.execute(
+        "UPDATE face_clusters SET centroid = ? WHERE cluster_id = 2",
+        (enrich.pack_embedding(enrich.l2_normalize([0.95, 0.05])),),
+    )
+    conn.commit()
+    conn.close()
+    r = client.get("/enrich/clusters")
+    assert "looks like" in r.text
+    sim = client.get("/enrich/clusters.json").json()["similar"]
+    assert sim["2"]["cluster_id"] == 1 and sim["2"]["name"] == "alice"
+
+
+def test_sighting_remove_detaches_and_deletes_empty_cluster(client: TestClient) -> None:
+    # ev-b is cluster 2's only sighting: removing it deletes the cluster.
+    r = client.post("/enrich/events/ev-b/remove")
+    assert r.status_code == 200 and r.json()["cluster_deleted"] is True
+    clusters = client.get("/enrich/clusters.json").json()["clusters"]
+    assert [c["cluster_id"] for c in clusters] == [1]
+    # ev-a stays in cluster 1, which survives with a rebuilt centroid.
+    r = client.post("/enrich/events/ev-a/remove")
+    assert r.json()["cluster_deleted"] is True  # it was also the only sighting
+    # A detached sighting can't be removed twice.
+    assert client.post("/enrich/events/ev-a/remove").status_code == 404
 
 
 # ---------------------------------------------------------------------------
