@@ -6,7 +6,9 @@ the live sidecar's card pipeline (Phase 5) runs end to end: per-device
 filtering, snooze, rate cap, quiet hours, payload construction, relay/APNs,
 and the app's NSE all exercise against a registered device.
 
-Scenarios live in `tools/replay-scenarios/card-*.json`. Each step specifies
+Scenarios ship as package data in
+`src/frigate_sidecar/push/replay_scenarios/card-*.json` so an installed sidecar
+has them too (the web UI at /replay reads the same set). Each step specifies
 its topic (`frigate/reviews` or `frigate/events`) so the tool drives both
 the review-create/enrich path and the object-end resolve path — the full
 card lifecycle.
@@ -65,7 +67,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--scenario",
-        help="Scenario name (looked up in tools/replay-scenarios/<name>.json) "
+        help="Scenario name (looked up in the packaged set, "
+        "frigate_sidecar/push/replay_scenarios/<name>.json) "
         "or a path to a scenario JSON file.",
     )
     parser.add_argument("--camera", help="Override the scenario's default camera.")

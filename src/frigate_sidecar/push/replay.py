@@ -22,7 +22,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SCENARIOS_DIR = Path(__file__).resolve().parents[3] / "tools" / "replay-scenarios"
+# Package data, NOT repo-relative. The wheel ships only src/frigate_sidecar, so a
+# `tools/`-relative path resolved to /usr/local/lib/python3.10/tools on an installed
+# sidecar: every scenario silently vanished (/replay listed none, every run 400'd)
+# while the repo checkout looked fine. Same idiom as server.py's _TEMPLATES_DIR.
+SCENARIOS_DIR = Path(__file__).parent / "replay_scenarios"
 REPLAY_ID_PREFIX = "replay-"
 
 

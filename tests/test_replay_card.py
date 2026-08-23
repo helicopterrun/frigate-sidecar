@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from frigate_sidecar.push import replay as replay_core
+
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 
 _spec = importlib.util.spec_from_file_location(
@@ -233,3 +235,17 @@ def test_cli_unknown_scenario_errors(capsys):
     exit_code = replay_card.main(["--scenario", "nope", "--dry-run"])
     assert exit_code == 1
     assert "nope" in capsys.readouterr().err
+
+
+def test_scenarios_ship_inside_the_package_not_the_repo():
+    """Regression: a repo-relative SCENARIOS_DIR is invisible to an installed sidecar.
+
+    The wheel packages only `src/frigate_sidecar`, so a path resolved out of the
+    repo's `tools/` lands beside site-packages and globs nothing -- /replay renders
+    an empty picker and every run 400s, with no error logged anywhere. Assert
+    containment rather than a literal path, so a future rename stays free.
+    """
+    package_root = Path(replay_core.__file__).resolve().parents[1]
+    scenarios_dir = replay_core.SCENARIOS_DIR.resolve()
+    assert scenarios_dir.is_relative_to(package_root), scenarios_dir
+    assert sorted(p.name for p in scenarios_dir.glob("card-*.json"))
