@@ -74,6 +74,27 @@ def healthz(request: Request) -> JSONResponse:
         else:
             checks["scrub"] = "starting"
 
+    if settings.face_enrich.enabled:
+        # Same staleness shape as scrub. The worker stamps last_cycle only on
+        # a completed run_cycle, so a wedged model load or a dead task both
+        # read as stale here rather than as silence.
+        tick = settings.face_enrich.interval_s
+        last_cycle = getattr(app.state, "face_enrich_last_cycle", None)
+        started_at = getattr(app.state, "started_at", now)
+        if last_cycle is not None:
+            age = now - last_cycle
+            checks["face_enrich_last_cycle_age_s"] = round(age, 1)
+            if age > tick * _SCRUB_STALE_TICKS:
+                checks["face_enrich"] = "stale"
+                ok = False
+            else:
+                checks["face_enrich"] = "ok"
+        elif now - started_at > tick * _SCRUB_STALE_TICKS:
+            checks["face_enrich"] = "stale"
+            ok = False
+        else:
+            checks["face_enrich"] = "starting"
+
     body = {"status": "ok" if ok else "degraded", "checks": checks}
     return JSONResponse(body, status_code=200 if ok else 503)
 

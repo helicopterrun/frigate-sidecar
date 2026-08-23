@@ -113,3 +113,24 @@ rest.
 
 Checks: `python3 -m frigate_sidecar face-capture stats` (counts + last-run
 heartbeat), `face-capture scan` (one manual pass), `face-capture prune`.
+
+### Face enrichment (optional)
+
+`face_enrich:` runs **inside the main service** as a lifespan worker (no extra
+unit): for each ended `person` event on an enrolled camera it samples full-res
+recording frames, embeds the best faces (InsightFace buffalo_l, CPU-only), and
+clusters identities at `/enrich/clusters`. Naming a cluster makes later matches
+write the event's `sub_label` back to Frigate — disable Frigate's own face
+recognition on those cameras first so the sidecar is the only writer.
+
+Setup:
+
+1. `pip install "frigate-sidecar[enrich]"` (adds insightface + onnxruntime).
+2. Set `face_enrich.enabled: true` and `cameras:` in `sidecar.yml`. The model
+   pack (~300 MB) downloads into `model_dir` on the first cycle — keep it
+   under `/opt/frigate-sidecar` (ProtectSystem=strict) and expect the first
+   cycle to be slow; pre-warm with
+   `python3 -c "from frigate_sidecar.faces.enrich import _engine; _engine('/opt/frigate-sidecar/data/models')"`
+   as the service user if you want the download done before restart.
+3. Restart and watch `/healthz` — a `face_enrich` check appears (ok/starting/
+   stale) alongside the scrub one.
