@@ -647,6 +647,9 @@ body.map-full-open { overflow: hidden; }
 .snap-card img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: var(--panel); }
 .snap-card:hover { border-color: var(--accent); }
 .snap-name { position: absolute; left: 0; right: 0; bottom: 0; padding: 3px 8px; font-size: 11px; color: var(--text); background: color-mix(in srgb, var(--deep) 72%, transparent); }
+.snap-lag { position: absolute; top: 6px; right: 6px; }
+.section-h .section-link { color: var(--text); text-decoration: none; }
+.section-h .section-link:hover { color: var(--accent); }
 .event-strip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 8px; }
 .event-card { flex: 0 0 auto; display: flex; flex-direction: column; width: 150px; border: 1px solid var(--stroke); border-radius: var(--radius-md); overflow: hidden; background: var(--surface); text-decoration: none; }
 .event-card img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; background: var(--panel); }

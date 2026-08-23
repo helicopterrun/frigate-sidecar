@@ -46,7 +46,7 @@
     setCell("last-cycle", s.scrub.last_cycle_s_ago !== null && s.scrub.last_cycle_s_ago !== undefined
       ? s.scrub.last_cycle_s_ago + "s ago" : "—");
     if (s.scrub.sheet_count !== undefined) setCell("sheets", String(s.scrub.sheet_count));
-    setCell("scrub-cache", fmtBytes(s.sizes.scrub_cache));
+    setCell("scrub-cache", (s.sizes.scrub_cache_capped ? "≥ " : "") + fmtBytes(s.sizes.scrub_cache));
     setCell("mqtt", s.push.mqtt_connected ? "live" : "stale", s.push.mqtt_connected ? "ok" : "noise");
     setCell("frigate-online", s.push.frigate_online ? "online" : "offline",
       s.push.frigate_online ? "ok" : "noise");
@@ -54,9 +54,21 @@
       ? s.push.last_event_s_ago + "s ago" : "—");
     setCell("sidecar-db", fmtBytes(s.sizes.sidecar_db));
     setCell("frigate-db", fmtBytes(s.sizes.frigate_db));
+
+    // Worst live-edge lag across cameras (status page tile).
+    var worst = null;
     (s.scrub.cameras || []).forEach(function (c) {
-      var cell = document.querySelector('#scrub-cams td[data-cam="' + c.camera + '"]');
-      if (cell) cell.innerHTML = lagHtml(c.lag_s);
+      if (c.lag_s !== null && c.lag_s !== undefined && (worst === null || c.lag_s > worst)) {
+        worst = c.lag_s;
+      }
+    });
+    var worstCell = document.querySelector('[data-k="worst-lag"]');
+    if (worstCell) worstCell.innerHTML = lagHtml(worst);
+
+    // Per-camera lag badges (cameras page).
+    (s.scrub.cameras || []).forEach(function (c) {
+      var badge = document.querySelector('[data-cam-lag="' + c.camera + '"]');
+      if (badge) badge.innerHTML = lagHtml(c.lag_s);
     });
   }
 
@@ -136,5 +148,6 @@
     else { tick(); mediaTick(); start(); }
   });
   start();
+  tick();
   refreshEvents();
 })();

@@ -32,7 +32,6 @@ UNDOCUMENTED_OK = {
     "/guide/{slug}",
     "/zones",
     "/devices",
-    "/cameras",
     "/cameras2",
 }
 

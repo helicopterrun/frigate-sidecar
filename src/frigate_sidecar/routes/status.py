@@ -47,6 +47,7 @@ def _scrub_status(settings: Any, now: float, last_cycle: float | None) -> dict[s
         "last_cycle_s_ago": (round(now - last_cycle, 1) if last_cycle else None),
         "cameras": [],
         "cache_bytes": None,
+        "cache_bytes_capped": False,
     }
     if not settings.scrub.enabled:
         return scrub
@@ -71,13 +72,16 @@ def _scrub_status(settings: Any, now: float, last_cycle: float | None) -> dict[s
         pass
     finally:
         conn.close()
-    scrub["cache_bytes"] = _dir_size_capped(settings.scrub.cache_dir)
+    scrub["cache_bytes"], scrub["cache_bytes_capped"] = _dir_size_capped(
+        settings.scrub.cache_dir
+    )
     return scrub
 
 
-def _dir_size_capped(root: object, max_files: int = 50_000) -> int | None:
-    """Total bytes under `root`, bailing out (None) past `max_files` so a
-    pathological cache can't stall the status page."""
+def _dir_size_capped(root: object, max_files: int = 50_000) -> tuple[int | None, bool]:
+    """(total bytes under `root`, capped?). Stops counting past `max_files`
+    so a pathological cache can't stall the status page — the partial total
+    is still reported, flagged as a floor rather than an exact size."""
     total = 0
     seen = 0
     try:
@@ -85,12 +89,12 @@ def _dir_size_capped(root: object, max_files: int = 50_000) -> int | None:
             for name in filenames:
                 seen += 1
                 if seen > max_files:
-                    return None
+                    return total, True
                 with contextlib.suppress(OSError):
                     total += os.stat(os.path.join(dirpath, name)).st_size
     except OSError:
-        return None
-    return total
+        return None, False
+    return total, False
 
 
 def _push_status(app_state: Any, settings: Any) -> dict[str, Any]:
@@ -146,6 +150,7 @@ async def _gather_status(request: Request) -> dict[str, Any]:
             "sidecar_db": _file_size(settings.sidecar.db_path),
             "frigate_db": _file_size(settings.frigate.db_path),
             "scrub_cache": scrub.get("cache_bytes"),
+            "scrub_cache_capped": scrub.get("cache_bytes_capped", False),
         },
     }
 
@@ -153,6 +158,18 @@ async def _gather_status(request: Request) -> dict[str, Any]:
 @router.get("/status.json")
 async def status_json(request: Request) -> dict[str, Any]:
     return await _gather_status(request)
+
+
+@router.get("/cameras", response_class=HTMLResponse)
+def cameras_page(request: Request) -> Any:
+    """Live camera grid: snapshot tiles with scrub live-edge lag badges."""
+    settings = request.app.state.settings
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "cameras.html",
+        {"cameras": _camera_names(settings), "scrub_enabled": settings.scrub.enabled},
+    )
 
 
 @router.get("/live/{camera}", response_class=HTMLResponse)
