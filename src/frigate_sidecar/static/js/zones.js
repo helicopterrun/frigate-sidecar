@@ -156,16 +156,31 @@
     markDirty();
   }
 
+  // Which per-camera disclosure rows are open — survives re-renders so
+  // ticking a box doesn't slam the row shut.
+  var nbOpen = {};
+
   function renderNeighbors(cameras) {
     neighborsList.textContent = "";
     neighborsList.classList.remove("skeleton");
     cameras.forEach(function (camera) {
-      var row = el("div", { style: "margin:0.35em 0" });
-      row.appendChild(el("strong", { text: camera, style: "margin-right:0.6em" }));
       var linked = neighborSet(camera);
+      var names = Object.keys(linked).sort();
+      var det = el("details", { class: "nb-row" });
+      if (nbOpen[camera]) det.open = true;
+      det.addEventListener("toggle", function () { nbOpen[camera] = det.open; });
+      var sum = el("summary", {}, [
+        el("strong", { text: camera }),
+        el("span", {
+          class: "help",
+          text: names.length ? " — " + names.join(", ") : " — no neighbors",
+        }),
+      ]);
+      det.appendChild(sum);
+      var chips = el("div", { class: "nb-chips" });
       cameras.forEach(function (other) {
         if (other === camera) return;
-        var label = el("label", { style: "margin-right:0.6em;white-space:nowrap" });
+        var label = el("label", { class: "nb-chip" + (linked[other] ? " on" : "") });
         var box = el("input", { type: "checkbox" });
         box.checked = !!linked[other];
         box.addEventListener("change", function () {
@@ -173,10 +188,11 @@
           renderNeighbors(cameras); // re-render so the mirror row updates
         });
         label.appendChild(box);
-        label.appendChild(document.createTextNode(" " + other));
-        row.appendChild(label);
+        label.appendChild(document.createTextNode(other));
+        chips.appendChild(label);
       });
-      neighborsList.appendChild(row);
+      det.appendChild(chips);
+      neighborsList.appendChild(det);
     });
   }
 

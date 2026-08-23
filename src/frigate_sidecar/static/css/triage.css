@@ -524,8 +524,19 @@ a { color: var(--accent); }
 
 /* ----- Shared page-layout helpers (inline-style migration, 2026-08) ----- */
 .page-intro { margin: 0 0 1em; }
-.section-title { margin: 1.5em 0 0.5em; }
+.section-title { margin: 1.5em 0 0.5em; scroll-margin-top: 12px; }
 .section-title.first { margin-top: 0; }
+/* Settings: jump-nav chips + per-camera neighbor disclosures. */
+.settings-nav { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
+.settings-nav .page-link { border: 1px solid var(--stroke); }
+.nb-row { border: 1px solid var(--stroke-soft); border-radius: var(--radius-sm); margin: 4px 0; background: var(--surface); }
+.nb-row > summary { list-style: none; cursor: pointer; user-select: none; padding: 8px 10px; font-size: 13px; }
+.nb-row > summary::-webkit-details-marker { display: none; }
+.nb-row > summary::after { content: " ▾"; font-size: 9px; color: var(--muted-2); }
+.nb-row[open] > summary::after { content: " ▴"; }
+.nb-chips { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 10px 10px; }
+.nb-chip { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; font-size: 12px; border: 1px solid var(--stroke); border-radius: 999px; cursor: pointer; color: var(--muted); }
+.nb-chip.on { border-color: var(--accent); color: var(--text); background: var(--surface-2); }
 .section-block { margin-top: 1.5em; }
 .subsection { margin-top: 0.75em; }
 .control-row { margin: 0.5em 0; }
