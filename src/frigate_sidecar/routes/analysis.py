@@ -244,16 +244,36 @@ def alignment_events(
     out = []
     for r in rows:
         extent = 0.0
+        anchor = r["start_time"]
         if data_col:
             try:
                 parsed = json_mod.loads(r["data"]) if r["data"] else {}
             except (json_mod.JSONDecodeError, TypeError):
                 parsed = {}
-            pts = db.parse_path_data(parsed.get("path_data") if isinstance(parsed, dict) else None)
+            if not isinstance(parsed, dict):
+                parsed = {}
+            pts = db.parse_path_data(parsed.get("path_data"))
             if len(pts) >= 2:
                 xs = [p[0] for p in pts]
                 ys = [p[1] for p in pts]
                 extent = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+            # The snapshot is the BEST-SCORING frame, not the start frame.
+            # Anchoring the visual match at start_time would fold the
+            # start-to-peak delay into the measured offset -- a delay that
+            # varies per event (and correlates with travel direction, which is
+            # how it was noticed). The path point nearest the snapshot box's
+            # bottom-centre is the snapshot's own detect-clock moment.
+            box = parsed.get("box")
+            if pts and isinstance(box, list) and len(box) == 4:
+                try:
+                    bx = float(box[0]) + float(box[2]) / 2
+                    by = float(box[1]) + float(box[3])
+                    nearest = min(
+                        pts, key=lambda p: (p[0] - bx) ** 2 + (p[1] - by) ** 2
+                    )
+                    anchor = nearest[2]
+                except (TypeError, ValueError):
+                    pass
         out.append(
             {
                 "id": r["id"],
@@ -263,6 +283,9 @@ def alignment_events(
                 "end_time": r["end_time"],
                 "top_score": r["top_score"],
                 "extent": round(extent, 3),
+                # The detect-clock moment the snapshot shows; the calibrator
+                # anchors its filmstrip and preview here, not at start_time.
+                "anchor_time": anchor,
             }
         )
     out.sort(key=lambda e: (-e["extent"], -e["start_time"]))

@@ -329,16 +329,23 @@ def test_alignment_events_sort_by_movement(
 
     now = time.time()
     conn = sqlite3.connect(frigate_db_path)
-    # Older, but crosses most of the frame.
+    # Older, but crosses most of the frame. Its snapshot box sits at x=0.5
+    # (bottom-centre 0.5, 0.5) -- the path point 8 s into the walk.
     mover = [[[0.1 + 0.05 * i, 0.5], now - 2000 + i] for i in range(15)]
-    # Newer, but barely moves.
+    # Newer, but barely moves; no box -> anchor falls back to start.
     shuffler = [[[0.5 + 0.002 * i, 0.5], now - 400 + i] for i in range(15)]
-    for eid, dt, path in (("mv", -2000, mover), ("sh", -400, shuffler)):
+    for eid, dt, path, box in (
+        ("mv", -2000, mover, [0.45, 0.3, 0.1, 0.2]),
+        ("sh", -400, shuffler, None),
+    ):
+        data: dict = {"path_data": path}
+        if box:
+            data["box"] = box
         conn.execute(
             "INSERT INTO event (id, camera, label, start_time, end_time, zones, "
             "has_clip, has_snapshot, data) VALUES (?, 'alley-overview', 'person', "
             "?, ?, '[]', 1, 1, ?)",
-            (eid, now + dt, now + dt + 30, json_mod.dumps({"path_data": path})),
+            (eid, now + dt, now + dt + 30, json_mod.dumps(data)),
         )
     conn.commit()
     conn.close()
@@ -351,6 +358,13 @@ def test_alignment_events_sort_by_movement(
     assert ids.index("mv") < ids.index("sh")
     events = {e["id"]: e for e in r.json()}
     assert events["mv"]["extent"] > events["sh"]["extent"] > 0
+
+    # The snapshot is the best-scoring frame, not the start frame: the anchor
+    # is the path moment nearest the snapshot box (x=0.5 -> 8 s in), so the
+    # measured offset excludes the start-to-peak delay (which varies with
+    # travel direction and inflated per-event spread).
+    assert events["mv"]["anchor_time"] == pytest.approx(now - 2000 + 8, abs=0.01)
+    assert events["sh"]["anchor_time"] == pytest.approx(events["sh"]["start_time"])
 
     r = client.get(
         "/analysis/annotation-offset/events",

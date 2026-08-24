@@ -75,7 +75,10 @@
     var strip = overlay.querySelector("#calib-strip");
     strip.textContent = "";
     if (!state.event) return;
-    var start = state.event.start_time;
+    // Anchor at the snapshot's own moment (anchor_time), not event start:
+    // the snapshot is the best-scoring frame, and anchoring at start would
+    // fold each event's start-to-peak delay into the measured offset.
+    var start = state.event.anchor_time || state.event.start_time;
     var step = state.stepMs;
     // Centre the strip on the current offset, snapped to the step grid.
     var center = Math.round(state.offsetMs / step) * step;
@@ -143,7 +146,10 @@
     if (state.event) {
       missing.style.display = "none";
       img.style.display = "";
-      img.src = frameUrl(state.camera, state.event.start_time + state.offsetMs / 1000);
+      img.src = frameUrl(
+        state.camera,
+        (state.event.anchor_time || state.event.start_time) + state.offsetMs / 1000
+      );
     }
     // Fine nudges follow the strip's step; ±1 s stays put.
     var fine = state.stepMs === 1000 ? 250 : state.stepMs;
@@ -356,7 +362,7 @@
 
     var pair = SC.el("div", { class: "calib-pair" }, [
       SC.el("div", { class: "calib-pane" }, [
-        SC.el("div", { class: "calib-caption", text: "what Frigate saw · event start" }),
+        SC.el("div", { class: "calib-caption", text: "what Frigate saw · snapshot moment" }),
         SC.el("div", { class: "calib-pane-img" }, [
           SC.el("img", { id: "calib-snap", alt: "event snapshot" }),
         ]),
