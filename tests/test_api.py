@@ -409,6 +409,61 @@ def test_alignment_snapshot_proxies_frigate(
     assert r.status_code == 404
 
 
+def test_alignment_apply_config_writes_frigate_and_clears_override(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The config-pinned escalation path: value goes into Frigate's config
+    (the authoritative source), Frigate restarts, and the sidecar override is
+    cleared so the two sources cannot disagree."""
+    from frigate_sidecar import frigate_api
+
+    calls: list[tuple[str, object]] = []
+
+    def _fake_set(self: object, camera: str, offset_ms: int) -> None:
+        calls.append(("set", (camera, offset_ms)))
+
+    def _fake_restart(self: object) -> None:
+        calls.append(("restart", None))
+
+    monkeypatch.setattr(frigate_api.FrigateClient, "set_annotation_offset", _fake_set)
+    monkeypatch.setattr(frigate_api.FrigateClient, "restart", _fake_restart)
+
+    # Seed a sidecar override that the config write must clear.
+    r = client.post(
+        "/analysis/annotation-offset/apply", json={"offsets": {"doorbell": -3000}}
+    )
+    assert r.status_code == 200
+
+    r = client.post(
+        "/analysis/annotation-offset/apply-config",
+        json={"camera": "doorbell", "offset_ms": -2250},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["config_ms"] == -2250
+    assert body["restarting"] is True
+    assert body["committed"] is False  # test config dir is not a git repo
+    assert calls == [("set", ("doorbell", -2250)), ("restart", None)]
+
+    state = client.get("/analysis/annotation-offset/state").json()
+    assert "doorbell" not in state["applied_ms"]
+
+
+def test_alignment_apply_config_rejects_garbage(client: TestClient) -> None:
+    r = client.post("/analysis/annotation-offset/apply-config", json={})
+    assert r.status_code == 422
+    r = client.post(
+        "/analysis/annotation-offset/apply-config",
+        json={"camera": "cam", "offset_ms": "soon"},
+    )
+    assert r.status_code == 422
+    r = client.post(
+        "/analysis/annotation-offset/apply-config",
+        json={"camera": "cam", "offset_ms": 120_000},
+    )
+    assert r.status_code == 422
+
+
 def test_alignment_frame_rejects_bad_ts(client: TestClient) -> None:
     import time
 

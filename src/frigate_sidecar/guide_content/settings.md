@@ -38,7 +38,9 @@ the sidecar's own knobs in one place.
   reel alike.
   Setting `detect.annotation_offset` (milliseconds) in Frigate's own
   `config.yml` does the same job, also fixes Frigate's own annotation overlay,
-  and wins over anything applied here. Worth doing once at setup and again if
+  and wins over anything applied here — and for cameras already pinned that
+  way, the calibrator's save writes the new value straight into Frigate's
+  config and restarts Frigate (~30 s), so the two sources never disagree. Worth doing once at setup and again if
   a camera is replaced or its streams reconfigured.
 - **Faces** — a read-only view of the face pipeline configuration.
 - **Appearance** — the theme picker (five palettes shared with the app).

@@ -174,16 +174,31 @@
   async function save(button) {
     if (!state.event) return;
     button.disabled = true;
-    var offsets = {};
-    offsets[state.camera] = Math.round(state.offsetMs);
+    var ms = Math.round(state.offsetMs);
     try {
-      var resp = await fetch("/analysis/annotation-offset/apply", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ offsets: offsets }),
-      });
-      if (!resp.ok) throw new Error("HTTP " + resp.status);
-      SC.toast("offset saved: " + fmtMs(state.offsetMs));
+      var resp;
+      if (state.configMs) {
+        // Config-pinned camera: write where the value is authoritative --
+        // Frigate's own config -- and let Frigate restart to pick it up.
+        resp = await fetch("/analysis/annotation-offset/apply-config", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ camera: state.camera, offset_ms: ms }),
+        });
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        SC.toast("saved to Frigate config: " + fmtMs(ms)
+          + " — Frigate is restarting (~30 s)");
+      } else {
+        var offsets = {};
+        offsets[state.camera] = ms;
+        resp = await fetch("/analysis/annotation-offset/apply", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ offsets: offsets }),
+        });
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        SC.toast("offset saved: " + fmtMs(ms));
+      }
       var cb = state.onSaved;
       close();
       if (cb) cb();
@@ -220,7 +235,7 @@
 
     var saveBtn = SC.el("button", {
       class: "btn-primary",
-      text: state.configMs ? "Save anyway" : "Save offset",
+      text: state.configMs ? "Save to Frigate config" : "Save offset",
     });
     saveBtn.addEventListener("click", function () { save(saveBtn); });
     var closeBtn = SC.el("button", { class: "btn-neutral", text: "✕" });
@@ -294,9 +309,9 @@
     ]);
     if (state.configMs) {
       panel.insertBefore(SC.el("div", { class: "calib-warn", text:
-        "Frigate's config sets detect.annotation_offset " + fmtMs(state.configMs)
-        + " for this camera, which overrides anything saved here. To use your "
-        + "calibrated value, set it in Frigate's config.yml instead." },
+        "This camera's offset lives in Frigate's config ("
+        + fmtMs(state.configMs) + "). Saving writes the new value there and "
+        + "restarts Frigate (~30 s) so its own annotation overlay is fixed too." },
       ), panel.querySelector(".calib-events"));
     }
 
