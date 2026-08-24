@@ -28,10 +28,15 @@
     var applied = state.applied_ms || {};
     var config = state.config_ms || {};
     resultsEl.textContent = "";
-    // Cameras with an applied/config offset but no fresh measurement still show.
+    // Cameras with an applied/config offset but no fresh measurement still show
+    // — a calibrated camera must keep its row, or there is nowhere to
+    // recalibrate it from.
     var cams = {};
     results.forEach(function (r) { cams[r.camera] = r; });
     Object.keys(applied).forEach(function (c) { if (!cams[c]) cams[c] = { camera: c }; });
+    Object.keys(config).forEach(function (c) {
+      if (config[c] && !cams[c]) cams[c] = { camera: c };
+    });
     var names = Object.keys(cams).sort();
     if (!names.length) {
       var empty = SC.el("div", { class: "empty", text: state.running
