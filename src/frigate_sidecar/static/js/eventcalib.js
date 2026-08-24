@@ -98,7 +98,7 @@
     var ref = overlay.querySelector("#calib-ref");
     ref.textContent = "";
     ref.appendChild(SC.el("img", {
-      src: "/api/events/" + encodeURIComponent(ev.id) + "/thumbnail.jpg",
+      src: "/analysis/annotation-offset/thumbnail/" + encodeURIComponent(ev.id),
       alt: "event thumbnail",
     }));
     overlay.querySelectorAll("#calib-events .calib-event").forEach(function (el) {
@@ -122,7 +122,7 @@
       var card = SC.el("div", { class: "calib-event" });
       card.dataset.id = ev.id;
       card.appendChild(SC.el("img", {
-        src: "/api/events/" + encodeURIComponent(ev.id) + "/thumbnail.jpg",
+        src: "/analysis/annotation-offset/thumbnail/" + encodeURIComponent(ev.id),
         loading: "lazy", alt: "",
       }));
       card.appendChild(SC.el("span", {
