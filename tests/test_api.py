@@ -378,6 +378,38 @@ def test_alignment_events_sort_by_movement(
     assert r.json() == []
 
 
+def test_alignment_events_exclude_pruned_recordings(
+    client: TestClient, frigate_db_path: Path
+) -> None:
+    """A quiet camera's best movers can predate recording retention -- offering
+    them yields a filmstrip of nothing but 404s. Only events the recordings
+    can still show are listed."""
+    import sqlite3
+    import time
+
+    now = time.time()
+    conn = sqlite3.connect(frigate_db_path)
+    conn.executescript(
+        "CREATE TABLE recordings (id TEXT PRIMARY KEY, camera TEXT, "
+        "start_time REAL, end_time REAL);"
+    )
+    # Oldest surviving recording: 1 hour ago.
+    conn.execute(
+        "INSERT INTO recordings VALUES ('r1', 'alley-overview', ?, ?)",
+        (now - 3600, now - 3590),
+    )
+    conn.commit()
+    conn.close()
+
+    r = client.get(
+        "/analysis/annotation-offset/events", params={"camera": "alley-overview"}
+    )
+    ids = [e["id"] for e in r.json()]
+    # e1 (-300 s) and e2 (-600 s) are inside retention; e5 (-30 d) is not.
+    assert "e1" in ids and "e2" in ids
+    assert "e5" not in ids
+
+
 def test_alignment_frame_proxies_recording_snapshot(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
