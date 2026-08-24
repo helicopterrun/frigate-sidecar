@@ -968,3 +968,94 @@ def test_capabilities_hides_renamed_camera_ghosts(
     c = TestClient(create_app(settings))
     body = c.get("/v1/capabilities").json()
     assert body["scrub_cache"]["cameras"] == ["doorbell"]
+
+
+def test_event_times_are_shifted_by_annotation_offset(
+    frigate_db_with_recordings: Path,
+    sidecar_db_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Events land on the record clock: `detect.annotation_offset` (ms) is added
+    to start/end in /v1/reel and /v1/highlights, and window bounds are shifted
+    the other way so filtering is consistent. Frames/coverage in the same
+    responses are already record-clock; without this shift the event lanes sit
+    visibly beside the pictures they describe."""
+    fake_config = tmp_path / "frigate-config-offset.yml"
+    fake_config.write_text(
+        "cameras:\n  doorbell:\n    detect:\n      annotation_offset: -5000\n"
+    )
+    settings = Settings(
+        frigate=FrigateSection(
+            base_url="http://frigate.test:5000",
+            config_path=fake_config,
+            db_path=frigate_db_with_recordings,
+        ),
+        sidecar=SidecarSection(db_path=sidecar_db_path, bind_port=5001),
+        scrub=ScrubSection(enabled=False, retention_days=4, cache_dir=tmp_path / "scrub"),
+    )
+    client = TestClient(create_app(settings))
+    _skip_auth(monkeypatch)
+    scrub_routes._annotation_offset_cache.clear()
+
+    async def _fake_motion(
+        settings: object, camera: str, start: float, end: float, scale: float
+    ) -> list[float]:
+        return [0.0] * int((end - start) / scale)
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _fake_motion)
+
+    conn = sqlite3.connect(frigate_db_with_recordings)
+    conn.row_factory = sqlite3.Row
+    raw = {
+        r["id"]: (r["start_time"], r["end_time"])
+        for r in conn.execute("SELECT * FROM event").fetchall()
+    }
+    conn.close()
+
+    now = time.time()
+    r = client.get(
+        "/v1/reel/doorbell",
+        params={"start": now - 3700, "end": now, "motion_scale": 10},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    events = {e["id"]: e for e in r.json()["events"]}
+    assert events["ev1"]["start"] == pytest.approx(raw["ev1"][0] - 5.0)
+    assert events["ev1"]["end"] == pytest.approx(raw["ev1"][1] - 5.0)
+    assert events["ev2"]["end"] is None  # in-progress stays null, never shifted
+
+    r = client.get(
+        "/v1/highlights/doorbell",
+        params={"before": now, "limit": 10},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    starts = sorted(h["start"] for h in r.json()["highlights"])
+    expected = sorted(s - 5.0 for (s, _e) in raw.values())
+    assert starts == pytest.approx(expected)
+
+
+def test_event_times_unshifted_without_annotation_offset(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No annotation_offset in the config -> byte-identical behavior."""
+    _skip_auth(monkeypatch)
+    scrub_routes._annotation_offset_cache.clear()
+
+    async def _fake_motion(
+        settings: object, camera: str, start: float, end: float, scale: float
+    ) -> list[float]:
+        return [0.0] * int((end - start) / scale)
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _fake_motion)
+
+    now = time.time()
+    r = client.get(
+        "/v1/reel/doorbell",
+        params={"start": now - 3700, "end": now, "motion_scale": 10},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    events = {e["id"]: e for e in r.json()["events"]}
+    assert events["ev1"]["start"] == pytest.approx(now - 200, abs=5)

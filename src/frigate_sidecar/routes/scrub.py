@@ -24,6 +24,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
 from frigate_sidecar import __version__, db, zones
+from frigate_sidecar.faces.crosscam import annotation_offset_ms
 from frigate_sidecar.frigate_api import (
     FrigateAPIError,
     async_activity_motion,
@@ -385,12 +386,46 @@ async def motion(camera: str, start: float, end: float, scale: float, request: R
     return {"start": start, "interval": scale, "values": values}
 
 
-def _events_json(conn: Any, camera: str, start: float, end: float) -> list[dict[str, Any]]:
+#: `annotation_offset` cache: (config mtime, offset seconds) per camera. The
+#: config is a file read + YAML parse, and /v1/reel is called on a 10 s cadence
+#: per open reel -- once per camera per config edit is enough.
+_annotation_offset_cache: dict[str, tuple[float, float]] = {}
+
+
+def _event_clock_offset_s(settings: Any, camera: str) -> float:
+    """Seconds to add to detect-stream event times to land on the record clock.
+
+    Frigate stamps events from the detect stream and recordings from the record
+    stream; the two are separate RTSP sessions and sit a few seconds apart per
+    camera. `cameras.<cam>.detect.annotation_offset` (ms) is Frigate's own knob
+    for that skew -- the faces pipeline already applies it (crosscam.py), and
+    `analysis annotation-offset` measures it. Everything else in a reel window
+    (frames, coverage, motion buckets) is record-clock, so events must be
+    shifted onto it or the lanes sit visibly beside the pictures.
+    """
+    config_path = str(settings.frigate.config_path)
+    try:
+        mtime = Path(config_path).stat().st_mtime
+    except OSError:
+        return 0.0
+    cached = _annotation_offset_cache.get(camera)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    offset_s = annotation_offset_ms(config_path, camera) / 1000.0
+    _annotation_offset_cache[camera] = (mtime, offset_s)
+    return offset_s
+
+
+def _events_json(
+    conn: Any, camera: str, start: float, end: float, offset_s: float = 0.0
+) -> list[dict[str, Any]]:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(event)")}
+    # The window bounds arrive on the record clock; the DB stores detect-clock
+    # times, so the query shifts the bounds down and the results back up.
     rows = conn.execute(
         "SELECT * FROM event WHERE camera = ? AND start_time < ? "
         "AND (end_time IS NULL OR end_time > ?) ORDER BY start_time",
-        (camera, end, start),
+        (camera, end - offset_s, start - offset_s),
     ).fetchall()
     out = []
     for row in rows:
@@ -405,10 +440,10 @@ def _events_json(conn: Any, camera: str, start: float, end: float) -> list[dict[
                 "id": row["id"],
                 "label": row["label"],
                 "zones": zones,
-                "start": row["start_time"],
+                "start": row["start_time"] + offset_s,
                 # events[].end is nullable and null means "still in progress"
                 # (§4.5) -- must not synthesize a placeholder timestamp.
-                "end": row["end_time"],
+                "end": row["end_time"] + offset_s if row["end_time"] is not None else None,
                 "score": score,
             }
         )
@@ -432,7 +467,9 @@ async def reel(
                 detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
             )
         coverage_result = db.recording_coverage(conn, camera, start, end, now=time.time())
-        events = _events_json(conn, camera, start, end)
+        events = _events_json(
+            conn, camera, start, end, offset_s=_event_clock_offset_s(settings, camera)
+        )
     finally:
         conn.close()
 
@@ -548,18 +585,21 @@ async def highlights(
                 status_code=404,
                 detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
             )
+        # Same clock shift as /v1/reel: `before` is record-clock, rows are
+        # detect-clock -- shift the bound down, the results back up.
+        offset_s = _event_clock_offset_s(settings, camera)
         rows = conn.execute(
             "SELECT * FROM event WHERE camera = ? AND start_time < ? "
             "ORDER BY start_time DESC LIMIT ?",
-            (camera, before, limit),
+            (camera, before - offset_s, limit),
         ).fetchall()
     finally:
         conn.close()
 
     items = [
         {
-            "start": r["start_time"],
-            "end": r["end_time"],
+            "start": r["start_time"] + offset_s,
+            "end": r["end_time"] + offset_s if r["end_time"] is not None else None,
             "reason": r["label"],
             "score": db.event_top_score(r),
         }
