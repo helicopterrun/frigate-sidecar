@@ -382,8 +382,9 @@ def test_alignment_events_exclude_pruned_recordings(
     client: TestClient, frigate_db_path: Path
 ) -> None:
     """A quiet camera's best movers can predate recording retention -- offering
-    them yields a filmstrip of nothing but 404s. Only events the recordings
-    can still show are listed."""
+    them yields a filmstrip of nothing but 404s. Retention is sparse (old
+    segments survive in patches), so each event's OWN window must still be
+    covered, not merely fall after the oldest surviving segment."""
     import sqlite3
     import time
 
@@ -393,10 +394,15 @@ def test_alignment_events_exclude_pruned_recordings(
         "CREATE TABLE recordings (id TEXT PRIMARY KEY, camera TEXT, "
         "start_time REAL, end_time REAL);"
     )
-    # Oldest surviving recording: 1 hour ago.
-    conn.execute(
-        "INSERT INTO recordings VALUES ('r1', 'alley-overview', ?, ?)",
-        (now - 3600, now - 3590),
+    # A stray ANCIENT segment survives (the sparse-retention trap: it makes
+    # every event pass a MIN(start_time) bound), plus real coverage for e1
+    # only. e2 sits after the ancient segment but has no coverage of its own.
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, 'alley-overview', ?, ?)",
+        [
+            ("ancient", now - 40 * 86400, now - 40 * 86400 + 10),
+            ("r1", now - 310, now - 250),
+        ],
     )
     conn.commit()
     conn.close()
@@ -405,9 +411,9 @@ def test_alignment_events_exclude_pruned_recordings(
         "/analysis/annotation-offset/events", params={"camera": "alley-overview"}
     )
     ids = [e["id"] for e in r.json()]
-    # e1 (-300 s) and e2 (-600 s) are inside retention; e5 (-30 d) is not.
-    assert "e1" in ids and "e2" in ids
-    assert "e5" not in ids
+    assert "e1" in ids  # covered by r1
+    assert "e2" not in ids  # inside the global range, but its window is bare
+    assert "e5" not in ids  # long pruned
 
 
 def test_alignment_frame_proxies_recording_snapshot(

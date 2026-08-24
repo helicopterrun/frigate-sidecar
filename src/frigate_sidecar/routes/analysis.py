@@ -230,28 +230,39 @@ def alignment_events(
         data_col = ", data" if "data" in cols else ""
         # The movement sort surfaces the best walkers from the whole window --
         # which on a quiet camera can be events whose recordings retention has
-        # already pruned, leaving a filmstrip of nothing but 404s. Only offer
-        # events the recordings can still show.
-        oldest_recording = 0.0
+        # already pruned, leaving a filmstrip of nothing but 404s. Retention is
+        # motion-based and SPARSE (old segments survive in patches), so a
+        # global oldest-recording bound is not enough: each event's own window
+        # must still be covered. The ±15 s margin absorbs the detect-vs-record
+        # clock skew this whole tool exists to measure.
+        recordings_ok = True
         try:
-            row = conn.execute(
-                "SELECT MIN(start_time) FROM recordings WHERE camera = ?", (camera,)
-            ).fetchone()
-            if row and row[0] is not None:
-                oldest_recording = float(row[0])
+            conn.execute("SELECT 1 FROM recordings LIMIT 1")
         except sqlite3.Error:
-            pass
+            recordings_ok = False
+        coverage_clause = (
+            """
+               AND EXISTS (
+                   SELECT 1 FROM recordings r
+                    WHERE r.camera = event.camera
+                      AND r.start_time < event.end_time + 15
+                      AND r.end_time > event.start_time - 15
+               )
+            """
+            if recordings_ok
+            else ""
+        )
         rows = conn.execute(
             f"""
             SELECT id, label, sub_label, start_time, end_time, top_score{data_col}
               FROM event
              WHERE camera = ? AND has_snapshot = 1
                AND end_time IS NOT NULL AND start_time < ?
-               AND start_time >= ?
+               {coverage_clause}
              ORDER BY start_time DESC
              LIMIT 50
             """,
-            (camera, time.time() - 60.0, oldest_recording),
+            (camera, time.time() - 60.0),
         ).fetchall()
     finally:
         conn.close()
