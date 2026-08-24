@@ -1036,6 +1036,30 @@ def rich_client(
         "0.88, '[\"alley\"]', NULL, 0, 1)",
         (now - 100,),
     )
+    # e3 carries a path_data blob: walks x 0.2->0.4 over 10s, holds still for
+    # 16s (a dwell), then walks on to 0.7. 40 points, 40 seconds.
+    path = []
+    t0 = now - 90
+    for i in range(10):
+        path.append([[0.2 + 0.02 * i, 0.5], t0 + i])
+    for i in range(16):
+        path.append([[0.4, 0.5], t0 + 10 + i])
+    for i in range(14):
+        path.append([[0.4 + 0.02 * i, 0.5], t0 + 26 + i])
+    conn.execute(
+        "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
+        "sub_label, has_clip, has_snapshot, data) VALUES ('e3', 'alley-wide', 'person', ?, ?, "
+        "NULL, '[]', NULL, 1, 1, ?)",
+        (t0, t0 + 40, json.dumps({"top_score": 0.9, "path_data": path})),
+    )
+    # e4 on ANOTHER camera, same label as e3, starting 12s after e3 -- the
+    # continuation target.
+    conn.execute(
+        "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
+        "sub_label, has_clip, has_snapshot) VALUES ('e4', 'alley-east', 'person', ?, ?, "
+        "0.8, '[]', NULL, 1, 1)",
+        (t0 + 12, t0 + 30),
+    )
     conn.execute(
         "INSERT INTO reviewsegment (id, camera, start_time, end_time, severity, data) "
         "VALUES ('r1', 'alley-wide', ?, ?, 'alert', ?)",
@@ -1122,6 +1146,83 @@ def test_reel_events_survive_a_frigate_without_the_new_columns(
         assert ev["sub_label"] is None
         assert ev["has_clip"] is False
         assert ev["has_snapshot"] is False
+        # No `data` column -> no trajectory; the field is null, never absent.
+        assert ev["path"] is None
+        assert "continues" in ev
+
+
+def test_reel_events_carry_a_path_summary(
+    rich_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drift is decimated (thousands of stored points -> <=16 + exit) and
+    dwell finds the stayed-put stretch; events without a blob get null."""
+    events = {e["id"]: e for e in _rich_reel(rich_client, monkeypatch)["events"]}
+
+    path = events["e3"]["path"]
+    assert path is not None
+    assert 2 <= len(path["drift"]) <= 17
+    # Timestamps ascend and x starts where the seeded walk starts.
+    ts = [p[0] for p in path["drift"]]
+    assert ts == sorted(ts)
+    assert path["drift"][0][1] == pytest.approx(0.2, abs=0.03)
+    # The 16 s hold at x=0.4 is one dwell span of roughly that length.
+    assert len(path["dwell"]) == 1
+    d0, d1 = path["dwell"][0]
+    assert d1 - d0 == pytest.approx(16.0, abs=2.5)
+
+    assert events["e1"]["path"] is None  # no data blob seeded
+
+
+def test_reel_events_link_their_cross_camera_continuation(
+    rich_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """e4 (alley-east, same label) starts 12 s into e3 -- that is a visit
+    continuing on the next camera, and the link carries the target's start."""
+    events = {e["id"]: e for e in _rich_reel(rich_client, monkeypatch)["events"]}
+
+    cont = events["e3"]["continues"]
+    assert cont is not None
+    assert cont["camera"] == "alley-east"
+    assert cont["event_id"] == "e4"
+    assert cont["start"] == pytest.approx(events["e3"]["start"] + 12, abs=0.01)
+
+    # e1 is a package; no other-camera package exists -> no continuation.
+    assert events["e1"]["continues"] is None
+
+
+def test_reel_continuation_start_is_on_the_target_cameras_clock(
+    rich_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Offsets are per camera: the link's start must carry the TARGET
+    camera's record-clock shift, because that is the time the app scrubs to
+    after switching."""
+    from frigate_sidecar import db as db_mod
+
+    app = rich_client.app
+    sconn = db_mod.open_sidecar(app.state.settings.sidecar.db_path)
+    try:
+        db_mod.set_event_clock_offset(sconn, "alley-east", -5000)
+    finally:
+        sconn.close()
+    scrub_routes.invalidate_event_clock_offsets()
+    try:
+        events = {e["id"]: e for e in _rich_reel(rich_client, monkeypatch)["events"]}
+        cont = events["e3"]["continues"]
+        assert cont is not None
+        # alley-wide has no offset; alley-east is shifted -5 s.
+        assert cont["start"] == pytest.approx(events["e3"]["start"] + 12 - 5.0, abs=0.01)
+    finally:
+        scrub_routes.invalidate_event_clock_offsets()
+
+
+def test_reel_body_is_deterministic_for_etag(
+    rich_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reel is ETagged on content; the path/continues enrichment must not
+    introduce per-call instability or every poll busts the client cache."""
+    first = _rich_reel(rich_client, monkeypatch)
+    second = _rich_reel(rich_client, monkeypatch)
+    assert first["events"] == second["events"]
 
 
 def test_reel_reviews_carry_severity_and_the_join_back_to_events(
