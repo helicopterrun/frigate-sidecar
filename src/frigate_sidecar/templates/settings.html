@@ -96,6 +96,8 @@
   </p>
   <div class="section-block">
     <button id="align-measure" class="btn-primary">Measure cameras</button>
+    <select id="calib-camera" aria-label="camera to calibrate"></select>
+    <button id="calib-open" class="btn-neutral">Calibrate&hellip;</button>
     <span id="align-state" class="help save-state"></span>
   </div>
   <div id="align-results"></div>
@@ -281,5 +283,6 @@
 {% block scripts %}
 <script src="/static/js/zones.js?v={{ asset_v }}"></script>
 <script src="/static/js/devices.js?v={{ asset_v }}"></script>
+<script src="/static/js/eventcalib.js?v={{ asset_v }}"></script>
 <script src="/static/js/eventalign.js?v={{ asset_v }}"></script>
 {% endblock %}

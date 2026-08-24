@@ -8,6 +8,15 @@
   if (!btn || !resultsEl) return;
 
   var pollTimer = null;
+  var lastState = null;
+
+  // Seed the calibrator with whatever offset is currently in effect.
+  function openCalibrator(cam) {
+    var st = lastState || {};
+    var config = (st.config_ms || {})[cam] || 0;
+    var seed = config || (st.applied_ms || {})[cam] || 0;
+    SC.calib.open(cam, seed, config, refresh);
+  }
 
   function fmtMs(ms) {
     if (ms === null || ms === undefined) return "—";
@@ -82,6 +91,9 @@
         });
         actions.appendChild(clear);
       }
+      var calibrate = SC.el("button", { class: "btn-neutral", text: "Calibrate…" });
+      calibrate.addEventListener("click", function () { openCalibrator(cam); });
+      actions.appendChild(calibrate);
       tr.appendChild(actions);
       body.appendChild(tr);
     });
@@ -105,6 +117,34 @@
     }
   }
 
+  // Top-of-section camera dropdown: reaches cameras with no measurement and
+  // no applied offset (the table only shows measured/applied ones).
+  var camSelect = document.getElementById("calib-camera");
+  var camOpen = document.getElementById("calib-open");
+  function renderCameraPicker(state) {
+    if (!camSelect || !camOpen) return;
+    var names = (state.cameras || []).slice();
+    (state.results || []).forEach(function (r) {
+      if (names.indexOf(r.camera) < 0) names.push(r.camera);
+    });
+    Object.keys(state.applied_ms || {}).forEach(function (c) {
+      if (names.indexOf(c) < 0) names.push(c);
+    });
+    names.sort();
+    var current = camSelect.value;
+    camSelect.textContent = "";
+    names.forEach(function (c) {
+      camSelect.appendChild(SC.el("option", { value: c, text: c }));
+    });
+    if (names.indexOf(current) >= 0) camSelect.value = current;
+    camSelect.disabled = camOpen.disabled = !names.length;
+  }
+  if (camOpen) {
+    camOpen.addEventListener("click", function () {
+      if (camSelect && camSelect.value) openCalibrator(camSelect.value);
+    });
+  }
+
   async function refresh() {
     var state;
     try {
@@ -113,6 +153,8 @@
       stateEl.textContent = "state unavailable";
       return;
     }
+    lastState = state;
+    renderCameraPicker(state);
     btn.disabled = !!state.running;
     if (state.running) {
       stateEl.textContent = "measuring… this takes a few minutes";

@@ -27,8 +27,13 @@ the sidecar's own knobs in one place.
   two separate camera connections whose clocks drift apart per camera. Press
   **Measure cameras** (it compares recent event thumbnails against the
   recordings; expect a few minutes) and **Apply** the suggested offset for
-  each camera with decent confidence. Applied offsets take effect on the next
-  timeline refresh, in the sidecar's scrub page and the Elsinore reel alike.
+  each camera with decent confidence. For a precise manual fix — or when the
+  measurement comes back low-confidence — press **Calibrate…** on a camera:
+  pick a recent event, click the recording frame in the filmstrip that matches
+  the event's opening moment, fine-tune with the ±250 ms nudges while
+  comparing the side-by-side previews, and save. Applied offsets take effect
+  on the next timeline refresh, in the sidecar's scrub page and the Elsinore
+  reel alike.
   Setting `detect.annotation_offset` (milliseconds) in Frigate's own
   `config.yml` does the same job, also fixes Frigate's own annotation overlay,
   and wins over anything applied here. Worth doing once at setup and again if
