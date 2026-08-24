@@ -205,13 +205,19 @@ def alignment_events(
     camera: str,
     limit: int = Query(12, ge=1, le=25),
 ) -> list[dict[str, Any]]:
-    """Recent finished events for the manual-calibration picker.
+    """Recent finished events for the manual-calibration picker, sorted by
+    how far the object moved across the frame.
 
-    Looser than the automated measurement's filter: any labeled event with a
-    snapshot will do, because a human judges the match. Events younger than a
-    minute are skipped -- the recording segment covering them may not be
-    committed yet, so the filmstrip would be all 404s.
+    A subject crossing the frame gives an unambiguous visual match; a near-
+    stationary one makes every candidate frame look the same. `extent` is the
+    diagonal of the path's bounding box in normalized frame units, computed
+    from `data.path_data`; events are returned most-moving first (newest first
+    among ties, e.g. a Frigate storing no paths). Events younger than a minute
+    are skipped -- the recording segment covering them may not be committed
+    yet, so the filmstrip would be all 404s.
     """
+    import json as json_mod
+    import math
     import time
 
     from frigate_sidecar import db
@@ -219,30 +225,48 @@ def alignment_events(
     s = _settings(request)
     conn = db.open_frigate_ro(s.frigate.db_path)
     try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(event)")}
+        data_col = ", data" if "data" in cols else ""
         rows = conn.execute(
-            """
-            SELECT id, label, sub_label, start_time, end_time, top_score
+            f"""
+            SELECT id, label, sub_label, start_time, end_time, top_score{data_col}
               FROM event
              WHERE camera = ? AND has_snapshot = 1
                AND end_time IS NOT NULL AND start_time < ?
              ORDER BY start_time DESC
-             LIMIT ?
+             LIMIT 50
             """,
-            (camera, time.time() - 60.0, limit),
+            (camera, time.time() - 60.0),
         ).fetchall()
     finally:
         conn.close()
-    return [
-        {
-            "id": r["id"],
-            "label": r["label"],
-            "sub_label": r["sub_label"],
-            "start_time": r["start_time"],
-            "end_time": r["end_time"],
-            "top_score": r["top_score"],
-        }
-        for r in rows
-    ]
+
+    out = []
+    for r in rows:
+        extent = 0.0
+        if data_col:
+            try:
+                parsed = json_mod.loads(r["data"]) if r["data"] else {}
+            except (json_mod.JSONDecodeError, TypeError):
+                parsed = {}
+            pts = db.parse_path_data(parsed.get("path_data") if isinstance(parsed, dict) else None)
+            if len(pts) >= 2:
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                extent = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+        out.append(
+            {
+                "id": r["id"],
+                "label": r["label"],
+                "sub_label": r["sub_label"],
+                "start_time": r["start_time"],
+                "end_time": r["end_time"],
+                "top_score": r["top_score"],
+                "extent": round(extent, 3),
+            }
+        )
+    out.sort(key=lambda e: (-e["extent"], -e["start_time"]))
+    return out[:limit]
 
 
 @router.get("/annotation-offset/thumbnail/{event_id}")

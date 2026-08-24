@@ -7,11 +7,16 @@
 // offset_ms/1000, so the frame at event.start + offset showing the snapshot's
 // moment means the offset is right.
 (function () {
-  var STEPS = [1000, 250]; // strip step choices, ms
+  // 50 ms floor: recordings run ~15-20 fps, so one step ≈ one recording frame.
+  var STEPS = [1000, 250, 100, 50]; // strip step choices, ms
   var SPAN_CELLS = 8; // cells either side of the strip's centre
 
   var overlay = null;
-  var state = null; // {camera, configMs, onSaved, events, event, offsetMs, stepMs}
+  // {camera, configMs, onSaved, events, event, offsetMs, stepMs,
+  //  samples: {eventId: offsetMs}} — samples average into the saved value:
+  // one event can mislead (occlusion, a pause at the wrong moment); three
+  // agreeing within a couple hundred ms is confidence.
+  var state = null;
 
   function frameUrl(camera, ts) {
     return "/analysis/annotation-offset/frame/" + encodeURIComponent(camera)
@@ -49,7 +54,8 @@
     if (e.key === "Escape") { close(); return; }
     if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
       e.preventDefault();
-      nudge((e.key === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? 1000 : 250));
+      var fine = state.stepMs === 1000 ? 250 : state.stepMs;
+      nudge((e.key === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? 1000 : fine));
     }
     if (e.key === "b" || e.key === "B") setBlink(true);
   }
@@ -118,6 +124,16 @@
     renderOffset();
   }
 
+  function sampleValues() {
+    return Object.keys(state.samples).map(function (k) { return state.samples[k]; });
+  }
+
+  function sampleMean() {
+    var vals = sampleValues();
+    if (!vals.length) return null;
+    return Math.round(vals.reduce(function (a, b) { return a + b; }, 0) / vals.length);
+  }
+
   function renderOffset() {
     overlay.querySelector("#calib-offset").textContent = fmtMs(state.offsetMs);
     var caption = overlay.querySelector("#calib-frame-caption");
@@ -129,10 +145,56 @@
       img.style.display = "";
       img.src = frameUrl(state.camera, state.event.start_time + state.offsetMs / 1000);
     }
+    // Fine nudges follow the strip's step; ±1 s stays put.
+    var fine = state.stepMs === 1000 ? 250 : state.stepMs;
+    overlay.querySelectorAll(".calib-nudge-fine").forEach(function (b) {
+      var sign = b.dataset.dir === "-" ? "−" : "+";
+      b.textContent = sign + fine + " ms";
+      b.dataset.ms = (b.dataset.dir === "-" ? -fine : fine);
+    });
+    renderSummary();
+  }
+
+  function renderSummary() {
+    var el = overlay.querySelector("#calib-summary");
+    var saveBtn = overlay.querySelector("#calib-save");
+    var vals = sampleValues();
+    if (!vals.length) {
+      el.textContent = "no samples yet — dial in this event, then Add sample";
+      saveBtn.textContent = state.configMs ? "Save to Frigate config" : "Save offset";
+      return;
+    }
+    var mean = sampleMean();
+    var spread = (Math.max.apply(null, vals) - Math.min.apply(null, vals)) / 2;
+    el.textContent = vals.length + " sample" + (vals.length > 1 ? "s" : "")
+      + " · mean " + fmtMs(mean) + " · spread ±" + (spread / 1000).toFixed(2) + " s";
+    saveBtn.textContent = (state.configMs ? "Save mean to Frigate config" : "Save mean")
+      + " (" + vals.length + ")";
+  }
+
+  function addSample() {
+    if (!state.event) return;
+    state.samples[state.event.id] = Math.round(state.offsetMs);
+    renderEvents();
+    renderSummary();
+    // Advance to the next unsampled event, carrying the current offset — the
+    // skew is per camera, so the last answer is the best seed for the next.
+    var next = null;
+    for (var i = 0; i < state.events.length; i++) {
+      if (!(state.events[i].id in state.samples)) { next = state.events[i]; break; }
+    }
+    if (next) {
+      selectEvent(next);
+      SC.toast("sample added — next event loaded");
+    } else {
+      SC.toast("sample added — all events sampled");
+    }
   }
 
   function selectEvent(ev) {
     state.event = ev;
+    // Revisiting a sampled event restores the offset recorded for it.
+    if (ev.id in state.samples) state.offsetMs = state.samples[ev.id];
     overlay.querySelector("#calib-snap").src = snapshotUrl(ev.id);
     overlay.querySelector("#calib-ghost").src = snapshotUrl(ev.id);
     overlay.querySelectorAll("#calib-events .calib-event").forEach(function (el) {
@@ -160,6 +222,18 @@
         class: "calib-off",
         text: (ev.sub_label || ev.label) + " · " + fmtClock(ev.start_time),
       }));
+      // How far it moved across the frame — the sort key, worn openly. A
+      // sampled event wears its recorded offset instead.
+      if (ev.id in state.samples) {
+        card.classList.add("sampled");
+        card.appendChild(SC.el("span", {
+          class: "calib-off calib-sampled", text: "✓ " + fmtMs(state.samples[ev.id]),
+        }));
+      } else if (ev.extent) {
+        card.appendChild(SC.el("span", {
+          class: "calib-off", text: "moves " + Math.round(ev.extent * 100) + "%",
+        }));
+      }
       card.addEventListener("click", function () { selectEvent(ev); });
       row.appendChild(card);
     });
@@ -174,7 +248,9 @@
   async function save(button) {
     if (!state.event) return;
     button.disabled = true;
-    var ms = Math.round(state.offsetMs);
+    // With samples, the mean is the answer; without, the dialed offset is.
+    var ms = sampleMean();
+    if (ms === null) ms = Math.round(state.offsetMs);
     try {
       var resp;
       if (state.configMs) {
@@ -231,31 +307,38 @@
       event: null,
       offsetMs: seedMs || 0,
       stepMs: 1000,
+      samples: {},
     };
 
     var saveBtn = SC.el("button", {
-      class: "btn-primary",
+      class: "btn-primary", id: "calib-save",
       text: state.configMs ? "Save to Frigate config" : "Save offset",
     });
     saveBtn.addEventListener("click", function () { save(saveBtn); });
+    var sampleBtn = SC.el("button", { class: "btn-neutral", text: "Add sample" });
+    sampleBtn.addEventListener("click", addSample);
     var closeBtn = SC.el("button", { class: "btn-neutral", text: "✕" });
     closeBtn.addEventListener("click", close);
 
+    function nudgeBtn(label, ms, cls) {
+      var b = SC.el("button", { class: "btn-neutral" + (cls ? " " + cls : ""), text: label });
+      if (cls) { b.dataset.dir = ms < 0 ? "-" : "+"; b.dataset.ms = ms; }
+      b.addEventListener("click", function () {
+        nudge(cls ? parseInt(b.dataset.ms, 10) : ms);
+      });
+      return b;
+    }
+
     var nudges = SC.el("div", { class: "calib-nudges" });
-    [["−1 s", -1000], ["−250 ms", -250]].forEach(function (n) {
-      var b = SC.el("button", { class: "btn-neutral", text: n[0] });
-      b.addEventListener("click", function () { nudge(n[1]); });
-      nudges.appendChild(b);
-    });
+    nudges.appendChild(nudgeBtn("−1 s", -1000));
+    nudges.appendChild(nudgeBtn("−250 ms", -250, "calib-nudge-fine"));
     nudges.appendChild(SC.el("span", { class: "calib-offset-label" }, [
       SC.el("span", { text: "offset: " }),
       SC.el("b", { id: "calib-offset" }),
     ]));
-    [["+250 ms", 250], ["+1 s", 1000]].forEach(function (n) {
-      var b = SC.el("button", { class: "btn-neutral", text: n[0] });
-      b.addEventListener("click", function () { nudge(n[1]); });
-      nudges.appendChild(b);
-    });
+    nudges.appendChild(nudgeBtn("+250 ms", 250, "calib-nudge-fine"));
+    nudges.appendChild(nudgeBtn("+1 s", 1000));
+    nudges.appendChild(sampleBtn);
     nudges.appendChild(saveBtn);
 
     // The step toggle: the coarse/fine state, visible and directly settable.
@@ -298,14 +381,17 @@
       ]),
       SC.el("p", { class: "help", text:
         "Find the recording frame where the scene matches the snapshot — that "
-        + "offset is this camera's clock skew. Arrow keys nudge ±250 ms "
-        + "(Shift = 1 s); hold the compare button to blink the two." }),
+        + "offset is this camera's clock skew. Dial in an event, press Add "
+        + "sample, repeat on two or three of the most-moving events; the save "
+        + "takes the mean. Arrow keys nudge by the current step (Shift = 1 s); "
+        + "hold the compare button to blink the two." }),
       SC.el("div", { class: "calib-events", id: "calib-events" }),
       pair,
       SC.el("div", { class: "calib-blinkrow" }, [holdToBlink()]),
       stepWrap,
       SC.el("div", { class: "calib-strip", id: "calib-strip" }),
       nudges,
+      SC.el("div", { class: "calib-caption", id: "calib-summary" }),
     ]);
     if (state.configMs) {
       panel.insertBefore(SC.el("div", { class: "calib-warn", text:

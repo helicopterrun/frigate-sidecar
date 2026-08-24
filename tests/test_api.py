@@ -310,16 +310,53 @@ def test_alignment_events_lists_recent_per_camera(client: TestClient) -> None:
     )
     assert r.status_code == 200
     events = r.json()
-    # e1 (-300 s), e2 (-600 s), e5 (-30 d) — newest first, other cameras absent.
+    # e1 (-300 s), e2 (-600 s), e5 (-30 d) — no paths, so extent ties at 0 and
+    # newest-first decides; other cameras absent.
     assert [e["id"] for e in events] == ["e1", "e2", "e5"]
     assert events[0]["label"] == "person"
     assert events[0]["end_time"] is not None
+    assert all(e["extent"] == 0.0 for e in events)
+
+
+def test_alignment_events_sort_by_movement(
+    client: TestClient, frigate_db_path: Path
+) -> None:
+    """A subject crossing the frame is the calibrator's best anchor, so the
+    picker leads with it — an older far-mover outranks a newer shuffler."""
+    import json as json_mod
+    import sqlite3
+    import time
+
+    now = time.time()
+    conn = sqlite3.connect(frigate_db_path)
+    # Older, but crosses most of the frame.
+    mover = [[[0.1 + 0.05 * i, 0.5], now - 2000 + i] for i in range(15)]
+    # Newer, but barely moves.
+    shuffler = [[[0.5 + 0.002 * i, 0.5], now - 400 + i] for i in range(15)]
+    for eid, dt, path in (("mv", -2000, mover), ("sh", -400, shuffler)):
+        conn.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time, zones, "
+            "has_clip, has_snapshot, data) VALUES (?, 'alley-overview', 'person', "
+            "?, ?, '[]', 1, 1, ?)",
+            (eid, now + dt, now + dt + 30, json_mod.dumps({"path_data": path})),
+        )
+    conn.commit()
+    conn.close()
+
+    r = client.get(
+        "/analysis/annotation-offset/events", params={"camera": "alley-overview"}
+    )
+    ids = [e["id"] for e in r.json()]
+    assert ids[0] == "mv"  # far-mover first despite being older
+    assert ids.index("mv") < ids.index("sh")
+    events = {e["id"]: e for e in r.json()}
+    assert events["mv"]["extent"] > events["sh"]["extent"] > 0
 
     r = client.get(
         "/analysis/annotation-offset/events",
         params={"camera": "alley-overview", "limit": 1},
     )
-    assert [e["id"] for e in r.json()] == ["e1"]
+    assert [e["id"] for e in r.json()] == ["mv"]  # limit trims after the sort
 
     r = client.get(
         "/analysis/annotation-offset/events", params={"camera": "no-such-camera"}
