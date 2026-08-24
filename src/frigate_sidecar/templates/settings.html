@@ -7,6 +7,7 @@
   <nav class="settings-nav" aria-label="Settings sections">
     <a href="#zones" class="page-link">Zones</a>
     <a href="#cameras" class="page-link">Cameras</a>
+    <a href="#alignment" class="page-link">Alignment</a>
     <a href="#push" class="page-link">Push</a>
     <a href="#faces" class="page-link">Faces</a>
     <a href="#services" class="page-link">Services</a>
@@ -81,6 +82,23 @@
   {% else %}
     <div class="empty">no cameras found in the Frigate config</div>
   {% endif %}
+
+  {# ---- Event clock alignment ---- #}
+  <h3 class="section-title" id="alignment">Event alignment</h3>
+  <p class="help page-intro">
+    Frigate stamps events from the detect stream and recordings from the record
+    stream &mdash; two separate camera connections that can sit a few seconds
+    apart, which makes event bars miss their pictures on the scrub timeline.
+    Measuring compares event thumbnails against the recordings (takes a few
+    minutes) and suggests a per-camera correction; Apply takes effect on the
+    next timeline refresh. Setting <code>detect.annotation_offset</code> in
+    Frigate's own config works too and wins over values applied here.
+  </p>
+  <div class="section-block">
+    <button id="align-measure" class="btn-primary">Measure cameras</button>
+    <span id="align-state" class="help save-state"></span>
+  </div>
+  <div id="align-results"></div>
 
   {# ---- Push & devices ---- #}
   <h3 class="section-title" id="push">Push &amp; devices</h3>
@@ -263,4 +281,5 @@
 {% block scripts %}
 <script src="/static/js/zones.js?v={{ asset_v }}"></script>
 <script src="/static/js/devices.js?v={{ asset_v }}"></script>
+<script src="/static/js/eventalign.js?v={{ asset_v }}"></script>
 {% endblock %}

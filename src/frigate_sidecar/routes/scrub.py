@@ -386,10 +386,18 @@ async def motion(camera: str, start: float, end: float, scale: float, request: R
     return {"start": start, "interval": scale, "values": values}
 
 
-#: `annotation_offset` cache: (config mtime, offset seconds) per camera. The
-#: config is a file read + YAML parse, and /v1/reel is called on a 10 s cadence
-#: per open reel -- once per camera per config edit is enough.
-_annotation_offset_cache: dict[str, tuple[float, float]] = {}
+#: `annotation_offset` cache: (config mtime, epoch, offset seconds) per camera.
+#: The config is a file read + YAML parse and the override is a DB row, and
+#: /v1/reel is called on a 10 s cadence per open reel -- once per camera per
+#: config edit (or per Settings-page apply, which bumps the epoch) is enough.
+_annotation_offset_cache: dict[str, tuple[float, int, float]] = {}
+_annotation_offset_epoch = 0
+
+
+def invalidate_event_clock_offsets() -> None:
+    """Called by the Settings apply endpoint after writing new overrides."""
+    global _annotation_offset_epoch
+    _annotation_offset_epoch += 1
 
 
 def _event_clock_offset_s(settings: Any, camera: str) -> float:
@@ -402,17 +410,31 @@ def _event_clock_offset_s(settings: Any, camera: str) -> float:
     `analysis annotation-offset` measures it. Everything else in a reel window
     (frames, coverage, motion buckets) is record-clock, so events must be
     shifted onto it or the lanes sit visibly beside the pictures.
+
+    The config value wins when set; otherwise a sidecar-side override applied
+    from the Settings page (`event_clock_offsets`) is used, so alignment does
+    not require editing Frigate's config.
     """
     config_path = str(settings.frigate.config_path)
     try:
         mtime = Path(config_path).stat().st_mtime
     except OSError:
-        return 0.0
+        mtime = 0.0
     cached = _annotation_offset_cache.get(camera)
-    if cached is not None and cached[0] == mtime:
-        return cached[1]
-    offset_s = annotation_offset_ms(config_path, camera) / 1000.0
-    _annotation_offset_cache[camera] = (mtime, offset_s)
+    if cached is not None and cached[0] == mtime and cached[1] == _annotation_offset_epoch:
+        return cached[2]
+    offset_ms = annotation_offset_ms(config_path, camera)
+    if offset_ms == 0:
+        try:
+            conn = db.open_sidecar(settings.sidecar.db_path)
+            try:
+                offset_ms = db.event_clock_offsets(conn).get(camera, 0)
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 -- alignment is best-effort, never a 500
+            offset_ms = 0
+    offset_s = offset_ms / 1000.0
+    _annotation_offset_cache[camera] = (mtime, _annotation_offset_epoch, offset_s)
     return offset_s
 
 

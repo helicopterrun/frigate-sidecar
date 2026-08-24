@@ -43,3 +43,7 @@ Empty strips: check `/healthz` (`scrub` component) and the
 `media_path`/`recordings_path` mapping described in
 [First run](/guide/first-run). A camera missing from the picker usually
 isn't enrolled in `scrub.cameras`.
+
+Event bars a few seconds off from the pictures: that's detect-vs-record clock
+skew, and it's fixable per camera — see
+[Event alignment](/guide/settings) on the Settings page.

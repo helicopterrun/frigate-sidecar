@@ -231,3 +231,66 @@ def test_analysis_fps_budget_502_on_api_failure(client: TestClient) -> None:
     # No real Frigate API at the configured base URL in this test -> 502.
     r = client.get("/analysis/fps-budget")
     assert r.status_code == 502
+
+
+def test_alignment_state_empty(client: TestClient) -> None:
+    r = client.get("/analysis/annotation-offset/state")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["running"] is False
+    assert body["results"] is None
+    assert body["applied_ms"] == {}
+
+
+def test_alignment_apply_and_state_roundtrip(client: TestClient) -> None:
+    r = client.post(
+        "/analysis/annotation-offset/apply",
+        json={"offsets": {"doorbell": -5000, "gate": 250}},
+    )
+    assert r.status_code == 200
+    assert r.json()["applied"] == {"doorbell": -5000, "gate": 250}
+
+    body = client.get("/analysis/annotation-offset/state").json()
+    assert body["applied_ms"] == {"doorbell": -5000, "gate": 250}
+    # Config has no annotation_offset for these cameras.
+    assert body["config_ms"]["doorbell"] == 0
+
+    # Zero clears the override.
+    r = client.post("/analysis/annotation-offset/apply", json={"offsets": {"gate": 0}})
+    assert r.status_code == 200
+    body = client.get("/analysis/annotation-offset/state").json()
+    assert body["applied_ms"] == {"doorbell": -5000}
+
+
+def test_alignment_apply_rejects_garbage(client: TestClient) -> None:
+    assert client.post(
+        "/analysis/annotation-offset/apply", json={"offsets": {}}
+    ).status_code == 422
+    assert client.post(
+        "/analysis/annotation-offset/apply", json={"offsets": {"cam": "soon"}}
+    ).status_code == 422
+    assert client.post(
+        "/analysis/annotation-offset/apply", json={"offsets": {"cam": 120_000}}
+    ).status_code == 422
+
+
+def test_alignment_measure_runs_in_background(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from frigate_sidecar.analysis import annotation_offset as ao_mod
+
+    def _fake_analyze(**kwargs: object) -> list[dict[str, object]]:
+        assert kwargs["search_window_ms"] == 8000  # wider than the CLI default
+        return [{"camera": "doorbell", "suggested_offset_ms": -4950,
+                 "median_offset_ms": -4980, "iqr_ms": 120, "confidence": "high",
+                 "n_qualifying_events": 12, "n_contributing_events": 11}]
+
+    monkeypatch.setattr(ao_mod, "analyze", _fake_analyze)
+    r = client.post("/analysis/annotation-offset/measure", params={"days": 3})
+    assert r.status_code == 200
+    # TestClient runs the loop to completion between requests, so the
+    # background task has finished by the next call.
+    body = client.get("/analysis/annotation-offset/state").json()
+    assert body["running"] is False
+    assert body["results"][0]["camera"] == "doorbell"
+    assert body["measured_at"] is not None

@@ -1059,3 +1059,35 @@ def test_event_times_unshifted_without_annotation_offset(
     assert r.status_code == 200
     events = {e["id"]: e for e in r.json()["events"]}
     assert events["ev1"]["start"] == pytest.approx(now - 200, abs=5)
+
+
+def test_reel_honours_sidecar_applied_offset(
+    client: TestClient,
+    frigate_db_with_recordings: Path,
+    sidecar_db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No config annotation_offset, but a Settings-page apply -> same shift."""
+    _skip_auth(monkeypatch)
+    scrub_routes._annotation_offset_cache.clear()
+    conn = db.open_sidecar(sidecar_db_path)
+    db.set_event_clock_offset(conn, "doorbell", -5000)
+    conn.close()
+    scrub_routes.invalidate_event_clock_offsets()
+
+    async def _fake_motion(
+        settings: object, camera: str, start: float, end: float, scale: float
+    ) -> list[float]:
+        return [0.0] * int((end - start) / scale)
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _fake_motion)
+
+    now = time.time()
+    r = client.get(
+        "/v1/reel/doorbell",
+        params={"start": now - 3700, "end": now, "motion_scale": 10},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    events = {e["id"]: e for e in r.json()["events"]}
+    assert events["ev1"]["start"] == pytest.approx(now - 205, abs=5)
