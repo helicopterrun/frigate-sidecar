@@ -61,10 +61,8 @@ for read-only WAL clients on your SQLite build — extend the ACL to `rwX` on
 - `contrib/frigate-watchdog.service` — external Frigate health watchdog
   (`watchdog.enabled: true`); restarts the Frigate container when its backend
   hangs while the container still reads "Up". Needs access to the Docker CLI.
-- `contrib/frigate-sidecar-faces.service` + `.timer` — periodic face-crop
-  scoring/curation job (`face.enabled: true`).
 
-Both are opt-in and independent of the main server.
+It is opt-in and independent of the main server.
 
 ## Networking
 
@@ -105,11 +103,6 @@ MQTT hook**: `/api/{camera}/recordings/{ts}/snapshot.jpg` 404s until the segment
 covering that timestamp has been committed, and segments commit at their *end*
 (measured publish lag 5.4-9.4s per camera). `capture_delay_s` (default 45s) is
 what makes a 404 genuinely terminal rather than "asked too early".
-
-Its own unit rather than a second `ExecStart=` on
-`frigate-sidecar-faces.service`: `faces scan` exits 2 without the optional
-`[faces]` extra, and a failed `ExecStart` in a `Type=oneshot` unit aborts the
-rest.
 
 Checks: `python3 -m frigate_sidecar face-capture stats` (counts + last-run
 heartbeat), `face-capture scan` (one manual pass), `face-capture prune`.

@@ -19,7 +19,7 @@ Dependency split, load-bearing for CI: everything that decides — candidate
 query, quality combine, aggregation, matching, clustering, reaping — is pure
 Python (embeddings are list[float], packed with `array`), tested without the
 `[enrich]` extra. Only `_Engine` touches insightface/onnxruntime/cv2, behind
-the same guard style as faces/scorer.py. Inference is CPU-only by design: the
+a lazy import guard. Inference is CPU-only by design: the
 OpenVINO/iGPU path produced a multi-day embeddings OOM cycle on this host.
 """
 
@@ -128,7 +128,7 @@ def pose_frontality(kps: list[tuple[float, float]]) -> float:
 def quality_score(
     *, sharpness: float, area_px: float, frontality: float, min_face_area_px: int
 ) -> float:
-    """0..1 geometric mean of the three v1 signals (scorer.py precedent).
+    """0..1 geometric mean of the three quality signals.
 
     Sharpness saturates at 500 Laplacian variance — beyond that more contrast
     is not more identity. Area saturates at 4x the floor: a face at the floor

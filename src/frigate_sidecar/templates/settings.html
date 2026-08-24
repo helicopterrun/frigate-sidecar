@@ -198,15 +198,6 @@
     {% endfor %}
   </div>
 
-  {# ---- Faces ---- #}
-  <h3 class="section-title" id="faces">Faces</h3>
-  <p class="help page-intro">
-    Auto-promote is <strong>{{ 'on' if face_auto_promote else 'off' }}</strong>
-    (quality threshold {{ face_quality_threshold }}) — set in the sidecar's
-    YAML config. Curate pending crops on the
-    <a href="/faces" class="page-link">Faces page</a>.
-  </p>
-
   {# ---- Services (read-only YAML config surface) ---- #}
   <h3 class="section-title" id="services">Services</h3>
   <p class="help page-intro">

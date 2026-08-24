@@ -30,10 +30,8 @@ from frigate_sidecar.push.mqtt import MqttReviewSubscriber, compute_backoff
 from frigate_sidecar.push.transport import LogTransport, PushTransport, RelayTransport
 from frigate_sidecar.routes import analysis as analysis_routes
 from frigate_sidecar.routes import debug as debug_routes
-from frigate_sidecar.routes import devices as devices_routes
 from frigate_sidecar.routes import enrich as enrich_routes
 from frigate_sidecar.routes import face_captures as face_capture_routes
-from frigate_sidecar.routes import faces as faces_routes
 from frigate_sidecar.routes import fps_budget as fps_budget_routes
 from frigate_sidecar.routes import guide as guide_routes
 from frigate_sidecar.routes import health as health_routes
@@ -55,7 +53,6 @@ from frigate_sidecar.routes import status as status_routes
 from frigate_sidecar.routes import toybox as toybox_routes
 from frigate_sidecar.routes import triage as triage_routes
 from frigate_sidecar.routes import zone_hits as zone_hits_routes
-from frigate_sidecar.routes import zones_page as zones_page_routes
 
 _PACKAGE_ROOT = Path(__file__).parent
 _TEMPLATES_DIR = _PACKAGE_ROOT / "templates"
@@ -496,7 +493,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(status_routes.router)
     app.include_router(scrub_ui_routes.router)
     app.include_router(debug_routes.router)
-    app.include_router(devices_routes.router)
     app.include_router(zone_hits_routes.router)
     app.include_router(triage_routes.router)
     app.include_router(motion_routes.router)
@@ -504,7 +500,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(fps_budget_routes.router)
     app.include_router(placement_routes.router)
     app.include_router(analysis_routes.router)
-    app.include_router(faces_routes.router)
     app.include_router(face_capture_routes.router)
     app.include_router(enrich_routes.router)
     app.include_router(toybox_routes.router)
@@ -514,7 +509,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(push_floorplan_routes.router)
     app.include_router(push_map_routes.router)
     app.include_router(replay_routes.router)
-    app.include_router(zones_page_routes.router)
     app.include_router(settings_page_routes.router)
     app.include_router(map_page_routes.router)
     app.include_router(login_page_routes.router)

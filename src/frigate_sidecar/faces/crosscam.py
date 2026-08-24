@@ -26,8 +26,8 @@ seconds, so it belongs in a oneshot behind a systemd timer
 (contrib/frigate-sidecar-face-capture.*), not in an in-process asyncio task
 competing with the scrub generator for the single uvicorn worker's threadpool.
 
-Core deps only -- Pillow and httpx. Deliberately no cv2/numpy, so this never
-inherits faces/scorer.py's optional `[faces]` extra.
+Core deps only -- Pillow and httpx. Deliberately no cv2/numpy, so this runs
+without any optional extra installed.
 """
 
 from __future__ import annotations

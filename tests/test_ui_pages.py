@@ -71,7 +71,7 @@ def test_zone_hits_page(client: TestClient) -> None:
 
 
 def test_devices_page_empty(client: TestClient) -> None:
-    r = client.get("/devices")
+    r = client.get("/settings")
     assert r.status_code == 200
     assert "no devices registered" in r.text
 
@@ -93,7 +93,7 @@ def test_devices_page_lists_registered(
         conn.commit()
     finally:
         conn.close()
-    r = client.get("/devices")
+    r = client.get("/settings")
     assert r.status_code == 200
     assert "doorbell" in r.text
     assert "btn-primary" in r.text
@@ -184,9 +184,3 @@ def test_settings_page_unifies_surfaces(client: TestClient) -> None:
                        "export-btn", "import-file"):
         assert element_id in r.text, element_id
 
-
-def test_zones_and_devices_redirect_to_settings(client: TestClient) -> None:
-    for path, fragment in (("/zones", "#zones"), ("/devices", "#push")):
-        r = client.get(path, follow_redirects=False)
-        assert r.status_code == 308
-        assert r.headers["location"] == "/settings" + fragment

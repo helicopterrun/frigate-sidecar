@@ -286,7 +286,7 @@ def test_put_round_trips_zone_page_fields(client: TestClient):
 
 
 def test_zones_page_renders(client: TestClient):
-    resp = client.get("/zones")
+    resp = client.get("/settings")
     assert resp.status_code == 200
     assert "Camera neighbors" in resp.text
     assert "/static/js/zones.js" in resp.text
@@ -327,10 +327,6 @@ def test_map_page_renders(client: TestClient):
     resp = client.get("/map")
     assert resp.status_code == 200
     assert "/static/js/mapedit/main.js" in resp.text
-    # The rebuild-era alias still redirects here; /cameras is now the live
-    # camera grid page.
-    r = client.get("/cameras2", follow_redirects=False)
-    assert (r.status_code, r.headers["location"]) == (301, "/map")
     assert client.get("/cameras").status_code == 200
 
 

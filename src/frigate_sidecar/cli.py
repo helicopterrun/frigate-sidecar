@@ -19,7 +19,6 @@ app = typer.Typer(
 
 triage_app = typer.Typer(help="Sample borderline events and record tp/fp/skip labels.")
 analysis_app = typer.Typer(help="Read-only analyses over Frigate's DB and live API.")
-faces_app = typer.Typer(help="Score + curate Frigate's auto-saved face training crops.")
 face_capture_app = typer.Typer(
     help="High-res cross-camera face capture: grab the ID camera's full-res frame "
          "when a front camera sees a person."
@@ -27,7 +26,6 @@ face_capture_app = typer.Typer(
 scrub_app = typer.Typer(help="Uniform-cadence scrub-cache generation (sprite sheets).")
 app.add_typer(triage_app, name="triage")
 app.add_typer(analysis_app, name="analysis")
-app.add_typer(faces_app, name="faces")
 app.add_typer(face_capture_app, name="face-capture")
 app.add_typer(scrub_app, name="scrub")
 
@@ -266,33 +264,6 @@ def triage_stats() -> None:
 
     s = load_settings()
     typer.echo(json.dumps(stats(sidecar_db=s.sidecar.db_path)))
-
-
-# ----- Faces subcommands -----
-
-
-@faces_app.command("scan")
-def faces_scan() -> None:
-    """Score new train/ crops and (if face.auto_promote) promote eligible ones."""
-    from frigate_sidecar.faces import scorer
-
-    s = load_settings()
-    try:
-        summary = scorer.scan(s)
-    except scorer.FacesUnavailable as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=2) from None
-    typer.echo(json.dumps(summary))
-
-
-@faces_app.command("stats")
-def faces_stats(bins: int = typer.Option(10, min=2, max=50)) -> None:
-    """Print the face-crop quality histogram + decision/recognition counts."""
-    from frigate_sidecar.faces import scorer
-
-    s = load_settings()
-    result = scorer.histogram(s, bins=bins)
-    typer.echo(json.dumps(result, indent=2))
 
 
 # ----- Face-capture subcommands -----
