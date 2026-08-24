@@ -1245,3 +1245,8 @@ body.map-full-open .me-toolbar {
 @media (max-width: 700px) {
   .calib-pair { grid-template-columns: 1fr; }
 }
+
+/* Calibrator v3: multi-sample workflow. */
+.calib-event.sampled { border-color: var(--accent); }
+.calib-sampled { color: var(--accent); font-weight: 600; }
+#calib-summary { font-variant-numeric: tabular-nums; }
