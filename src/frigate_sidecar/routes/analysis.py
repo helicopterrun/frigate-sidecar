@@ -272,6 +272,31 @@ def alignment_thumbnail(request: Request, event_id: str) -> Any:
     )
 
 
+@router.get("/annotation-offset/snapshot/{event_id}")
+def alignment_snapshot(request: Request, event_id: str) -> Any:
+    """The event's full-frame snapshot (bbox drawn) for the calibrator's
+    reference pane. Same sidecar-authorized posture and caching as the
+    thumbnail endpoint; the full frame is what makes the side-by-side (and the
+    blink compare) meaningful -- same scene geometry as the recording frames."""
+    from fastapi.responses import Response
+
+    from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient
+
+    s = _settings(request)
+    try:
+        with FrigateClient(s.frigate.base_url) as fc:
+            jpeg, _status = fc.event_snapshot_jpeg(event_id)
+    except FrigateAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if jpeg is None:
+        raise HTTPException(status_code=404, detail="no snapshot for event")
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
 @router.get("/annotation-offset/frame/{camera}")
 def alignment_frame(request: Request, camera: str, ts: float = Query(...)) -> Any:
     """A recording frame at wall-clock `ts`, for the calibration filmstrip.

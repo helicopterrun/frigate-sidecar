@@ -383,6 +383,32 @@ def test_alignment_thumbnail_proxies_frigate(
     assert r.status_code == 404
 
 
+def test_alignment_snapshot_proxies_frigate(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The calibrator's reference pane: full frame with the bbox drawn, via the
+    sidecar's authorized connection (the proxy path 401s, same as thumbnails)."""
+    from frigate_sidecar import frigate_api
+
+    def _fake_snapshot(
+        self: object, event_id: str, *, height: int = 480, bbox: bool = True,
+        timeout: float = 10.0,
+    ) -> tuple[bytes | None, int]:
+        if event_id == "gone":
+            return (None, 404)
+        return (b"\xff\xd8snap", 200)
+
+    monkeypatch.setattr(frigate_api.FrigateClient, "event_snapshot_jpeg", _fake_snapshot)
+    r = client.get("/analysis/annotation-offset/snapshot/ev1")
+    assert r.status_code == 200
+    assert r.content == b"\xff\xd8snap"
+    assert r.headers["content-type"] == "image/jpeg"
+    assert "max-age=3600" in r.headers["cache-control"]
+
+    r = client.get("/analysis/annotation-offset/snapshot/gone")
+    assert r.status_code == 404
+
+
 def test_alignment_frame_rejects_bad_ts(client: TestClient) -> None:
     import time
 

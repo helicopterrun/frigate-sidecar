@@ -29,9 +29,11 @@ the sidecar's own knobs in one place.
   recordings; expect a few minutes) and **Apply** the suggested offset for
   each camera with decent confidence. For a precise manual fix — or when the
   measurement comes back low-confidence — press **Calibrate…** on a camera:
-  pick a recent event, click the recording frame in the filmstrip that matches
-  the event's opening moment, fine-tune with the ±250 ms nudges while
-  comparing the side-by-side previews, and save. Applied offsets take effect
+  it opens on a recent event with the event snapshot and the recording shown
+  side by side. Click the filmstrip frame where the scene matches the
+  snapshot, fine-tune with the nudges or arrow keys (±250 ms, Shift for 1 s),
+  hold **compare** to blink the two images over each other until they align,
+  and save. Applied offsets take effect
   on the next timeline refresh, in the sidecar's scrub page and the Elsinore
   reel alike.
   Setting `detect.annotation_offset` (milliseconds) in Frigate's own
