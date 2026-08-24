@@ -513,7 +513,6 @@ a { color: var(--accent); }
 .tb-game { flex: 1; min-width: 320px; }
 .tb-side { width: 240px; flex-shrink: 0; }
 
-.tb-arcade { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
 
 .tb-hud { display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
   background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); padding: 12px 16px; }
@@ -608,19 +607,16 @@ a { color: var(--accent); }
 .nb-chip.on { border-color: var(--accent); color: var(--text); background: var(--surface-2); }
 .section-block { margin-top: 1.5em; }
 .subsection { margin-top: 0.75em; }
-.control-row { margin: 0.5em 0; }
 .inline-label { margin-left: 0.75em; }
 .inline-label-lg { margin-left: 1em; }
 .save-state { margin-left: 1em; }
 .footnote { margin-top: 24px; }
 .self-end { align-self: flex-end; }
-.va-middle { vertical-align: middle; }
 .hidden { display: none; }
 .empty.error { color: var(--danger); }
 .num-70 { width: 70px; }
 .num-80 { width: 80px; }
 .num-4e { width: 4.5em; }
-.num-5e { width: 5.5em; }
 .field-280 { width: 280px; }
 .warn-note { color: var(--warn); }
 
@@ -671,35 +667,8 @@ a { color: var(--accent); }
 .section-title .help { font-weight: normal; }
 .plus-toggle { font-size: 12px; }
 
-/* Cameras page layer groups: only the active layer's editing controls show;
-   the View group (observation toggles) is always visible. */
-.layer-group { display: none; }
-body[data-layer="cameras"] .layer-group[data-layer="cameras"],
-body[data-layer="areas"] .layer-group[data-layer="areas"],
-body[data-layer="calibrate"] .layer-group[data-layer="calibrate"],
-.layer-group[data-layer="view"] { display: block; }
 #layer-seg { margin: 6px 0; }
 
-/* Compass badge in the map window's corner. */
-.map-compass {
-  position: absolute; top: 8px; left: 8px; z-index: 3;
-  display: flex; flex-direction: column; align-items: center;
-  width: 40px; padding: 4px 0 2px; pointer-events: none;
-  background: color-mix(in srgb, var(--surface-2) 82%, transparent);
-  border: 1px solid var(--stroke); border-radius: var(--radius-md);
-  font-size: 11px; font-weight: 700; color: var(--text); letter-spacing: 1px;
-}
-.map-compass svg { width: 22px; height: 22px; display: block; }
-
-/* Fullscreen toggle pinned opposite the compass. */
-.map-expand {
-  position: absolute; top: 8px; right: 8px; z-index: 3;
-  width: 32px; height: 32px; padding: 0;
-  display: flex; align-items: center; justify-content: center;
-  background: color-mix(in srgb, var(--surface-2) 82%, transparent);
-  border: 1px solid var(--stroke); border-radius: var(--radius-md);
-  color: var(--text); font-size: 15px; line-height: 1; cursor: pointer;
-}
 .cam-map.map-full {
   position: fixed; inset: 0; z-index: 60;
   width: 100vw; height: 100dvh; border: none; border-radius: 0;
@@ -707,7 +676,6 @@ body[data-layer="calibrate"] .layer-group[data-layer="calibrate"],
 body.map-full-open { overflow: hidden; }
 
 /* Camera visibility chips: view-only show/hide per camera. */
-.cam-vis { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 6px; }
 .vis-chip {
   padding: 2px 10px; min-height: 24px;
   background: var(--surface-2); color: var(--muted-3, var(--muted));
@@ -716,7 +684,6 @@ body.map-full-open { overflow: hidden; }
   text-decoration: line-through;
 }
 .vis-chip.on { color: var(--text); border-color: var(--accent); text-decoration: none; }
-.vis-chip.vis-all { text-decoration: none; color: var(--accent); }
 
 /* Cameras page: the map is a gesture surface — no browser scroll/zoom on it
    (pinch zooms the map, one-finger drags follow the active layer). */
@@ -728,10 +695,9 @@ body.map-full-open { overflow: hidden; }
   .cam-map { width: 100%; height: clamp(280px, 45dvh, 520px); }
   .inline-label, .inline-label-lg { display: inline-block; margin: 4px 10px 4px 0; }
   .inline-label-lg input[type=checkbox] { width: 20px; height: 20px; vertical-align: middle; }
-  .num-4e, .num-5e { min-height: 36px; }
+  .num-4e { min-height: 36px; }
   #camera-detail .inline-label { flex: 1 1 40%; }
   #camera-detail { display: flex; flex-wrap: wrap; gap: 4px; }
-  .layer-group .btn-primary, #layer-seg ~ * .btn-primary { min-height: 40px; }
   #landmark-snapshot { max-width: 100%; }
 }
 
@@ -788,7 +754,7 @@ body.map-full-open { overflow: hidden; }
 .live-stage video-stream { display: block; width: 100%; }
 .live-stage video { display: block; width: 100%; max-height: 82vh; object-fit: contain; }
 
-/* --- Map editor (/cameras2 rebuild) ------------------------------------ */
+/* --- Map editor (/map) -------------------------------------------------- */
 .me-root { display: flex; flex-direction: column; }
 .me-frame {
   display: grid; grid-template-columns: 44px 1fr 320px; gap: 8px;
@@ -1196,9 +1162,7 @@ body.map-full-open .me-toolbar {
 }
 .calib-event img { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 3px; display: block; }
 .calib-event.selected { border-color: var(--accent); }
-.calib-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .calib-caption { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-.calib-ref img { width: 100%; max-height: 300px; object-fit: contain; background: #000; border-radius: var(--radius-sm); }
 .calib-strip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
 .calib-cell {
   flex: 0 0 auto; width: 128px; position: relative; cursor: pointer;
@@ -1221,10 +1185,6 @@ body.map-full-open .me-toolbar {
   background: var(--panel); color: var(--text); border: 1px solid var(--stroke);
   border-radius: var(--radius-sm); padding: 4px 8px; font-size: 13px; margin-left: 8px;
 }
-@media (max-width: 700px) {
-  .calib-compare { grid-template-columns: 1fr; }
-}
-
 /* Calibrator v2: the compare pair, the blink ghost, the step toggle. */
 .calib-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .calib-pane { display: flex; flex-direction: column; gap: 4px; min-width: 0; }

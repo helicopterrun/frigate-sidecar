@@ -78,10 +78,6 @@ class SheetVerdict:
     path: str
     source: str  # "cells" | "pixels"
 
-    @property
-    def overclaims(self) -> bool:
-        return self.real < self.declared
-
 
 def _true_count_from_cells(cache_dir: Path, row: dict[str, Any]) -> int | None:
     """Contiguous cells present in the sheet's store, or None if it's gone."""

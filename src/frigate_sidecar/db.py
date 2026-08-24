@@ -16,7 +16,6 @@ import json
 import sqlite3
 import time
 from collections.abc import Callable, Sequence
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -31,23 +30,6 @@ CREATE TABLE IF NOT EXISTS triage_labels (
     session    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_triage_label ON triage_labels(label);
-
-CREATE TABLE IF NOT EXISTS face_attempts (
-    filename        TEXT PRIMARY KEY,
-    event_id        TEXT,
-    frame_ts        REAL,
-    recognized_name TEXT,
-    recog_score     REAL,
-    sharpness       REAL,
-    area_px         INTEGER,
-    quality_score   REAL,
-    decision        TEXT,
-    assigned_name   TEXT,
-    scored_at       TEXT,
-    decided_at      TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_face_decision ON face_attempts(decision);
-CREATE INDEX IF NOT EXISTS idx_face_quality ON face_attempts(quality_score);
 
 -- Toybox: arcade-style high scores for the in-house games (50-states quiz, etc).
 -- Not Frigate-related; it's a for-fun page. `game` namespaces the leaderboard so
@@ -323,18 +305,9 @@ CREATE TABLE IF NOT EXISTS push_card_track_aliases (
 -- us pull the *capture* camera's full main-stream frame out of Frigate's
 -- recordings at that moment and park it for human review.
 --
--- A NEW table rather than columns on `face_attempts`, for a concrete reason:
--- faces/scorer.py's histogram() runs an UNFILTERED "SELECT ... FROM
--- face_attempts", and its output is the gate signal that face.quality_threshold
--- was tuned against (0.55 here, chosen off a measured ~0.45 median). Rows of a
--- different kind in that table silently move the median and therefore the
--- auto-promote threshold. face_attempts is also PK'd on Frigate's crop filename,
--- has no camera column, and its `decision` vocabulary is about promoting into
--- Frigate's Face Library -- a different action space from keep/discard.
---
 -- Keyed on its own autoincrement id, NOT on a filename: every file this feature
 -- serves is addressed by row id, so no client-supplied string ever reaches the
--- filesystem. (routes/faces.py takes a filename because those files are
+-- filesystem. (the retired B1 curation routes took a filename because those files were
 -- Frigate's and are in no table of ours; these are, so the traversal class is
 -- removed rather than guarded.)
 --
@@ -753,16 +726,6 @@ def time_window_clause(days: float, column: str = "start_time") -> tuple[str, li
     """
     cutoff = time.time() - days * 86400
     return f"{column} >= ?", [cutoff]
-
-
-def fmt_ts(epoch: float | None) -> str:
-    if epoch is None:
-        return "—"
-    return (
-        datetime.fromtimestamp(epoch, tz=timezone.utc)
-        .astimezone()
-        .strftime("%Y-%m-%d %H:%M:%S")
-    )
 
 
 def upsert_scrub_bucket(

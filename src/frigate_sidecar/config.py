@@ -62,7 +62,7 @@ class SidecarSection(BaseModel):
     db_path: Path = Path("/data/frigate-sidecar.db")
     bind_host: str = "0.0.0.0"
     bind_port: int = 5001
-    # Every endpoint the sidecar owns -- the triage UI, /faces, /analysis,
+    # Every endpoint the sidecar owns -- the triage UI, /faces/captures, /analysis,
     # /toybox, /v1 -- requires the same Frigate session cookie the proxy
     # already forwards to Frigate. On by default: the sidecar sits on the same
     # LAN origin as Frigate and exposes event history, face crops and
@@ -84,25 +84,6 @@ class SidecarSection(BaseModel):
     remember_ttl_s: float = 30 * 86400.0
 
 
-class FaceSection(BaseModel):
-    """Face-training-image quality curation (B1).
-
-    Scores Frigate's auto-saved face crops and promotes the good ones into the
-    named Face Library via Frigate's API. `auto_promote` starts off so the
-    first runs are observe-only — flip it on after reviewing the quality
-    histogram.
-    """
-
-    enabled: bool = False
-    # Frigate's clips/faces dir as seen from the sidecar host (LXC 105), not the
-    # container path. Holds the `train/` attempt pool + per-person library dirs.
-    clips_faces_dir: Path = Path("/mnt/frigate-storage/recordings/clips/faces")
-    auto_promote: bool = False
-    quality_threshold: float = 0.0  # min combined quality_score to auto-promote
-    min_recog_score: float = 0.9  # only auto-promote crops Frigate recognized this well
-    per_person_cap: int = 40  # don't let auto-promote overgrow one person's library
-
-
 class FaceCaptureSection(BaseModel):
     """High-res cross-camera face capture (B2).
 
@@ -116,8 +97,7 @@ class FaceCaptureSection(BaseModel):
     live) with no ffmpeg, no -ss seek, no recordings-table lookup and no
     container->host path mapping. Prior art: analysis/annotation_offset.py.
 
-    Distinct from `face:` above, which curates Frigate's OWN auto-saved face
-    crops. This section never touches Frigate's Face Library.
+    This section never touches Frigate's Face Library.
     """
 
     enabled: bool = False
@@ -630,10 +610,6 @@ class PushSection(BaseModel):
     # plan §8 retains them for 24h so a notification the user comes back to
     # hours later can still redeem its image.
     situation_handle_ttl_s: float = 86400.0
-    # Plan §6: max N pushes per situation per device per hour (rolling).
-    # Protects against a runaway camera, which is a different problem from
-    # snooze -- that one protects against the user's own choice.
-    rate_limit_per_hour: int = 10
     rate_limit_window_s: float = 3600.0
     # Pre-warmed thumbnail (plan §4 lever 1). ~320px/q60 lands around 10-20KB;
     # the NSE runs under a very tight memory ceiling and the phone may be on a
@@ -655,19 +631,12 @@ class PushSection(BaseModel):
     dwell_source: str = "events"
 
     # -- Live Activities (Phase 2) --
-    # Coalescing floor for update pushes -- one per activity per this many
-    # seconds however busy the object stream gets. iOS meters LA updates.
-    activity_update_min_interval_s: float = 3.0
     # Quiet period after which a Present situation counts as resolved. The
     # faster signal is Frigate's own object `end`, which the engine acts on
     # directly; this catches the case where it never arrives.
     activity_resolution_s: float = 30.0
     # How long the activity lingers on screen after the end push.
     activity_dismissal_tail_s: float = 30.0
-    # Separate from the alert tier's `rate_limit_per_hour`, in both
-    # directions: a chatty activity must not eat the budget a genuine
-    # interrupt needs, and a silent update is nothing like a buzz.
-    activity_updates_per_hour: int = 60
     activity_reap_after_s: float = 300.0
     # How often the resolution sweeper runs. Only ever *ends* activities, so
     # it is not the clock-driven keep-alive the plan forbids.
@@ -766,7 +735,6 @@ class Settings(BaseSettings):
 
     frigate: FrigateSection = Field(default_factory=FrigateSection)
     sidecar: SidecarSection = Field(default_factory=SidecarSection)
-    face: FaceSection = Field(default_factory=FaceSection)
     face_capture: FaceCaptureSection = Field(default_factory=FaceCaptureSection)
     face_enrich: FaceEnrichSection = Field(default_factory=FaceEnrichSection)
     watchdog: WatchdogSection = Field(default_factory=WatchdogSection)

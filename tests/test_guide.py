@@ -26,13 +26,9 @@ from frigate_sidecar.guide import (
 from frigate_sidecar.routes.guide import STAT_KEYS
 from frigate_sidecar.server import create_app
 
-# Pages that legitimately need no guide topic: legacy redirects into
-# /settings, the guide's own pages, and alias routes.
+# Pages that legitimately need no guide topic: the guide's own pages.
 UNDOCUMENTED_OK = {
     "/guide/{slug}",
-    "/zones",
-    "/devices",
-    "/cameras2",
 }
 
 

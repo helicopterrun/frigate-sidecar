@@ -4,7 +4,7 @@ The sidecar has no user database and never holds a password: it validates the
 client's own Frigate session cookie against Frigate's authenticated origin and
 caches the pass for a short TTL. That is the same mechanism `/v1` already used
 (docs/scrub-cache-and-proxy-spec.md §3.2 finding 5, option (a)); this module
-generalises it so the triage UI, `/faces`, `/analysis` and `/toybox` are
+generalises it so the triage UI, `/faces/captures`, `/analysis` and `/toybox` are
 covered too. Those endpoints expose event history, face crops of identified
 people, and label/promote writes with side effects on Frigate itself, so
 leaving them open made the sidecar a way around Frigate's own auth.

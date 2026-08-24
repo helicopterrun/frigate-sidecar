@@ -13,8 +13,3 @@ WorkingDirectory=/opt/frigate-sidecar
 Environment="FRIGATE_SIDECAR_CONFIG=/opt/frigate-sidecar/config/sidecar.yml"
 ExecStart=/usr/bin/python3 -m frigate_sidecar face-capture scan
 
-# NOTE: deliberately its OWN unit rather than a second ExecStart= on
-# frigate-sidecar-faces.service. `faces scan` exits 2 when the optional [faces]
-# extra (cv2/numpy) is absent, and a failed ExecStart in a Type=oneshot unit
-# aborts the remaining ones -- which would couple this core-deps-only feature to
-# an optional dependency it does not need.

@@ -41,7 +41,7 @@ import time
 from typing import Any
 
 from frigate_sidecar.push.cards import RESOLVE
-from frigate_sidecar.push.payload import APNS_MAX_PAYLOAD_BYTES
+from frigate_sidecar.push.payload import APNS_MAX_PAYLOAD_BYTES, payload_size
 
 #: The app's `ActivityAttributes` conformer for card-model activities.
 #: iOS matches the push-to-start push to a registered attributes type by
@@ -389,15 +389,11 @@ def build_la_end_payload(
     return _fit(payload)
 
 
-def _payload_size(payload: dict[str, Any]) -> int:
-    return len(json.dumps(payload, separators=(",", ":")).encode())
-
-
 def _fit(payload: dict[str, Any]) -> dict[str, Any]:
     """Same trim rule as `delivery.py`/`activity.py`'s own `_fit_to_budget`:
     `primary`/`secondary` are the only unbounded, user-facing strings in
     this shape."""
-    if _payload_size(payload) <= APNS_MAX_PAYLOAD_BYTES:
+    if payload_size(payload) <= APNS_MAX_PAYLOAD_BYTES:
         return payload
     state = payload["aps"].get("content-state")
     if isinstance(state, dict):

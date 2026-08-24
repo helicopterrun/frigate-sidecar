@@ -1,6 +1,6 @@
 """Tests for the central Frigate-session gate (frigate_sidecar.auth).
 
-The sidecar's own surface -- triage UI, /faces, /analysis, /toybox, /v1 --
+The sidecar's own surface -- triage UI, /faces/captures, /analysis, /toybox, /v1 --
 exposes event history, face crops and writes with side effects on Frigate, so
 it must not be reachable without the same session Frigate itself requires. The
 proxy catch-all must stay ungated (Frigate authenticates it, and its own 401
@@ -8,7 +8,7 @@ has to reach the client).
 
 Auditing this against a live deployment is not a matter of reading status
 codes: an unmatched path falls through to Frigate, which answers almost
-anything with `200 text/html` (its SPA shell). `/analysis` and `/analysis/faces`
+anything with `200 text/html` (its SPA shell). `/analysis` pages
 both return 200 unauthenticated for exactly that reason and are not leaks. The
 question is always whether the *body* is sidecar content, so check for a
 sidecar marker rather than concluding from the status alone.
@@ -76,7 +76,7 @@ def _denied_handler(calls: list[httpx.Request]) -> Any:
 
 @pytest.mark.parametrize(
     "path",
-    ["/", "/event/e1", "/faces", "/toybox", "/analysis/motion-rate", "/score-histogram"],
+    ["/", "/event/e1", "/faces/captures", "/toybox", "/analysis/motion-rate", "/score-histogram"],
 )
 def test_sidecar_surface_requires_a_session(
     frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
@@ -96,11 +96,7 @@ def test_mutating_endpoints_require_a_session(
     client = _build(frigate_db_path, sidecar_db_path, tmp_path, _ok_handler(upstream_calls))
     assert client.post("/label", json={"event_id": "e1", "label": "fp"}).status_code == 401
     assert client.post("/clear-label", json={"event_id": "e1"}).status_code == 401
-    assert (
-        client.post("/faces/decide", json={"filename": "x.webp", "action": "discard"}).status_code
-        == 401
-    )
-    assert client.post("/faces/scan").status_code == 401
+    assert client.post("/faces/captures/scan").status_code == 401
 
 
 def test_valid_session_passes_and_is_cached(

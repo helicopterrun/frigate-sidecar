@@ -33,11 +33,6 @@ annotation = [
     "opencv-python-headless>=4.10",
     "numpy>=1.26",
 ]
-faces = [
-    # Used by faces.scorer (Laplacian-variance sharpness + crop decode).
-    "opencv-python-headless>=4.10",
-    "numpy>=1.26",
-]
 enrich = [
     # faces.enrich: SCRFD detection + ArcFace embeddings (buffalo_l pack),
     # CPU-only by design — see FaceEnrichSection for the OpenVINO/iGPU story.

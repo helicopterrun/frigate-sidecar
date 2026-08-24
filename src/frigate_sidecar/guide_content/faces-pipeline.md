@@ -1,21 +1,16 @@
 ---
-title: Face captures & curation
+title: Face captures
 section: faces
 order: 1
-routes: ["/faces", "/faces/captures"]
-config: ["face", "face_capture"]
+routes: ["/faces/captures"]
+config: ["face_capture"]
 ---
 
-The face pipeline has three stages; this topic covers the first two —
-collecting good face images. The third stage, recognition, is
+The face pipeline has two stages; this topic covers the first — collecting
+good face images. The second stage, recognition, is
 [Identities](/guide/identities).
 
 ## Using it
-
-**Face crops — [Faces](/faces).** Frigate auto-saves small face crops from
-detections. The Faces page is the curation grid for them: review, check the
-score histogram, then **promote** the good ones into the Face Library or
-discard the rest.
 
 **High-res captures — [Face captures](/faces/captures).** Detection streams
 are low resolution; faces from them are often too soft to be useful. The
@@ -30,7 +25,6 @@ shots, discard the rest. Kept captures are the raw material the
 
 ## Configuration
 
-- `face:` — the crop-curation feature; needs the `faces` install extra.
 - `face_capture:` — trigger/capture camera pairs are explicit here, so
   captures only happen where you've set them up. The output directory must
   be writable by the sidecar service.

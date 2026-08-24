@@ -67,11 +67,6 @@ def _service_rows(settings: Any) -> list[dict[str, str]]:
             "guide": "/guide/push-notifications",
         },
         {
-            "name": "Face pipeline",
-            "value": onoff(settings.face.enabled),
-            "guide": "/guide/faces-pipeline",
-        },
-        {
             "name": "Face capture",
             "value": onoff(settings.face_capture.enabled),
             "guide": "/guide/faces-pipeline",
@@ -180,8 +175,6 @@ async def settings_view(request: Request) -> Any:
             "push_enabled": settings.push.enabled,
             "transport": settings.push.transport,
             "camera_rows": _camera_summary(settings),
-            "face_auto_promote": settings.face.auto_promote,
-            "face_quality_threshold": settings.face.quality_threshold,
             "service_rows": _service_rows(settings),
             "ladder": _ladder_matrix(),
             "notif_examples": _notification_examples(),

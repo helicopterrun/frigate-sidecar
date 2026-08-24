@@ -1,11 +1,5 @@
 """High-res cross-camera face captures: visit-grouped review grid + images.
 
-Separate from routes/faces.py on purpose. That page's data is `face_attempts`,
-its actions are promote-into-Face-Library / discard, and its scoring is
-cv2-gated. These are `face_captures`: a different table, a keep/discard
-vocabulary, no cv2 dependency, and a visit-grouped layout. Merging them would
-mean a mode flag in every template block and a UNION in the pending query.
-
 Images are addressed by ROW ID, not filename. routes/faces.py takes a filename
 because those files are Frigate's and are in no table of ours; these files are
 in our table, so id-addressing removes the path-traversal class outright instead

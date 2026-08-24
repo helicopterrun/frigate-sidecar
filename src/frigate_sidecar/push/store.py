@@ -163,23 +163,6 @@ def delete_device(conn: sqlite3.Connection, apns_token: str) -> bool:
     return cur.rowcount > 0
 
 
-def clear_push_to_start_token(conn: sqlite3.Connection, apns_token: str) -> bool:
-    """Blank a dead push-to-start token without touching the rest of the row.
-
-    A `BadDeviceToken` on a Live Activity *start* means iOS no longer honors
-    this push-to-start token -- often because the build that minted it isn't
-    installed right now, not because the device/subscription is gone. The
-    row's situations, filters and snooze state are still good; only the token
-    is stale. The next registration from a live build repopulates it (the
-    upsert in `register_device` never blanks an incoming non-empty token).
-    """
-    cur = conn.execute(
-        "UPDATE push_devices SET push_to_start_token = '' WHERE apns_token = ?",
-        (apns_token,),
-    )
-    return cur.rowcount > 0
-
-
 def get_device(conn: sqlite3.Connection, apns_token: str) -> Device | None:
     row = conn.execute(
         "SELECT * FROM push_devices WHERE apns_token = ?", (apns_token,)
@@ -575,16 +558,6 @@ def reap_activities(
     for row in rows:
         delete_activity(conn, row["activity_id"])
     return len(rows)
-
-
-def count_activity_sends(
-    conn: sqlite3.Connection, *, activity_id: str, since: float
-) -> int:
-    row = conn.execute(
-        "SELECT COUNT(*) AS n FROM push_activity_sends WHERE activity_id = ? AND sent_at > ?",
-        (activity_id, since),
-    ).fetchone()
-    return int(row["n"]) if row else 0
 
 
 def record_activity_send(

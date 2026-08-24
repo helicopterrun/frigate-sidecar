@@ -10,7 +10,7 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 
 from frigate_sidecar.analysis import optics
 
@@ -27,10 +27,3 @@ def map_view(request: Request) -> Any:
         request, "map.html",
         {"lens_presets_json": json.dumps(presets["lenses"])},
     )
-
-
-@router.get("/cameras2", include_in_schema=False)
-def cameras_alias() -> Any:
-    """Old rebuild-era alias for the map page. /cameras is now the live
-    camera grid (routes/status.py)."""
-    return RedirectResponse("/map", status_code=301)

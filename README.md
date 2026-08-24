@@ -103,7 +103,7 @@ MQTT settings point at the broker Frigate publishes to. Self-hosting the relay
 ## Auth
 
 **Every endpoint the sidecar owns requires the client's Frigate session
-cookie** — the triage UI, `/faces`, `/analysis`, `/toybox` and `/v1` alike. The
+cookie** — the triage UI, `/faces/captures`, `/analysis`, `/toybox` and `/v1` alike. The
 sidecar has no user database and never holds a password: it validates the
 cookie against `frigate.proxy_base_url` and caches the pass for
 `sidecar.auth_cache_ttl_s`. Since the sidecar serves event history, face crops

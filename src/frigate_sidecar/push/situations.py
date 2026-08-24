@@ -62,11 +62,6 @@ logger = logging.getLogger(__name__)
 
 TIERS = ("ambient", "present", "interrupt")
 
-#: Tiers with a delivery surface. `interrupt` buzzes (Phase 1); `present`
-#: lives in a Live Activity (Phase 2). `ambient` is the widget surface and
-#: waits for Phase 3.
-DELIVERABLE_TIERS = ("interrupt", "present")
-
 #: Live Activity stages (Phase 2 plan, `ContentState.stage`). They drive the
 #: app's visual language, so the strings are a wire contract, not an internal
 #: enum: minimal while `arriving`, timer + snapshot at `present`, red-badged
@@ -452,18 +447,6 @@ class TrackStore:
         if state is not None:
             state.fired.add((apns_token, situation_id))
 
-    def unmark_fired(self, camera: str, track_id: str, apns_token: str, situation_id: str) -> None:
-        """Release a claim whose send never happened.
-
-        A dwell is claimed *before* the push is handed to the transport, so
-        that a second message about the same track arriving mid-send can't
-        push it twice. If the send then fails, the claim has to come back --
-        a relay blip must not silently eat the notification for good.
-        """
-        state = self._tracks.get((camera, track_id))
-        if state is not None:
-            state.fired.discard((apns_token, situation_id))
-
     def has_fired(self, camera: str, track_id: str, apns_token: str, situation_id: str) -> bool:
         state = self._tracks.get((camera, track_id))
         return bool(state and (apns_token, situation_id) in state.fired)
@@ -641,92 +624,6 @@ def matches(
     )
 
 
-def matches_conditions(
-    situation: Situation,
-    device: Device,
-    event: ReviewEvent,
-    track_id: str,
-    tracks: TrackStore,
-    *,
-    now: float,
-) -> Match | None:
-    """`matches()` without the loiter gate -- "is this situation *happening*".
-
-    A Present-tier situation starts its Live Activity the moment the object is
-    in the zone, not when it has dwelled long enough to be worth a buzz: plan
-    §3's `at-the-door` walkthrough has the LA appear at "0:04" and escalate at
-    five seconds. Loiter still decides the *interrupt*, which is what
-    `escalation_reached` answers.
-
-    Everything else -- camera, label, zone, live occupancy, time of day -- is
-    identical to `matches()`, so a situation that could never fire an alert
-    can never open an activity either.
-    """
-    if situation.cameras and event.camera not in situation.cameras:
-        return None
-
-    label = _first_match(situation.labels, event.labels)
-    if situation.labels and label is None:
-        return None
-
-    if not in_time_window(situation.time_of_day, now, device.timezone):
-        return None
-
-    audio = (
-        next((a for a in event.audio if a in situation.audio_events), None)
-        if situation.audio_events
-        else None
-    )
-
-    zone = _first_match(situation.zones, event.zones)
-    if situation.zones and zone is None:
-        return None if audio is None else Match(
-            situation=situation, track_id=track_id, dwell_s=0.0,
-            label=label or "", zone="", audio=audio,
-        )
-
-    origin = tracks.dwell_origin(event.camera, track_id, situation.zones)
-    if origin is None and situation.zones:
-        return None if audio is None else Match(
-            situation=situation, track_id=track_id, dwell_s=0.0,
-            label=label or "", zone="", audio=audio,
-        )
-
-    return Match(
-        situation=situation,
-        track_id=track_id,
-        dwell_s=0.0 if origin is None else max(0.0, now - origin),
-        label=label or (event.labels[0] if event.labels else ""),
-        zone=zone or "",
-        audio=audio or "",
-    )
-
-
-def escalation_reached(match: Match, *, sub_label: str = "") -> bool:
-    """Has this Present-tier situation crossed the interrupt bar?
-
-    Only ever true when the situation actually authored an `escalation`
-    block. A Present situation without one is a thing you watch, not a thing
-    that eventually buzzes -- which is the whole point of the tier, and the
-    plan's smallest-interrupt-surface non-negotiable would be violated by
-    inventing a trigger the user never asked for.
-    """
-    rule = match.situation.escalation
-    if rule is None:
-        return False
-    if rule.kind == "loiter_exceeds":
-        # An explicit threshold wins; falling back to the situation's own
-        # loiter keeps `{"on": "loiter_exceeds"}` meaningful rather than
-        # instantly true.
-        bar = rule.threshold or match.situation.loiter_seconds
-        return bool(bar) and match.dwell_s >= bar
-    if rule.kind == "audio_event":
-        return bool(match.audio)
-    if rule.kind == "sub_label_unknown":
-        return not sub_label
-    return False
-
-
 def _first_match(wanted: tuple[str, ...], present: tuple[str, ...]) -> str | None:
     """The first of `present` that `wanted` admits; None if none do. An empty
     `wanted` means "anything", answered with the first present value (or `""`
@@ -772,19 +669,3 @@ def evaluate_device(
             if hit is not None:
                 found.append(hit)
     return found
-
-
-def present_situations(device: Device) -> tuple[Situation, ...]:
-    """The device's Present-tier situations -- the ones Phase 2 runs Live
-    Activities for."""
-    return tuple(s for s in device.situations if s.tier == "present")
-
-
-def undeliverable_tiers(device: Device) -> tuple[str, ...]:
-    """Situation ids the device authored at a tier with no delivery surface
-    yet -- `ambient`, whose surface is the Phase 3 widget.
-
-    Surfaced so the sidecar can say so once per device instead of looking
-    like it dropped the notification on the floor.
-    """
-    return tuple(s.id for s in device.situations if s.tier not in DELIVERABLE_TIERS)
