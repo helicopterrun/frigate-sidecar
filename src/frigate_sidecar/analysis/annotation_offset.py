@@ -16,7 +16,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from frigate_sidecar.db import open_frigate_ro, parse_event_data, percentile, time_window_clause
+from frigate_sidecar.db import (
+    open_frigate_ro,
+    parse_event_data,
+    parse_path_data,
+    percentile,
+    time_window_clause,
+)
 
 
 class AnnotationOffsetUnavailable(RuntimeError):
@@ -34,21 +40,9 @@ def _require_deps() -> tuple[Any, Any]:
     return cv2, np
 
 
-def _parse_path_data(raw: Any) -> list[tuple[float, float, float]]:
-    if not raw:
-        return []
-    out: list[tuple[float, float, float]] = []
-    for entry in raw:
-        if not entry:
-            continue
-        if len(entry) == 2 and isinstance(entry[0], (list, tuple)) and len(entry[0]) == 2:
-            (x, y), t = entry
-        elif len(entry) == 3:
-            x, y, t = entry
-        else:
-            continue
-        out.append((float(x), float(y), float(t)))
-    return out
+# Canonical implementation moved to db.parse_path_data (the /v1 read layer
+# needs it without the [annotation] extras); kept as an alias for callers here.
+_parse_path_data = parse_path_data
 
 
 def _event_qualifies(

@@ -684,8 +684,38 @@ def parse_event_data(row: sqlite3.Row) -> dict[str, Any]:
     return out
 
 
-def event_top_score(row: sqlite3.Row) -> float | None:
+def parse_path_data(raw: Any) -> list[tuple[float, float, float]]:
+    """Frigate's `data.path_data` -> [(x, y, t), ...], malformed entries skipped.
+
+    Accepts both storage shapes: ``[[x, y], t]`` and ``[x, y, t]``. Lives here
+    (not in the `[annotation]` extra module where it originated) because the
+    /v1 read layer needs it without cv2/numpy installed.
+    """
+    if not raw:
+        return []
+    out: list[tuple[float, float, float]] = []
+    for entry in raw:
+        if not entry:
+            continue
+        if len(entry) == 2 and isinstance(entry[0], (list, tuple)) and len(entry[0]) == 2:
+            (x, y), t = entry
+        elif len(entry) == 3:
+            x, y, t = entry
+        else:
+            continue
+        try:
+            out.append((float(x), float(y), float(t)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def event_top_score(row: sqlite3.Row, parsed: dict[str, Any] | None = None) -> float | None:
     """Peak confidence for an event, wherever this Frigate version keeps it.
+
+    Pass `parsed` (the already-decoded `data` blob) to skip re-parsing --
+    path_data blobs run to thousands of points, and the reel handler decodes
+    them once per row anyway.
 
     Current Frigate writes scores into the `data` JSON blob and leaves the
     `score`/`top_score` *columns* NULL -- all 80,664 rows on the reference
@@ -696,13 +726,14 @@ def event_top_score(row: sqlite3.Row) -> float | None:
     layer went straight to the column.
     """
     keys = row.keys()  # noqa: SIM118 - sqlite3.Row needs .keys()
-    parsed: dict[str, Any] = {}
-    raw = row["data"] if "data" in keys else None
-    if raw:
-        try:
-            parsed = json.loads(raw) if isinstance(raw, str) else raw
-        except (json.JSONDecodeError, TypeError):
-            parsed = {}
+    if parsed is None:
+        parsed = {}
+        raw = row["data"] if "data" in keys else None
+        if raw:
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                parsed = {}
     for value in (
         parsed.get("top_score"),
         parsed.get("score"),

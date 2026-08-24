@@ -439,6 +439,122 @@ def _event_clock_offset_s(settings: Any, camera: str) -> float:
     return offset_s
 
 
+# Path-summary tuning (§4.5). Drift is capped so a thousands-of-points
+# trajectory ships as a handful of numbers; dwell is "stayed within
+# _DWELL_RADIUS (normalized frame units) for at least _DWELL_MIN_S".
+_PATH_MAX_DRIFT_POINTS = 16
+_PATH_MIN_POINTS = 3
+_PATH_MIN_DURATION_S = 5.0
+_DWELL_RADIUS = 0.05
+_DWELL_MIN_S = 10.0
+_DWELL_MAX_SPANS = 4
+
+
+def _path_summary(
+    parsed: dict[str, Any], offset_s: float
+) -> dict[str, Any] | None:
+    """`data.path_data` -> {"drift": [[t, x], ...], "dwell": [[t0, t1], ...]}.
+
+    Timestamps are shifted onto the record clock like start/end. Purely a
+    function of the stored path (deterministic -- the reel body is ETagged on
+    content, so any instability here would bust the client cache every poll).
+    """
+    points = db.parse_path_data(parsed.get("path_data"))
+    if len(points) < _PATH_MIN_POINTS:
+        return None
+    if points[-1][2] - points[0][2] < _PATH_MIN_DURATION_S:
+        return None
+
+    stride = max(1, -(-len(points) // _PATH_MAX_DRIFT_POINTS))  # ceil division
+    sampled = points[::stride]
+    if sampled[-1] != points[-1]:
+        sampled.append(points[-1])  # always keep the exit position
+    drift = [[round(t + offset_s, 3), round(x, 4)] for x, _y, t in sampled]
+
+    dwell: list[list[float]] = []
+    anchor_x, anchor_y, anchor_t = points[0]
+    last_t = anchor_t
+    for x, y, t in points[1:]:
+        if abs(x - anchor_x) <= _DWELL_RADIUS and abs(y - anchor_y) <= _DWELL_RADIUS:
+            last_t = t
+            continue
+        if last_t - anchor_t >= _DWELL_MIN_S:
+            dwell.append([round(anchor_t + offset_s, 3), round(last_t + offset_s, 3)])
+            if len(dwell) >= _DWELL_MAX_SPANS:
+                break
+        anchor_x, anchor_y, anchor_t = x, y, t
+        last_t = t
+    if len(dwell) < _DWELL_MAX_SPANS and last_t - anchor_t >= _DWELL_MIN_S:
+        dwell.append([round(anchor_t + offset_s, 3), round(last_t + offset_s, 3)])
+
+    return {"drift": drift, "dwell": dwell}
+
+
+# A continuation must start within this many seconds after the event does
+# (matches the crosscam visit dedup_window_s: real visits fire on the next
+# camera within seconds).
+_CONTINUES_WINDOW_S = 60.0
+
+
+def _attach_continuations(
+    conn: Any,
+    settings: Any,
+    camera: str,
+    events: list[dict[str, Any]],
+) -> None:
+    """Fill each event's `continues` with the same visit's next appearance
+    on another camera: {"camera", "event_id", "start"} or None.
+
+    One query for the whole window, matched in memory. Cross-camera time
+    comparison happens on the record clock: every candidate start is shifted
+    by ITS OWN camera's offset (offsets are per camera), and the returned
+    `start` stays on the target camera's record clock -- that is the time the
+    app scrubs to after switching.
+    """
+    if not events:
+        return
+    win_start = min(e["start"] for e in events)
+    win_end = max((e["end"] or e["start"]) for e in events) + _CONTINUES_WINDOW_S
+    # Query bounds are detect-clock and per-camera offsets vary; widen by the
+    # apply endpoint's ±60 s offset cap so no candidate is clipped pre-shift.
+    try:
+        rows = conn.execute(
+            "SELECT id, camera, label, start_time FROM event "
+            "WHERE camera != ? AND start_time BETWEEN ? AND ? "
+            "ORDER BY start_time",
+            (camera, win_start - 60.0, win_end + 60.0),
+        ).fetchall()
+    except sqlite3.Error:
+        for ev in events:
+            ev["continues"] = None
+        return
+
+    candidates = []
+    for row in rows:
+        cand_offset = _event_clock_offset_s(settings, row["camera"])
+        candidates.append(
+            (row["start_time"] + cand_offset, row["camera"], row["id"], row["label"])
+        )
+    candidates.sort()
+
+    for ev in events:
+        ev_start = ev["start"]
+        ev_end = ev["end"] if ev["end"] is not None else ev_start
+        best: dict[str, Any] | None = None
+        for cand_start, cand_camera, cand_id, cand_label in candidates:
+            if cand_label != ev["label"] or cand_start < ev_start:
+                continue
+            if cand_start > ev_end + _CONTINUES_WINDOW_S:
+                break
+            best = {
+                "camera": cand_camera,
+                "event_id": cand_id,
+                "start": round(cand_start, 3),
+            }
+            break  # candidates are sorted: first hit is the earliest
+        ev["continues"] = best
+
+
 def _events_json(
     conn: Any, camera: str, start: float, end: float, offset_s: float = 0.0
 ) -> list[dict[str, Any]]:
@@ -457,7 +573,16 @@ def _events_json(
             zones = json.loads(zones_raw) if zones_raw else []
         except (json.JSONDecodeError, TypeError):
             zones = []
-        score = db.event_top_score(row)
+        # Decode the `data` blob once per row; it feeds both the score lookup
+        # and the path summary (path_data runs to thousands of points).
+        parsed: dict[str, Any] = {}
+        if "data" in cols and row["data"]:
+            try:
+                loaded = json.loads(row["data"])
+                parsed = loaded if isinstance(loaded, dict) else {}
+            except (json.JSONDecodeError, TypeError):
+                parsed = {}
+        score = db.event_top_score(row, parsed=parsed if "data" in cols else None)
         out.append(
             {
                 "id": row["id"],
@@ -477,6 +602,9 @@ def _events_json(
                 "has_snapshot": (
                     bool(row["has_snapshot"]) if "has_snapshot" in cols else False
                 ),
+                # Trajectory digest for the wheel's wiggle/dwell rendering;
+                # null when the blob is missing or too short to say anything.
+                "path": _path_summary(parsed, offset_s),
             }
         )
     return out
@@ -555,6 +683,7 @@ async def reel(
         coverage_result = db.recording_coverage(conn, camera, start, end, now=time.time())
         offset_s = _event_clock_offset_s(settings, camera)
         events = _events_json(conn, camera, start, end, offset_s=offset_s)
+        _attach_continuations(conn, settings, camera, events)
         # Review segments come off the detect stream too -- same clock shift.
         reviews = _reviews_json(conn, camera, start, end, offset_s=offset_s)
     finally:
