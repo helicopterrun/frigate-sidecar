@@ -321,6 +321,25 @@ def test_alignment_state_prefers_live_config_cameras(
     assert "alley-east" not in body["cameras"]
 
 
+def test_alignment_state_derives_restart_pending(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from frigate_sidecar import frigate_api
+
+    # A camera whose running annotation_offset differs from the saved config
+    # file needs a restart — derived fresh each time, so a sidecar restart
+    # can't lose it. The fixture config file has no offsets (-> 0).
+    def _fake_config(self: object) -> dict:
+        return {"cameras": {
+            "street-overview": {"detect": {"annotation_offset": -500}},
+            "porch-new": {"detect": {"annotation_offset": 0}},
+        }}
+
+    monkeypatch.setattr(frigate_api.FrigateClient, "config", _fake_config)
+    body = client.get("/analysis/annotation-offset/state").json()
+    assert body["restart_pending"] == ["street-overview"]
+
+
 def test_alignment_events_lists_recent_per_camera(client: TestClient) -> None:
     r = client.get(
         "/analysis/annotation-offset/events", params={"camera": "alley-overview"}
