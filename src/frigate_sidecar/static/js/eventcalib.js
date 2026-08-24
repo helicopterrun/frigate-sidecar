@@ -90,6 +90,10 @@
         if (offsetMs === state.offsetMs) {
           cell.classList.add("selected");
           selectedCell = cell;
+        } else if (offsetMs === center && !selectedCell) {
+          // The offset sits between this step's cells (e.g. −2.60 s on a 1 s
+          // grid): anchor the scroll on the nearest cell, unmarked.
+          selectedCell = cell;
         }
         cell.addEventListener("click", function () {
           state.offsetMs = offsetMs;
