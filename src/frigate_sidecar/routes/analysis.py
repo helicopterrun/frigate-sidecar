@@ -143,3 +143,120 @@ def annotation_offset_endpoint(
         )
     except annotation_offset.AnnotationOffsetUnavailable as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
+
+
+# --- Event-clock alignment (Settings page workflow) -------------------------
+#
+# The measurement sweeps a wider window than the CLI default: the skew this
+# exists to find is "a few seconds", and a ±3 s sweep cannot see a 5 s offset.
+_MEASURE_WINDOW_MS = 8000
+
+
+def _alignment_job(request: Request) -> dict[str, Any]:
+    state = request.app.state
+    if not hasattr(state, "alignment_job"):
+        state.alignment_job = {
+            "running": False, "results": None, "error": None, "measured_at": None
+        }
+    return cast(dict[str, Any], state.alignment_job)
+
+
+@router.post("/annotation-offset/measure")
+async def alignment_measure(request: Request, days: int = Query(3, ge=1, le=30)) -> Any:
+    """Starts a background measurement pass; poll `state` for the result.
+
+    Template-matching every candidate event thumbnail against recording
+    snapshots takes minutes -- far past an HTTP timeout -- so this returns
+    immediately and the Settings page polls."""
+    import asyncio
+
+    job = _alignment_job(request)
+    if job["running"]:
+        raise HTTPException(status_code=409, detail="a measurement is already running")
+    s = _settings(request)
+    job.update(running=True, error=None)
+
+    def _run() -> list[dict[str, Any]]:
+        return annotation_offset.analyze(
+            frigate_db=s.frigate.db_path,
+            frigate_base_url=s.frigate.base_url,
+            days=days,
+            search_window_ms=_MEASURE_WINDOW_MS,
+        )
+
+    async def _task() -> None:
+        import time as _time
+
+        try:
+            job["results"] = await asyncio.to_thread(_run)
+            job["measured_at"] = _time.time()
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the page, not raised
+            job["error"] = str(exc)
+        finally:
+            job["running"] = False
+
+    request.app.state.alignment_task = asyncio.create_task(_task())
+    return {"started": True}
+
+
+@router.get("/annotation-offset/state")
+def alignment_state(request: Request) -> Any:
+    """The measurement job plus what's currently in effect per camera."""
+    from frigate_sidecar import db
+    from frigate_sidecar.faces.crosscam import annotation_offset_ms
+
+    s = _settings(request)
+    job = _alignment_job(request)
+    conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        applied = db.event_clock_offsets(conn)
+    finally:
+        conn.close()
+    cameras = sorted(
+        {r["camera"] for r in (job["results"] or [])} | set(applied)
+    )
+    config_ms = {
+        cam: annotation_offset_ms(str(s.frigate.config_path), cam) for cam in cameras
+    }
+    return {
+        "running": job["running"],
+        "error": job["error"],
+        "measured_at": job["measured_at"],
+        "results": job["results"],
+        "applied_ms": applied,
+        "config_ms": config_ms,
+    }
+
+
+@router.post("/annotation-offset/apply")
+async def alignment_apply(request: Request) -> Any:
+    """Writes sidecar-side offsets: body `{"offsets": {camera: ms, ...}}`.
+
+    An offset of 0 clears the override. Frigate's own
+    `detect.annotation_offset` still wins over these when set."""
+    from frigate_sidecar import db
+    from frigate_sidecar.routes import scrub as scrub_routes
+
+    body = await request.json()
+    offsets = body.get("offsets")
+    if not isinstance(offsets, dict) or not offsets:
+        raise HTTPException(status_code=422, detail="offsets must be a non-empty object")
+    clean: dict[str, int] = {}
+    for cam, ms in offsets.items():
+        try:
+            value = int(ms)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=f"bad offset for {cam}") from exc
+        if abs(value) > 60_000:
+            raise HTTPException(status_code=422, detail=f"offset for {cam} out of range")
+        clean[str(cam)] = value
+
+    s = _settings(request)
+    conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        for cam, ms in clean.items():
+            db.set_event_clock_offset(conn, cam, ms)
+    finally:
+        conn.close()
+    scrub_routes.invalidate_event_clock_offsets()
+    return {"applied": clean}

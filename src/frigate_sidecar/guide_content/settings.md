@@ -21,6 +21,18 @@ the sidecar's own knobs in one place.
   [Push notifications](/guide/push-notifications).
 - **Cameras** — per-camera rig facts (position, heading, FOV, calibration
   quality) with deep links into the [Map](/map) landmark editor.
+- **Event alignment** (`/settings#alignment`) — fixes event bars sitting a few
+  seconds away from their pictures on the scrub timeline. Frigate stamps
+  events from the *detect* stream and recordings from the *record* stream —
+  two separate camera connections whose clocks drift apart per camera. Press
+  **Measure cameras** (it compares recent event thumbnails against the
+  recordings; expect a few minutes) and **Apply** the suggested offset for
+  each camera with decent confidence. Applied offsets take effect on the next
+  timeline refresh, in the sidecar's scrub page and the Elsinore reel alike.
+  Setting `detect.annotation_offset` (milliseconds) in Frigate's own
+  `config.yml` does the same job, also fixes Frigate's own annotation overlay,
+  and wins over anything applied here. Worth doing once at setup and again if
+  a camera is replaced or its streams reconfigured.
 - **Faces** — a read-only view of the face pipeline configuration.
 - **Appearance** — the theme picker (five palettes shared with the app).
 - **Help** — a link to this guide; on phones this is the guide's front door.

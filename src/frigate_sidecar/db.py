@@ -67,6 +67,17 @@ INSERT INTO toybox_scores (game, name, score, played_at)
 SELECT 'states50', 'BOB1', 30, '2026-06-05T00:00:00'
 WHERE NOT EXISTS (SELECT 1 FROM toybox_scores WHERE game = 'states50');
 
+-- Per-camera event-clock overrides: milliseconds to add to detect-stream
+-- event times to land them on the record clock. Frigate's own knob for this
+-- is cameras.<cam>.detect.annotation_offset in config.yml, which WINS over
+-- these rows when set -- this table exists so the Settings page can apply a
+-- measured offset without editing Frigate's config.
+CREATE TABLE IF NOT EXISTS event_clock_offsets (
+    camera     TEXT PRIMARY KEY,
+    offset_ms  INTEGER NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 -- Scrub-cache: uniform-cadence sprite sheets (docs/scrub-cache-and-proxy-spec.md).
 -- `interval_s` is a hard contract -- every frame in [start_ts, end_ts) exists
 -- within interval_s/2 of start_ts + n*interval_s, or the bucket is split.
@@ -805,6 +816,30 @@ def delete_scrub_buckets_before(conn: sqlite3.Connection, camera: str | None, cu
             "DELETE FROM scrub_buckets WHERE camera = ? AND end_ts < ?", (camera, cutoff)
         )
     return cur.rowcount
+
+
+def set_event_clock_offset(conn: sqlite3.Connection, camera: str, offset_ms: int) -> None:
+    """Applies (or clears, with 0) a sidecar-side event-clock offset."""
+    if offset_ms == 0:
+        conn.execute("DELETE FROM event_clock_offsets WHERE camera = ?", (camera,))
+    else:
+        conn.execute(
+            "INSERT INTO event_clock_offsets (camera, offset_ms, updated_at) "
+            "VALUES (?, ?, ?) ON CONFLICT(camera) DO UPDATE SET "
+            "offset_ms = excluded.offset_ms, updated_at = excluded.updated_at",
+            (camera, offset_ms, time.time()),
+        )
+    conn.commit()
+
+
+def event_clock_offsets(conn: sqlite3.Connection) -> dict[str, int]:
+    try:
+        return {
+            r["camera"]: int(r["offset_ms"])
+            for r in conn.execute("SELECT camera, offset_ms FROM event_clock_offsets")
+        }
+    except sqlite3.OperationalError:  # table predates this schema
+        return {}
 
 
 def upsert_scrub_sheet(
