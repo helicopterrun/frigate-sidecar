@@ -1172,3 +1172,55 @@ body.map-full-open .me-toolbar {
   .guide-pager a { min-height: 44px; display: inline-flex; align-items: center; }
   .guide-crumbs .guide-open { margin-left: 0; width: 100%; }
 }
+
+/* ----- Manual event-offset calibrator (Settings › Event alignment) ----- */
+.calib-overlay {
+  position: fixed; inset: 0; z-index: 200; background: rgba(0, 0, 0, 0.6);
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+.calib-panel {
+  background: var(--surface, var(--panel)); border: 1px solid var(--stroke);
+  border-radius: var(--radius, 8px); padding: 16px; width: min(980px, 100%);
+  max-height: 92vh; overflow-y: auto; display: flex; flex-direction: column; gap: 12px;
+}
+.calib-head { display: flex; align-items: center; justify-content: space-between; }
+.calib-head h3 { margin: 0; }
+.calib-warn {
+  border: 1px solid var(--warn, #e8a735); color: var(--warn, #e8a735);
+  border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px;
+}
+.calib-events { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+.calib-event {
+  flex: 0 0 auto; width: 110px; cursor: pointer; border: 2px solid transparent;
+  border-radius: var(--radius-sm); padding: 2px; text-align: center;
+}
+.calib-event img { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 3px; display: block; }
+.calib-event.selected { border-color: var(--accent); }
+.calib-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.calib-caption { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.calib-ref img { width: 100%; max-height: 300px; object-fit: contain; background: #000; border-radius: var(--radius-sm); }
+.calib-strip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+.calib-cell {
+  flex: 0 0 auto; width: 128px; position: relative; cursor: pointer;
+  border: 2px solid transparent; border-radius: var(--radius-sm);
+}
+.calib-cell img { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 3px; display: block; }
+.calib-cell.selected { border-color: var(--accent); }
+.calib-cell.missing {
+  aspect-ratio: 16/9; background: var(--panel); display: flex;
+  align-items: center; justify-content: center;
+}
+.calib-missing { font-size: 11px; color: var(--muted); }
+.calib-off {
+  display: block; font-size: 11px; color: var(--muted); text-align: center;
+  font-variant-numeric: tabular-nums; padding: 2px 0;
+}
+.calib-nudges { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.calib-offset-label { font-variant-numeric: tabular-nums; padding: 0 6px; }
+#calib-camera {
+  background: var(--panel); color: var(--text); border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm); padding: 4px 8px; font-size: 13px; margin-left: 8px;
+}
+@media (max-width: 700px) {
+  .calib-compare { grid-template-columns: 1fr; }
+}

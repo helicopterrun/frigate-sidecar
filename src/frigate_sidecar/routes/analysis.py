@@ -199,6 +199,83 @@ async def alignment_measure(request: Request, days: int = Query(3, ge=1, le=30))
     return {"started": True}
 
 
+@router.get("/annotation-offset/events")
+def alignment_events(
+    request: Request,
+    camera: str,
+    limit: int = Query(12, ge=1, le=25),
+) -> list[dict[str, Any]]:
+    """Recent finished events for the manual-calibration picker.
+
+    Looser than the automated measurement's filter: any labeled event with a
+    snapshot will do, because a human judges the match. Events younger than a
+    minute are skipped -- the recording segment covering them may not be
+    committed yet, so the filmstrip would be all 404s.
+    """
+    import time
+
+    from frigate_sidecar import db
+
+    s = _settings(request)
+    conn = db.open_frigate_ro(s.frigate.db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, label, sub_label, start_time, end_time, top_score
+              FROM event
+             WHERE camera = ? AND has_snapshot = 1
+               AND end_time IS NOT NULL AND start_time < ?
+             ORDER BY start_time DESC
+             LIMIT ?
+            """,
+            (camera, time.time() - 60.0, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "id": r["id"],
+            "label": r["label"],
+            "sub_label": r["sub_label"],
+            "start_time": r["start_time"],
+            "end_time": r["end_time"],
+            "top_score": r["top_score"],
+        }
+        for r in rows
+    ]
+
+
+@router.get("/annotation-offset/frame/{camera}")
+def alignment_frame(request: Request, camera: str, ts: float = Query(...)) -> Any:
+    """A recording frame at wall-clock `ts`, for the calibration filmstrip.
+
+    Recordings are immutable, so successful frames cache hard -- nudging back
+    and forth over the same offsets stays in the browser cache."""
+    import math
+    import time
+
+    from fastapi.responses import Response
+
+    from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient
+
+    now = time.time()
+    if not math.isfinite(ts) or ts <= 0 or ts > now or now - ts > 30 * 86400:
+        raise HTTPException(status_code=422, detail="ts out of range")
+    s = _settings(request)
+    try:
+        with FrigateClient(s.frigate.base_url) as fc:
+            jpeg, status = fc.recording_snapshot(camera, ts)
+    except FrigateAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if jpeg is None:
+        raise HTTPException(status_code=404, detail="no recording covers ts")
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
 @router.get("/annotation-offset/state")
 def alignment_state(request: Request) -> Any:
     """The measurement job plus what's currently in effect per camera."""
@@ -215,8 +292,22 @@ def alignment_state(request: Request) -> Any:
     cameras = sorted(
         {r["camera"] for r in (job["results"] or [])} | set(applied)
     )
+    # Every camera known to Frigate, so the manual calibrator can reach ones
+    # with no measurement and no applied offset.
+    all_cameras: list[str] = []
+    try:
+        fconn = db.open_frigate_ro(s.frigate.db_path)
+        try:
+            all_cameras = sorted(
+                r["camera"] for r in fconn.execute("SELECT DISTINCT camera FROM event")
+            )
+        finally:
+            fconn.close()
+    except db.FrigateDBMissingError:
+        all_cameras = cameras
     config_ms = {
-        cam: annotation_offset_ms(str(s.frigate.config_path), cam) for cam in cameras
+        cam: annotation_offset_ms(str(s.frigate.config_path), cam)
+        for cam in sorted(set(cameras) | set(all_cameras))
     }
     return {
         "running": job["running"],
@@ -225,6 +316,7 @@ def alignment_state(request: Request) -> Any:
         "results": job["results"],
         "applied_ms": applied,
         "config_ms": config_ms,
+        "cameras": all_cameras,
     }
 
 

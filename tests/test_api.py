@@ -294,3 +294,72 @@ def test_alignment_measure_runs_in_background(
     assert body["running"] is False
     assert body["results"][0]["camera"] == "doorbell"
     assert body["measured_at"] is not None
+
+
+def test_alignment_state_lists_frigate_cameras(client: TestClient) -> None:
+    body = client.get("/analysis/annotation-offset/state").json()
+    # All fixture cameras, sorted, even with no measurement or applied offset.
+    assert body["cameras"] == ["alley-east", "alley-overview", "street-overview"]
+    # config_ms covers them too (fixture config has no offsets -> 0).
+    assert body["config_ms"]["alley-east"] == 0
+
+
+def test_alignment_events_lists_recent_per_camera(client: TestClient) -> None:
+    r = client.get(
+        "/analysis/annotation-offset/events", params={"camera": "alley-overview"}
+    )
+    assert r.status_code == 200
+    events = r.json()
+    # e1 (-300 s), e2 (-600 s), e5 (-30 d) — newest first, other cameras absent.
+    assert [e["id"] for e in events] == ["e1", "e2", "e5"]
+    assert events[0]["label"] == "person"
+    assert events[0]["end_time"] is not None
+
+    r = client.get(
+        "/analysis/annotation-offset/events",
+        params={"camera": "alley-overview", "limit": 1},
+    )
+    assert [e["id"] for e in r.json()] == ["e1"]
+
+    r = client.get(
+        "/analysis/annotation-offset/events", params={"camera": "no-such-camera"}
+    )
+    assert r.json() == []
+
+
+def test_alignment_frame_proxies_recording_snapshot(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from frigate_sidecar import frigate_api
+
+    calls: list[tuple[str, float]] = []
+
+    def _fake_snapshot(
+        self: object, camera: str, ts: float, *, timeout: float = 15.0
+    ) -> tuple[bytes | None, int]:
+        calls.append((camera, ts))
+        if camera == "gone":
+            return (None, 404)
+        return (b"\xff\xd8jpeg", 200)
+
+    monkeypatch.setattr(frigate_api.FrigateClient, "recording_snapshot", _fake_snapshot)
+    ts = time.time() - 300
+    r = client.get("/analysis/annotation-offset/frame/doorbell", params={"ts": ts})
+    assert r.status_code == 200
+    assert r.content == b"\xff\xd8jpeg"
+    assert r.headers["content-type"] == "image/jpeg"
+    assert "max-age=3600" in r.headers["cache-control"]
+    assert calls[0][0] == "doorbell"
+
+    r = client.get("/analysis/annotation-offset/frame/gone", params={"ts": ts})
+    assert r.status_code == 404
+
+
+def test_alignment_frame_rejects_bad_ts(client: TestClient) -> None:
+    import time
+
+    for bad in (0, -5, time.time() + 3600, time.time() - 45 * 86400):
+        r = client.get("/analysis/annotation-offset/frame/cam", params={"ts": bad})
+        assert r.status_code == 422, bad
