@@ -9,33 +9,56 @@
   {% elif not cameras %}
     <div class="empty">no generated cameras yet — the generator may still be backfilling</div>
   {% else %}
-  <div class="filters">
-    <label>camera
+  {# Instrument layout: the frame and what is in it on the left, the reel
+     standing beside it. The reel is vertical on every screen -- it was already
+     vertical on phones, and the desktop strip it replaces had 72px to say
+     everything in. #}
+  <div class="sv-rig">
+    <div class="sv-viewer">
+      <div class="sv-frame-wrap">
+        <div id="sv-frame" class="sv-frame"></div>
+      </div>
+      <div id="sv-moment" class="sv-moment"></div>
+    </div>
+
+    <div class="sv-reelcol">
+      <div class="sv-reel-shell">
+        <canvas id="sv-reel" class="sv-reel"></canvas>
+      </div>
+      {# The rail stands beside the reel rather than over it: overlaying cost
+         the tide its deepest water and put chrome on top of rows. #}
+      <div id="sv-rungs" class="sv-rungs" role="group" aria-label="Zoom rung"></div>
+    </div>
+  </div>
+
+  <div class="sv-ctl">
+    <label class="sv-ctl-g">camera
       <select id="sv-camera">
         {% for c in cameras %}
           <option value="{{ c }}"{% if c == camera %} selected{% endif %}>{{ c }}</option>
         {% endfor %}
       </select>
     </label>
-    <label>window
-      <select id="sv-window">
-        <option value="3600">1 hour</option>
-        <option value="21600" selected>6 hours</option>
-        <option value="86400">24 hours</option>
-      </select>
-    </label>
+    <div class="sv-ctl-g" role="group" aria-label="Lanes">
+      <span>lanes</span>
+      <div id="sv-lanes" class="sv-lanes"></div>
+    </div>
     <span class="sv-clock" id="sv-clock">—</span>
   </div>
 
-  <div class="sv-frame-wrap panel">
-    <div id="sv-frame" class="sv-frame"></div>
-  </div>
-  <canvas id="sv-timeline" class="sv-timeline" height="72"></canvas>
-  <p class="help kbd-hint sv-hint-desktop">Hover / drag the timeline to scrub. <kbd>←</kbd>/<kbd>→</kbd> step one cell.
-    <a id="sv-frigate-link" href="#" target="_blank" rel="noopener">Open this moment in Frigate</a></p>
-  <p class="help sv-hint-phone">Drag the reel — down is earlier. Fling for
-    momentum, drag the image for frame-by-frame, tap an event bar to jump.
-    <a id="sv-frigate-link-phone" href="#" target="_blank" rel="noopener">Open in Frigate</a></p>
+  <p class="help sv-status-row">
+    <span id="sv-status">loading…</span>
+    <a id="sv-frigate-link" href="#" target="_blank" rel="noopener">Open this moment in Frigate</a>
+  </p>
+  <p class="help kbd-hint sv-hint-desktop">
+    Drag the reel or scroll to scrub — down is earlier. <kbd>↑</kbd><kbd>↓</kbd> step one row,
+    <kbd>←</kbd><kbd>→</kbd> change rung. Click a track to inspect it; drag the image for
+    frame-by-frame.
+  </p>
+  <p class="help sv-hint-phone">
+    Drag the reel — down is earlier. Tap a track to inspect it, drag the image for
+    frame-by-frame.
+  </p>
   {% endif %}
 </main>
 {% endblock %}

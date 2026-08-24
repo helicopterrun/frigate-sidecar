@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -467,6 +468,69 @@ def _events_json(
                 # (§4.5) -- must not synthesize a placeholder timestamp.
                 "end": row["end_time"] + offset_s if row["end_time"] is not None else None,
                 "score": score,
+                # Who, and whether there is anything to open. Column-gated the
+                # same way `zones` is: these are read straight off Frigate's
+                # schema, and a Frigate that has not got them yet should give a
+                # reel without sub-labels rather than a 500.
+                "sub_label": row["sub_label"] if "sub_label" in cols else None,
+                "has_clip": bool(row["has_clip"]) if "has_clip" in cols else False,
+                "has_snapshot": (
+                    bool(row["has_snapshot"]) if "has_snapshot" in cols else False
+                ),
+            }
+        )
+    return out
+
+
+def _reviews_json(
+    conn: Any, camera: str, start: float, end: float, offset_s: float = 0.0
+) -> list[dict[str, Any]]:
+    """Frigate's own alert/detection decision for a window.
+
+    This is `reviewsegment`, not `event`: the severity here is what drove (or
+    did not drive) a notification, and it is the one signal on the reel that
+    separates routine traffic from the thing you were meant to look at. Scores
+    cannot do that job on this fleet -- the Frigate+ model is bimodal and high
+    (measured p10 0.83, median 0.87), so confidence is nearly constant across
+    every event and carries no separation at all.
+
+    `detections` travels because it is the join back to `events[]`: it is what
+    lets a client answer "which tracks caused this alert" without a second
+    query.
+
+    Returns `[]` rather than raising when the table is absent, so a Frigate
+    without it degrades to a reel with no severity spine instead of a broken
+    endpoint -- the same forward/backward posture as the column gating above.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT id, start_time, end_time, severity, data FROM reviewsegment "
+            "WHERE camera = ? AND start_time < ? "
+            "AND (end_time IS NULL OR end_time > ?) ORDER BY start_time",
+            (camera, end - offset_s, start - offset_s),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+
+    out = []
+    for row in rows:
+        try:
+            data = json.loads(row["data"]) if row["data"] else {}
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        out.append(
+            {
+                "id": row["id"],
+                "start": row["start_time"] + offset_s,
+                # Nullable for the same reason events[].end is: a segment that
+                # has not closed has no end, and inventing one asserts an exit.
+                "end": row["end_time"] + offset_s if row["end_time"] is not None else None,
+                "severity": row["severity"],
+                "objects": data.get("objects") or [],
+                "zones": data.get("zones") or [],
+                "detections": data.get("detections") or [],
             }
         )
     return out
@@ -489,9 +553,10 @@ async def reel(
                 detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
             )
         coverage_result = db.recording_coverage(conn, camera, start, end, now=time.time())
-        events = _events_json(
-            conn, camera, start, end, offset_s=_event_clock_offset_s(settings, camera)
-        )
+        offset_s = _event_clock_offset_s(settings, camera)
+        events = _events_json(conn, camera, start, end, offset_s=offset_s)
+        # Review segments come off the detect stream too -- same clock shift.
+        reviews = _reviews_json(conn, camera, start, end, offset_s=offset_s)
     finally:
         conn.close()
 
@@ -523,6 +588,7 @@ async def reel(
         "frames": frames,
         "motion": {"start": start, "interval": motion_scale, "values": motion_values},
         "events": events,
+        "reviews": reviews,
     }
     return _etagged(request, body)
 

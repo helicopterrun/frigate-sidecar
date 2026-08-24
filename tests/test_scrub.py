@@ -970,6 +970,262 @@ def test_capabilities_hides_renamed_camera_ghosts(
     assert body["scrub_cache"]["cameras"] == ["doorbell"]
 
 
+# --- Reel identity + severity (the fields the web reel draws) ---------------
+#
+# The reel stopped being a colour-coded tick strip and started answering "who
+# was here, in which zone, and did Frigate call it an alert". Two of those
+# answers come from columns/tables that older Frigate builds may not have, so
+# every one of them is exercised twice: present, and absent.
+
+FULL_EVENT_SCHEMA = """
+CREATE TABLE event (
+    id           TEXT PRIMARY KEY,
+    camera       TEXT NOT NULL,
+    label        TEXT NOT NULL,
+    start_time   REAL NOT NULL,
+    end_time     REAL,
+    score        REAL,
+    top_score    REAL,
+    zones        TEXT,
+    sub_label    TEXT,
+    has_clip     INTEGER,
+    has_snapshot INTEGER,
+    data         TEXT
+);
+"""
+
+REVIEWSEGMENT_SCHEMA = """
+CREATE TABLE reviewsegment (
+    id         TEXT PRIMARY KEY,
+    camera     TEXT NOT NULL,
+    start_time REAL NOT NULL,
+    end_time   REAL,
+    severity   TEXT NOT NULL,
+    thumb_path TEXT,
+    data       TEXT
+);
+"""
+
+
+@pytest.fixture
+def rich_client(
+    tmp_path: Path, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> TestClient:
+    """A Frigate DB carrying everything a current build carries."""
+    _skip_auth(monkeypatch)
+    p = tmp_path / "frigate-rich.db"
+    conn = sqlite3.connect(p)
+    conn.executescript(RECORDINGS_SCHEMA)
+    conn.executescript(FULL_EVENT_SCHEMA)
+    conn.executescript(REVIEWSEGMENT_SCHEMA)
+    now = time.time()
+    conn.execute(
+        "INSERT INTO recordings (id, camera, path, start_time, end_time, duration, "
+        "segment_size) VALUES ('s0', 'alley-wide', '/x.mp4', ?, ?, 10.0, 5.0)",
+        (now - 300, now - 290),
+    )
+    conn.execute(
+        "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
+        "sub_label, has_clip, has_snapshot) VALUES ('e1', 'alley-wide', 'package', ?, ?, "
+        "0.91, '[\"parking_area\",\"charger\"]', 'amazon', 1, 1)",
+        (now - 200, now - 150),
+    )
+    conn.execute(
+        "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
+        "sub_label, has_clip, has_snapshot) VALUES ('e2', 'alley-wide', 'person', ?, NULL, "
+        "0.88, '[\"alley\"]', NULL, 0, 1)",
+        (now - 100,),
+    )
+    conn.execute(
+        "INSERT INTO reviewsegment (id, camera, start_time, end_time, severity, data) "
+        "VALUES ('r1', 'alley-wide', ?, ?, 'alert', ?)",
+        (now - 205, now - 145,
+         json.dumps({"objects": ["package"], "zones": ["charger"], "detections": ["e1"]})),
+    )
+    conn.execute(
+        "INSERT INTO reviewsegment (id, camera, start_time, end_time, severity, data) "
+        "VALUES ('r2', 'alley-wide', ?, NULL, 'detection', ?)",
+        (now - 100, json.dumps({"objects": ["person"], "zones": ["alley"]})),
+    )
+    conn.commit()
+    conn.close()
+
+    fake_config = tmp_path / "frigate-config.yml"
+    fake_config.write_text("cameras: {}\n")
+    settings = Settings(
+        frigate=FrigateSection(
+            base_url="http://frigate.test:5000", config_path=fake_config, db_path=p
+        ),
+        sidecar=SidecarSection(db_path=sidecar_db_path, bind_port=5001),
+        scrub=ScrubSection(enabled=False, retention_days=4, cache_dir=tmp_path / "scrub"),
+    )
+    return TestClient(create_app(settings))
+
+
+def _rich_reel(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> dict:
+    async def _no_motion(
+        settings: object, camera: str, start: float, end: float, scale: float
+    ) -> list[float]:
+        return []
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _no_motion)
+    now = time.time()
+    r = client.get(
+        "/v1/reel/alley-wide",
+        params={"start": now - 600, "end": now, "motion_scale": 60},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_reel_events_carry_identity_and_media_flags(
+    rich_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sub_label is the whole point of the identification camera; has_clip is
+    the difference between a track you can open and one you cannot."""
+    events = {e["id"]: e for e in _rich_reel(rich_client, monkeypatch)["events"]}
+
+    assert events["e1"]["sub_label"] == "amazon"
+    assert events["e1"]["has_clip"] is True
+    assert events["e1"]["has_snapshot"] is True
+    # Zones already travelled; assert the order survives, because the reel
+    # shows zones[0] on a selected track.
+    assert events["e1"]["zones"] == ["parking_area", "charger"]
+
+    assert events["e2"]["sub_label"] is None
+    assert events["e2"]["has_clip"] is False
+    assert events["e2"]["has_snapshot"] is True
+
+
+def test_reel_events_survive_a_frigate_without_the_new_columns(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The minimal schema has no sub_label/has_clip/has_snapshot at all. A reel
+    without sub-labels is the right degradation; a 500 is not."""
+    _skip_auth(monkeypatch)
+
+    async def _no_motion(
+        settings: object, camera: str, start: float, end: float, scale: float
+    ) -> list[float]:
+        return []
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _no_motion)
+    now = time.time()
+    r = client.get(
+        "/v1/reel/doorbell",
+        params={"start": now - 600, "end": now, "motion_scale": 60},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    for ev in r.json()["events"]:
+        assert ev["sub_label"] is None
+        assert ev["has_clip"] is False
+        assert ev["has_snapshot"] is False
+
+
+def test_reel_reviews_carry_severity_and_the_join_back_to_events(
+    rich_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Severity is the one signal that separates routine from important on this
+    fleet -- scores cannot, being bimodal and high. `detections` is what lets a
+    client answer "which tracks caused this alert" without a second query."""
+    reviews = {r["id"]: r for r in _rich_reel(rich_client, monkeypatch)["reviews"]}
+
+    assert reviews["r1"]["severity"] == "alert"
+    assert reviews["r1"]["zones"] == ["charger"]
+    assert reviews["r1"]["objects"] == ["package"]
+    assert reviews["r1"]["detections"] == ["e1"]
+
+    assert reviews["r2"]["severity"] == "detection"
+    # No `detections` key in the blob -> empty list, never None: the reel
+    # iterates it.
+    assert reviews["r2"]["detections"] == []
+
+
+def test_reel_review_end_stays_null_for_an_open_segment(
+    rich_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same contract as events[].end (§4.5): null means "has not closed", and
+    synthesising a timestamp would draw a segment that ended when it did not."""
+    reviews = {r["id"]: r for r in _rich_reel(rich_client, monkeypatch)["reviews"]}
+    assert reviews["r1"]["end"] is not None
+    assert reviews["r2"]["end"] is None
+
+
+def test_reel_reviews_are_empty_without_a_reviewsegment_table(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Frigate too old to have review segments gets a reel with no severity
+    spine, not a broken endpoint."""
+    _skip_auth(monkeypatch)
+
+    async def _no_motion(
+        settings: object, camera: str, start: float, end: float, scale: float
+    ) -> list[float]:
+        return []
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _no_motion)
+    now = time.time()
+    r = client.get(
+        "/v1/reel/doorbell",
+        params={"start": now - 600, "end": now, "motion_scale": 60},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    assert r.json()["reviews"] == []
+
+
+def test_reel_reviews_tolerate_a_malformed_data_blob(
+    tmp_path: Path, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`data` is opaque JSON written by Frigate. A row that is not a JSON object
+    must not take the endpoint down -- same posture as the zones decode."""
+    _skip_auth(monkeypatch)
+    p = tmp_path / "frigate-bad.db"
+    conn = sqlite3.connect(p)
+    conn.executescript(RECORDINGS_SCHEMA)
+    conn.executescript(FULL_EVENT_SCHEMA)
+    conn.executescript(REVIEWSEGMENT_SCHEMA)
+    now = time.time()
+    conn.execute(
+        "INSERT INTO recordings (id, camera, path, start_time, end_time, duration, "
+        "segment_size) VALUES ('s0', 'street', '/x.mp4', ?, ?, 10.0, 5.0)",
+        (now - 300, now - 290),
+    )
+    for rid, blob in (("bad1", "not json at all"), ("bad2", "[1, 2, 3]"), ("bad3", None)):
+        conn.execute(
+            "INSERT INTO reviewsegment (id, camera, start_time, end_time, severity, data) "
+            "VALUES (?, 'street', ?, ?, 'detection', ?)",
+            (rid, now - 200, now - 190, blob),
+        )
+    conn.commit()
+    conn.close()
+
+    fake_config = tmp_path / "c.yml"
+    fake_config.write_text("cameras: {}\n")
+    settings = Settings(
+        frigate=FrigateSection(config_path=fake_config, db_path=p),
+        sidecar=SidecarSection(db_path=sidecar_db_path, bind_port=5001),
+        scrub=ScrubSection(enabled=False, retention_days=4, cache_dir=tmp_path / "scrub"),
+    )
+    tc = TestClient(create_app(settings))
+
+    async def _no_motion(
+        settings: object, camera: str, start: float, end: float, scale: float
+    ) -> list[float]:
+        return []
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _no_motion)
+    r = tc.get(
+        "/v1/reel/street",
+        params={"start": now - 600, "end": now, "motion_scale": 60},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    assert [rv["objects"] for rv in r.json()["reviews"]] == [[], [], []]
+
+
 def test_event_times_are_shifted_by_annotation_offset(
     frigate_db_with_recordings: Path,
     sidecar_db_path: Path,
