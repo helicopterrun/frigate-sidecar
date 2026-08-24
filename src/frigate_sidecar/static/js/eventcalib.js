@@ -212,11 +212,17 @@
 
   function renderEvents() {
     var row = overlay.querySelector("#calib-events");
+    var body = overlay.querySelector("#calib-body");
     row.textContent = "";
+    // Nothing usable: hide the whole workbench instead of showing broken
+    // image panes and dead controls.
+    body.style.display = state.events.length ? "" : "none";
     if (!state.events.length) {
       row.appendChild(SC.el("div", {
         class: "empty",
-        text: "no recent events with snapshots on this camera",
+        text: "no calibratable events on this camera — it needs a recent "
+          + "event whose recording still exists. Try again after some "
+          + "fresh activity.",
       }));
       return;
     }
@@ -392,12 +398,14 @@
         + "takes the mean. Arrow keys nudge by the current step (Shift = 1 s); "
         + "hold the compare button to blink the two." }),
       SC.el("div", { class: "calib-events", id: "calib-events" }),
-      pair,
-      SC.el("div", { class: "calib-blinkrow" }, [holdToBlink()]),
-      stepWrap,
-      SC.el("div", { class: "calib-strip", id: "calib-strip" }),
-      nudges,
-      SC.el("div", { class: "calib-caption", id: "calib-summary" }),
+      SC.el("div", { id: "calib-body" }, [
+        pair,
+        SC.el("div", { class: "calib-blinkrow" }, [holdToBlink()]),
+        stepWrap,
+        SC.el("div", { class: "calib-strip", id: "calib-strip" }),
+        nudges,
+        SC.el("div", { class: "calib-caption", id: "calib-summary" }),
+      ]),
     ]);
     if (state.configMs) {
       panel.insertBefore(SC.el("div", { class: "calib-warn", text:

@@ -298,10 +298,27 @@ def test_alignment_measure_runs_in_background(
 
 def test_alignment_state_lists_frigate_cameras(client: TestClient) -> None:
     body = client.get("/analysis/annotation-offset/state").json()
-    # All fixture cameras, sorted, even with no measurement or applied offset.
+    # Frigate unreachable in tests -> falls back to event-history cameras,
+    # sorted, even with no measurement or applied offset.
     assert body["cameras"] == ["alley-east", "alley-overview", "street-overview"]
     # config_ms covers them too (fixture config has no offsets -> 0).
     assert body["config_ms"]["alley-east"] == 0
+
+
+def test_alignment_state_prefers_live_config_cameras(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from frigate_sidecar import frigate_api
+
+    # Live config wins over event history: retired camera names (present in
+    # old events but no longer in Frigate's config) must not be offered.
+    def _fake_config(self: object) -> dict:
+        return {"cameras": {"street-overview": {}, "porch-new": {}}}
+
+    monkeypatch.setattr(frigate_api.FrigateClient, "config", _fake_config)
+    body = client.get("/analysis/annotation-offset/state").json()
+    assert body["cameras"] == ["porch-new", "street-overview"]
+    assert "alley-east" not in body["cameras"]
 
 
 def test_alignment_events_lists_recent_per_camera(client: TestClient) -> None:
