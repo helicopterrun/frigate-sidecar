@@ -218,6 +218,7 @@ def alignment_events(
     """
     import json as json_mod
     import math
+    import sqlite3
     import time
 
     from frigate_sidecar import db
@@ -227,16 +228,30 @@ def alignment_events(
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(event)")}
         data_col = ", data" if "data" in cols else ""
+        # The movement sort surfaces the best walkers from the whole window --
+        # which on a quiet camera can be events whose recordings retention has
+        # already pruned, leaving a filmstrip of nothing but 404s. Only offer
+        # events the recordings can still show.
+        oldest_recording = 0.0
+        try:
+            row = conn.execute(
+                "SELECT MIN(start_time) FROM recordings WHERE camera = ?", (camera,)
+            ).fetchone()
+            if row and row[0] is not None:
+                oldest_recording = float(row[0])
+        except sqlite3.Error:
+            pass
         rows = conn.execute(
             f"""
             SELECT id, label, sub_label, start_time, end_time, top_score{data_col}
               FROM event
              WHERE camera = ? AND has_snapshot = 1
                AND end_time IS NOT NULL AND start_time < ?
+               AND start_time >= ?
              ORDER BY start_time DESC
              LIMIT 50
             """,
-            (camera, time.time() - 60.0),
+            (camera, time.time() - 60.0, oldest_recording),
         ).fetchall()
     finally:
         conn.close()
