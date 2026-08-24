@@ -131,6 +131,30 @@ class FrigateClient:
             raise FrigateAPIError(f"GET {url}: HTTP {r.status_code}")
         return (r.content, 200)
 
+    def event_snapshot_jpeg(
+        self, event_id: str, *, height: int = 480, bbox: bool = True, timeout: float = 10.0
+    ) -> tuple[bytes | None, int]:
+        """The event's full-frame snapshot with the bounding box drawn.
+
+        Same scene geometry as `recording_snapshot`, which is what makes it the
+        right reference image for visual clock-offset calibration -- the tiny
+        detect-stream thumbnail crop is not comparable to a full frame. Same
+        sidecar-authorized posture as `event_thumbnail` (Frigate's nginx 401s
+        this path through the browser proxy)."""
+        url = (
+            f"{self.base_url}/api/events/{quote(event_id, safe='')}/snapshot.jpg"
+            f"?bbox={1 if bbox else 0}&height={height}"
+        )
+        try:
+            r = self._client.get(url, timeout=timeout)
+        except httpx.HTTPError as exc:
+            raise FrigateAPIError(f"GET {url}: {exc}") from exc
+        if r.status_code == 404:
+            return (None, 404)
+        if r.status_code != 200:
+            raise FrigateAPIError(f"GET {url}: HTTP {r.status_code}")
+        return (r.content, 200)
+
     def recording_snapshot(
         self, camera: str, ts: float, *, timeout: float = 15.0
     ) -> tuple[bytes | None, int]:
