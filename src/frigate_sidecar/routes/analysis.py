@@ -535,9 +535,11 @@ def alignment_state(request: Request) -> Any:
     # only a fallback — it keeps retired camera names alive forever after a
     # rename, offering rows that can never be calibrated (no recordings).
     all_cameras: list[str] = []
+    running_cfg: dict[str, Any] | None = None
     try:
         with FrigateClient(s.frigate.base_url) as fc:
-            all_cameras = sorted(fc.config().get("cameras", {}))
+            running_cfg = fc.config()
+        all_cameras = sorted(running_cfg.get("cameras", {}))
     except FrigateAPIError:
         all_cameras = []
     if not all_cameras:
@@ -555,6 +557,25 @@ def alignment_state(request: Request) -> Any:
         cam: annotation_offset_ms(str(s.frigate.config_path), cam)
         for cam in sorted(set(cameras) | set(all_cameras))
     }
+    # Restart-pending is *derived*, not remembered: a camera whose saved
+    # config offset differs from what the running Frigate process is using
+    # needs a restart. The in-memory list (kept for the unreachable-Frigate
+    # fallback) used to be the only source, and a sidecar restart silently
+    # wiped it — the button vanished with saves still unapplied.
+    restart_pending: list[str]
+    if running_cfg is not None:
+        restart_pending = []
+        for cam in all_cameras:
+            running_ms = (
+                running_cfg.get("cameras", {})
+                .get(cam, {})
+                .get("detect", {})
+                .get("annotation_offset", 0)
+            )
+            if int(running_ms or 0) != int(config_ms.get(cam) or 0):
+                restart_pending.append(cam)
+    else:
+        restart_pending = list(_restart_pending(request))
     return {
         "running": job["running"],
         "error": job["error"],
@@ -563,7 +584,7 @@ def alignment_state(request: Request) -> Any:
         "applied_ms": applied,
         "config_ms": config_ms,
         "cameras": all_cameras,
-        "restart_pending": list(_restart_pending(request)),
+        "restart_pending": restart_pending,
     }
 
 
