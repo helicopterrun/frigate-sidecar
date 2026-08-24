@@ -187,7 +187,7 @@
         });
         if (!resp.ok) throw new Error("HTTP " + resp.status);
         SC.toast("saved to Frigate config: " + fmtMs(ms)
-          + " — Frigate is restarting (~30 s)");
+          + " — press Restart Frigate to apply");
       } else {
         var offsets = {};
         offsets[state.camera] = ms;
@@ -310,8 +310,9 @@
     if (state.configMs) {
       panel.insertBefore(SC.el("div", { class: "calib-warn", text:
         "This camera's offset lives in Frigate's config ("
-        + fmtMs(state.configMs) + "). Saving writes the new value there and "
-        + "restarts Frigate (~30 s) so its own annotation overlay is fixed too." },
+        + fmtMs(state.configMs) + "). Saving writes the new value there; "
+        + "apply it afterwards with Restart Frigate — calibrate as many "
+        + "cameras as you like first, one restart covers them all." },
       ), panel.querySelector(".calib-events"));
     }
 

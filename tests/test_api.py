@@ -441,12 +441,27 @@ def test_alignment_apply_config_writes_frigate_and_clears_override(
     assert r.status_code == 200
     body = r.json()
     assert body["config_ms"] == -2250
-    assert body["restarting"] is True
     assert body["committed"] is False  # test config dir is not a git repo
-    assert calls == [("set", ("doorbell", -2250)), ("restart", None)]
+    assert body["restart_pending"] == ["doorbell"]
+    # Saving must NOT restart: several calibrations share one restart.
+    assert calls == [("set", ("doorbell", -2250))]
 
     state = client.get("/analysis/annotation-offset/state").json()
     assert "doorbell" not in state["applied_ms"]
+    assert state["restart_pending"] == ["doorbell"]
+
+    # A second camera queues behind the same restart; then the explicit
+    # restart applies both and clears the queue.
+    client.post(
+        "/analysis/annotation-offset/apply-config",
+        json={"camera": "gate-face", "offset_ms": -500},
+    )
+    r = client.post("/analysis/annotation-offset/restart-frigate")
+    assert r.status_code == 200
+    assert r.json() == {"restarted": True, "applied": ["doorbell", "gate-face"]}
+    assert ("restart", None) in calls and calls.count(("restart", None)) == 1
+    state = client.get("/analysis/annotation-offset/state").json()
+    assert state["restart_pending"] == []
 
 
 def test_alignment_apply_config_rejects_garbage(client: TestClient) -> None:

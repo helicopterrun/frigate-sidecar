@@ -300,16 +300,31 @@ def _commit_frigate_config(config_path: str, camera: str, offset_ms: int) -> boo
         return False
 
 
+def _restart_pending(request: Request) -> list[str]:
+    """Cameras whose config offset was written since Frigate's last restart.
+
+    In-memory on purpose: worst case after a sidecar restart the button
+    disappears, and Frigate's own UI still shows its restart banner."""
+    state = request.app.state
+    if not hasattr(state, "frigate_restart_pending"):
+        state.frigate_restart_pending = []
+    return cast(list[str], state.frigate_restart_pending)
+
+
 @router.post("/annotation-offset/apply-config")
 async def alignment_apply_config(request: Request) -> Any:
-    """Write a calibrated offset into Frigate's own config and restart Frigate.
+    """Write a calibrated offset into Frigate's own config.
 
     Body: `{"camera": str, "offset_ms": int}`. This is the escalation path for
     cameras whose `detect.annotation_offset` is config-pinned (config wins over
-    sidecar overrides by design): the value goes where it is authoritative,
-    Frigate's own annotation overlay gets fixed too, and the sidecar override
-    is cleared so the two sources cannot disagree. Frigate restarts (~30 s) --
-    annotation_offset only takes effect in its event pipeline on boot."""
+    sidecar overrides by design): the value goes where it is authoritative and
+    the sidecar override is cleared so the two sources cannot disagree.
+
+    Deliberately does NOT restart Frigate -- annotation_offset only takes
+    effect in its pipeline on boot, but calibrating several cameras should
+    cost one restart, not one each. The explicit restart is
+    `POST /analysis/annotation-offset/restart-frigate`; `restart_pending`
+    in the state response drives the button."""
     from frigate_sidecar import db
     from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient
     from frigate_sidecar.routes import scrub as scrub_routes
@@ -332,7 +347,6 @@ async def alignment_apply_config(request: Request) -> Any:
             committed = _commit_frigate_config(
                 str(s.frigate.config_path), camera, offset_ms
             )
-            fc.restart()
     except FrigateAPIError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -344,8 +358,30 @@ async def alignment_apply_config(request: Request) -> Any:
     finally:
         conn.close()
     scrub_routes.invalidate_event_clock_offsets()
+
+    pending = _restart_pending(request)
+    if camera not in pending:
+        pending.append(camera)
     return {"camera": camera, "config_ms": offset_ms, "committed": committed,
-            "restarting": True}
+            "restart_pending": list(pending)}
+
+
+@router.post("/annotation-offset/restart-frigate")
+async def alignment_restart_frigate(request: Request) -> Any:
+    """The explicit restart: apply every config offset saved since the last
+    one. Restarting is ~30 s of blind cameras, which is why it is a button
+    the user presses once, not a side effect of every save."""
+    from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient
+
+    s = _settings(request)
+    try:
+        with FrigateClient(s.frigate.base_url) as fc:
+            fc.restart()
+    except FrigateAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    applied = list(_restart_pending(request))
+    _restart_pending(request).clear()
+    return {"restarted": True, "applied": applied}
 
 
 @router.get("/annotation-offset/snapshot/{event_id}")
@@ -445,6 +481,7 @@ def alignment_state(request: Request) -> Any:
         "applied_ms": applied,
         "config_ms": config_ms,
         "cameras": all_cameras,
+        "restart_pending": list(_restart_pending(request)),
     }
 
 

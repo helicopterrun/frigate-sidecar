@@ -117,6 +117,38 @@
     }
   }
 
+  // "Restart Frigate to apply (N)": visible whenever config offsets were
+  // saved since Frigate's last restart. One restart covers any number of
+  // calibrated cameras — that is why saves don't restart on their own.
+  var restartBtn = null;
+  function renderRestart(state) {
+    var pending = state.restart_pending || [];
+    if (!restartBtn) {
+      restartBtn = SC.el("button", { class: "btn-primary", id: "align-restart" });
+      restartBtn.style.display = "none";
+      restartBtn.addEventListener("click", async function () {
+        restartBtn.disabled = true;
+        try {
+          var resp = await fetch("/analysis/annotation-offset/restart-frigate", {
+            method: "POST",
+          });
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          SC.toast("Frigate is restarting (~30 s) — offsets apply when it's back");
+        } catch (e) {
+          SC.toast("restart failed: " + e);
+        }
+        restartBtn.disabled = false;
+        refresh();
+      });
+      var measure = document.getElementById("align-measure");
+      if (measure) measure.parentNode.insertBefore(restartBtn, measure.nextSibling);
+    }
+    restartBtn.style.display = pending.length ? "" : "none";
+    restartBtn.textContent = "Restart Frigate to apply ("
+      + pending.length + ")";
+    restartBtn.title = pending.join(", ");
+  }
+
   // Top-of-section camera dropdown: reaches cameras with no measurement and
   // no applied offset (the table only shows measured/applied ones).
   var camSelect = document.getElementById("calib-camera");
@@ -155,6 +187,7 @@
     }
     lastState = state;
     renderCameraPicker(state);
+    renderRestart(state);
     btn.disabled = !!state.running;
     if (state.running) {
       stateEl.textContent = "measuring… this takes a few minutes";
