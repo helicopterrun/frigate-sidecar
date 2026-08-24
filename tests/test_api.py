@@ -357,6 +357,32 @@ def test_alignment_frame_proxies_recording_snapshot(
     assert r.status_code == 404
 
 
+def test_alignment_thumbnail_proxies_frigate(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Served by the sidecar, not the browser proxy: Frigate's nginx 401s
+    proxied /api/events image requests when Frigate auth is on (the calibrator
+    shipped with broken thumbnails because of exactly that)."""
+    from frigate_sidecar import frigate_api
+
+    def _fake_thumbnail(
+        self: object, event_id: str, *, timeout: float = 10.0
+    ) -> tuple[bytes | None, int]:
+        if event_id == "gone":
+            return (None, 404)
+        return (b"\xff\xd8thumb", 200)
+
+    monkeypatch.setattr(frigate_api.FrigateClient, "event_thumbnail", _fake_thumbnail)
+    r = client.get("/analysis/annotation-offset/thumbnail/ev1")
+    assert r.status_code == 200
+    assert r.content == b"\xff\xd8thumb"
+    assert r.headers["content-type"] == "image/jpeg"
+    assert "max-age=3600" in r.headers["cache-control"]
+
+    r = client.get("/analysis/annotation-offset/thumbnail/gone")
+    assert r.status_code == 404
+
+
 def test_alignment_frame_rejects_bad_ts(client: TestClient) -> None:
     import time
 

@@ -245,6 +245,33 @@ def alignment_events(
     ]
 
 
+@router.get("/annotation-offset/thumbnail/{event_id}")
+def alignment_thumbnail(request: Request, event_id: str) -> Any:
+    """An event's thumbnail for the calibration picker.
+
+    Served here rather than through the reverse proxy: Frigate's nginx 401s
+    proxied `/api/events/...` image requests when Frigate auth is enabled, so
+    the browser cannot fetch them directly -- the sidecar's own connection can.
+    Thumbnails are immutable once the event ends, so they cache hard."""
+    from fastapi.responses import Response
+
+    from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient
+
+    s = _settings(request)
+    try:
+        with FrigateClient(s.frigate.base_url) as fc:
+            jpeg, _status = fc.event_thumbnail(event_id)
+    except FrigateAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if jpeg is None:
+        raise HTTPException(status_code=404, detail="no thumbnail for event")
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
 @router.get("/annotation-offset/frame/{camera}")
 def alignment_frame(request: Request, camera: str, ts: float = Query(...)) -> Any:
     """A recording frame at wall-clock `ts`, for the calibration filmstrip.

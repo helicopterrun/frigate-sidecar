@@ -112,6 +112,25 @@ class FrigateClient:
     def recordings_summary(self, camera: str) -> list[dict[str, Any]]:
         return cast("list[dict[str, Any]]", self._get_json(f"/api/{camera}/recordings/summary"))
 
+    def event_thumbnail(self, event_id: str, *, timeout: float = 10.0) -> tuple[bytes | None, int]:
+        """An event's stored thumbnail JPEG, or ``(None, 404)`` when it has none.
+
+        Served by the sidecar (not the browser proxy) because Frigate's nginx
+        401s proxied `/api/events/...` image requests when Frigate auth is on --
+        the sidecar's own connection to `frigate.base_url` is the authorized
+        path, exactly as with `recording_snapshot`.
+        """
+        url = f"{self.base_url}/api/events/{quote(event_id, safe='')}/thumbnail.jpg"
+        try:
+            r = self._client.get(url, timeout=timeout)
+        except httpx.HTTPError as exc:
+            raise FrigateAPIError(f"GET {url}: {exc}") from exc
+        if r.status_code == 404:
+            return (None, 404)
+        if r.status_code != 200:
+            raise FrigateAPIError(f"GET {url}: HTTP {r.status_code}")
+        return (r.content, 200)
+
     def recording_snapshot(
         self, camera: str, ts: float, *, timeout: float = 15.0
     ) -> tuple[bytes | None, int]:
