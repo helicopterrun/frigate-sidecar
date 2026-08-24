@@ -272,6 +272,82 @@ def alignment_thumbnail(request: Request, event_id: str) -> Any:
     )
 
 
+def _commit_frigate_config(config_path: str, camera: str, offset_ms: int) -> bool:
+    """Best-effort git commit of the config write, when the config lives in a
+    repo (it does on the reference deployment). Failure is logged, never
+    raised -- the offset is already in effect; the commit is audit trail."""
+    import logging
+    import subprocess
+    from pathlib import Path
+
+    p = Path(config_path)
+    repo = p.parent
+    if not (repo / ".git").exists():
+        return False
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo), "add", p.name], check=True,
+            capture_output=True, timeout=10,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m",
+             f"{camera}: annotation_offset {offset_ms} (sidecar calibrator)"],
+            check=True, capture_output=True, timeout=10,
+        )
+        return True
+    except (subprocess.SubprocessError, OSError) as exc:
+        logging.getLogger(__name__).warning("config git commit failed: %s", exc)
+        return False
+
+
+@router.post("/annotation-offset/apply-config")
+async def alignment_apply_config(request: Request) -> Any:
+    """Write a calibrated offset into Frigate's own config and restart Frigate.
+
+    Body: `{"camera": str, "offset_ms": int}`. This is the escalation path for
+    cameras whose `detect.annotation_offset` is config-pinned (config wins over
+    sidecar overrides by design): the value goes where it is authoritative,
+    Frigate's own annotation overlay gets fixed too, and the sidecar override
+    is cleared so the two sources cannot disagree. Frigate restarts (~30 s) --
+    annotation_offset only takes effect in its event pipeline on boot."""
+    from frigate_sidecar import db
+    from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient
+    from frigate_sidecar.routes import scrub as scrub_routes
+
+    body = await request.json()
+    camera = body.get("camera")
+    if not isinstance(camera, str) or not camera:
+        raise HTTPException(status_code=422, detail="camera required")
+    try:
+        offset_ms = int(body.get("offset_ms"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="bad offset_ms") from exc
+    if abs(offset_ms) > 60_000:
+        raise HTTPException(status_code=422, detail="offset_ms out of range")
+
+    s = _settings(request)
+    try:
+        with FrigateClient(s.frigate.base_url) as fc:
+            fc.set_annotation_offset(camera, offset_ms)
+            committed = _commit_frigate_config(
+                str(s.frigate.config_path), camera, offset_ms
+            )
+            fc.restart()
+    except FrigateAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    # The config is authoritative now; a lingering sidecar override for the
+    # same camera would just be shadowed data waiting to confuse someone.
+    conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        db.set_event_clock_offset(conn, camera, 0)
+    finally:
+        conn.close()
+    scrub_routes.invalidate_event_clock_offsets()
+    return {"camera": camera, "config_ms": offset_ms, "committed": committed,
+            "restarting": True}
+
+
 @router.get("/annotation-offset/snapshot/{event_id}")
 def alignment_snapshot(request: Request, event_id: str) -> Any:
     """The event's full-frame snapshot (bbox drawn) for the calibrator's

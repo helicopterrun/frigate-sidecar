@@ -155,6 +155,40 @@ class FrigateClient:
             raise FrigateAPIError(f"GET {url}: HTTP {r.status_code}")
         return (r.content, 200)
 
+    def set_annotation_offset(self, camera: str, offset_ms: int) -> None:
+        """Write `cameras.<camera>.detect.annotation_offset` into Frigate's config.
+
+        PUT /api/config/set (verified against 0.17's OpenAPI: body is
+        `{requires_restart, config_data}` with config_data merged into the
+        config file — the same call Frigate's own UI makes for config edits).
+        Marks a restart required; actually restarting is `restart()`, kept
+        separate so a caller can batch writes before one restart.
+        """
+        url = f"{self.base_url}/api/config/set"
+        body = {
+            "requires_restart": 1,
+            "config_data": {
+                "cameras": {camera: {"detect": {"annotation_offset": int(offset_ms)}}}
+            },
+        }
+        try:
+            r = self._client.put(url, json=body, timeout=15.0)
+        except httpx.HTTPError as exc:
+            raise FrigateAPIError(f"PUT {url}: {exc}") from exc
+        if r.status_code != 200:
+            raise FrigateAPIError(f"PUT {url}: HTTP {r.status_code} {r.text[:200]}")
+
+    def restart(self) -> None:
+        """POST /api/restart — restart the Frigate process so config edits
+        (annotation_offset included) take effect in the event pipeline."""
+        url = f"{self.base_url}/api/restart"
+        try:
+            r = self._client.post(url, timeout=15.0)
+        except httpx.HTTPError as exc:
+            raise FrigateAPIError(f"POST {url}: {exc}") from exc
+        if r.status_code != 200:
+            raise FrigateAPIError(f"POST {url}: HTTP {r.status_code}")
+
     def recording_snapshot(
         self, camera: str, ts: float, *, timeout: float = 15.0
     ) -> tuple[bytes | None, int]:
