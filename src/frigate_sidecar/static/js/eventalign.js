@@ -28,11 +28,14 @@
     var applied = state.applied_ms || {};
     var config = state.config_ms || {};
     resultsEl.textContent = "";
-    // Cameras with an applied/config offset but no fresh measurement still show
-    // — a calibrated camera must keep its row, or there is nowhere to
-    // recalibrate it from.
+    // EVERY camera gets a row, always. Deriving the list from "has a
+    // measurement or an offset" made rows vanish twice — first when a config
+    // save cleared the sidecar override, then again for cameras cleared back
+    // to nothing. A camera with no calibration reads "none"; it never
+    // disappears.
     var cams = {};
     results.forEach(function (r) { cams[r.camera] = r; });
+    (state.cameras || []).forEach(function (c) { if (!cams[c]) cams[c] = { camera: c }; });
     Object.keys(applied).forEach(function (c) { if (!cams[c]) cams[c] = { camera: c }; });
     Object.keys(config).forEach(function (c) {
       if (config[c] && !cams[c]) cams[c] = { camera: c };
