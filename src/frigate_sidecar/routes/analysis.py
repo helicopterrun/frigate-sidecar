@@ -518,6 +518,7 @@ def alignment_state(request: Request) -> Any:
     """The measurement job plus what's currently in effect per camera."""
     from frigate_sidecar import db
     from frigate_sidecar.faces.crosscam import annotation_offset_ms
+    from frigate_sidecar.frigate_api import FrigateClient
 
     s = _settings(request)
     job = _alignment_job(request)
@@ -529,19 +530,27 @@ def alignment_state(request: Request) -> Any:
     cameras = sorted(
         {r["camera"] for r in (job["results"] or [])} | set(applied)
     )
-    # Every camera known to Frigate, so the manual calibrator can reach ones
-    # with no measurement and no applied offset.
+    # Every camera in Frigate's *live* config, so the manual calibrator can
+    # reach ones with no measurement and no applied offset. Event history is
+    # only a fallback — it keeps retired camera names alive forever after a
+    # rename, offering rows that can never be calibrated (no recordings).
     all_cameras: list[str] = []
     try:
-        fconn = db.open_frigate_ro(s.frigate.db_path)
+        with FrigateClient(s.frigate.base_url) as fc:
+            all_cameras = sorted(fc.config().get("cameras", {}))
+    except FrigateAPIError:
+        all_cameras = []
+    if not all_cameras:
         try:
-            all_cameras = sorted(
-                r["camera"] for r in fconn.execute("SELECT DISTINCT camera FROM event")
-            )
-        finally:
-            fconn.close()
-    except db.FrigateDBMissingError:
-        all_cameras = cameras
+            fconn = db.open_frigate_ro(s.frigate.db_path)
+            try:
+                all_cameras = sorted(
+                    r["camera"] for r in fconn.execute("SELECT DISTINCT camera FROM event")
+                )
+            finally:
+                fconn.close()
+        except db.FrigateDBMissingError:
+            all_cameras = cameras
     config_ms = {
         cam: annotation_offset_ms(str(s.frigate.config_path), cam)
         for cam in sorted(set(cameras) | set(all_cameras))
