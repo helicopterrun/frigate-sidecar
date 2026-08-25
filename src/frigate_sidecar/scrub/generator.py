@@ -655,6 +655,7 @@ async def _generate_tier(
     profile: SourceProfile,
     sem: asyncio.Semaphore,
     deadline: float | None = None,
+    newest_first: bool = False,
 ) -> dict[str, Any]:
     """Sample `[since, window_end)` for one thinning tier, never emitting frames
     outside `[window_start, window_end)` (§4.2 non-overlap, §5.5 thinning tiers).
@@ -665,6 +666,9 @@ async def _generate_tier(
 
     `deadline` (a `time.monotonic()` instant), when given, is checked between
     segments -- see `_generate_tiers`.
+
+    `newest_first`, when set, picks the *newest* `budget` segments of
+    `[since, window_end)` rather than the oldest -- see `_generate_tiers`.
     """
     if window_end <= window_start or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -680,7 +684,7 @@ async def _generate_tier(
         window_end=window_end, since=max(min(since, window_end), window_start),
         budget=budget,
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-        profile=profile, sem=sem, deadline=deadline,
+        profile=profile, sem=sem, deadline=deadline, newest_first=newest_first,
     )
 
 
@@ -698,6 +702,7 @@ async def _generate_tiers(
     profile: SourceProfile,
     sem: asyncio.Semaphore,
     deadline: float | None = None,
+    newest_first: bool = False,
 ) -> dict[str, Any]:
     """Open each segment in `[since, window_end)` and feed it to `writer`.
 
@@ -709,6 +714,17 @@ async def _generate_tiers(
     blew straight through a 5s budget floor reserved for the derived-tier pass
     that runs after it in the same cycle -- checking wall clock only between
     cameras was too coarse to protect that floor.
+
+    `newest_first` picks the newest `budget` segments of the span instead of
+    the oldest, then still feeds them to `writer` oldest-to-newest (bucket
+    assembly is order-dependent). This is what `generate_live_edge` sets when
+    a busy span has more segments than the live-edge budget: taking the
+    oldest `budget` of them, as the default query does, never reaches the
+    handful nearest "now" -- exactly the span the client scrubs blind into --
+    and only closes the gap once the resume cursor crawls up to it over
+    several cycles. Skipping straight to the newest segments leaves a hole
+    behind them instead, which `_backfill_tier` already fills newest-first
+    (§5.4), so nothing is left permanently uncovered.
     """
     scrub = settings.scrub
     if budget <= 0:
@@ -717,11 +733,14 @@ async def _generate_tiers(
     # Oldest-first and budgeted: a cold start has no resume point, so `since` is
     # the far edge of the retention window and this query would otherwise return
     # days of segments to chew through before the loop yields.
+    order = "start_time DESC" if newest_first else "start_time"
     rows_ = frigate_conn.execute(
-        "SELECT path, start_time, end_time FROM recordings "
-        "WHERE camera = ? AND end_time > ? AND start_time < ? ORDER BY start_time LIMIT ?",
+        f"SELECT path, start_time, end_time FROM recordings "
+        f"WHERE camera = ? AND end_time > ? AND start_time < ? ORDER BY {order} LIMIT ?",
         (camera, since, window_end, max(1, budget)),
     ).fetchall()
+    if newest_first:
+        rows_ = list(reversed(rows_))
     if not rows_:
         return {"camera": camera, "segments": 0, "new_frames": 0}
 
@@ -1143,7 +1162,7 @@ async def generate_live_edge(
         since=live_since,
         budget=max(1, scrub.live_edge_segments),
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-        profile=profile, sem=sem,
+        profile=profile, sem=sem, newest_first=True,
     )
     return {"camera": camera, **result}
 
