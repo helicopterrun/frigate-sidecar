@@ -804,6 +804,35 @@ def test_first_cycle_on_a_cold_cache_reaches_the_live_edge(long_history_env: Set
     )
 
 
+def test_live_edge_covers_the_newest_segment_first_when_budget_is_short(
+    long_history_env: Settings,
+) -> None:
+    """The live-edge budget (6 segments) is smaller than the lookback window
+    (300s / 10s segments = 30), so oldest-first ordering would leave the
+    newest segments -- exactly what the client scrubs into -- uncovered until
+    the resume cursor crawled up to them over several cycles. Newest-first
+    must close that gap on the very first cycle instead.
+    """
+    env = long_history_env
+    now = 1_800_000_000.0 + 86400.0
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_camera(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now, profile=generator.SourceProfile(), sem=asyncio.Semaphore(3),
+            )
+        )
+        through = db.latest_generated_through(conn, "doorbell", 1.0)
+    finally:
+        conn.close()
+
+    assert through is not None
+    lag = now - through
+    # One 10s segment's worth of slack for the last (possibly partial) segment.
+    assert lag <= 10.0, f"live edge is {lag:.1f}s behind the newest segment"
+
+
 def test_backfill_fills_in_behind_the_live_edge(long_history_env: Settings) -> None:
     """Coverage should grow backwards from now, contiguously -- a user scrubbing
     an hour ago is served before one scrubbing three days ago (§5.4)."""
