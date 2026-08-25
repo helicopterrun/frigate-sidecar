@@ -85,6 +85,25 @@ _PROXY_CATCH_ALL = "/{path:path}"
 
 logger = logging.getLogger(__name__)
 
+# Rate-limit for the low-disk-space skip warning below -- a full disk would
+# otherwise repeat the same log every tick (as often as every 20s) forever.
+_LOW_SPACE_WARN_INTERVAL_S = 900.0
+
+
+def _below_free_space_floor(cache_dir: Path, min_free_bytes: int) -> bool:
+    """True if the cache filesystem has less than `min_free_bytes` free.
+
+    `shutil.disk_usage` fails if `cache_dir` doesn't exist yet (e.g. very
+    first boot before the generator has created it) -- treat that as "can't
+    tell, don't block generation on it", matching `_cache_on_separate_filesystem`.
+    """
+    if min_free_bytes <= 0:
+        return False
+    try:
+        return shutil.disk_usage(cache_dir).free < min_free_bytes
+    except OSError:
+        return False
+
 
 async def _scrub_generation_loop(app: FastAPI) -> None:
     """Continuous trailing edge (docs spec §5.4 option (a)) -- NEVER hourly, per
@@ -117,17 +136,34 @@ async def _scrub_generation_loop(app: FastAPI) -> None:
     next_prune = time.time() + settings.scrub.prune_interval_s
     # Measured GOP and aspect per camera, kept for the process lifetime.
     profile = SourceProfile()
+    last_low_space_warn = 0.0
     while True:
         deadline = time.monotonic() + tick
-        try:
-            await generate_cycle(
-                settings, now=time.time(), profile=profile, backfill_deadline=deadline
-            )
-        except Exception:
-            logger.exception("scrub: generation cycle failed")
+        if _below_free_space_floor(settings.scrub.cache_dir, settings.scrub.min_free_bytes):
+            # Below the floor: skip generation for this tick (it's what would
+            # be filling the disk further) but do NOT touch scrub_last_cycle --
+            # the status dashboard's staleness check (below) is what's supposed
+            # to surface this condition, and updating it here would mask it.
+            # Pruning still runs on its own cadence below regardless, since
+            # that's what frees space back up.
+            now_mono = time.monotonic()
+            if now_mono - last_low_space_warn >= _LOW_SPACE_WARN_INTERVAL_S:
+                last_low_space_warn = now_mono
+                logger.warning(
+                    "scrub: cache filesystem below free-space floor (%d bytes) -- "
+                    "skipping generation this tick, pruning still runs",
+                    settings.scrub.min_free_bytes,
+                )
         else:
-            # Consumed by the status dashboard: "when did a cycle last finish".
-            app.state.scrub_last_cycle = time.time()
+            try:
+                await generate_cycle(
+                    settings, now=time.time(), profile=profile, backfill_deadline=deadline
+                )
+            except Exception:
+                logger.exception("scrub: generation cycle failed")
+            else:
+                # Consumed by the status dashboard: "when did a cycle last finish".
+                app.state.scrub_last_cycle = time.time()
         if time.time() >= next_prune:
             next_prune = time.time() + settings.scrub.prune_interval_s
             try:

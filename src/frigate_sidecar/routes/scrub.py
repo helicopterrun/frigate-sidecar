@@ -350,9 +350,13 @@ async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
 
 async def _fetch_and_aggregate_motion(
     request: Request, camera: str, start: float, end: float, scale: float
-) -> list[float]:
+) -> tuple[list[float], bool]:
+    """Returns (values, unavailable) -- `unavailable` is True when Frigate's
+    API could not be reached, so callers can distinguish a zero-filled trace
+    caused by an outage from one that genuinely reflects a quiet camera."""
     settings = request.app.state.settings
     fetch_scale = safe_fetch_scale(scale)
+    unavailable = False
     try:
         raw = await async_activity_motion(
             get_async_client(request.app),
@@ -364,6 +368,7 @@ async def _fetch_and_aggregate_motion(
         )
     except FrigateAPIError:
         raw = []
+        unavailable = True
 
     points: list[tuple[float, float]] = []
     for item in raw:
@@ -372,7 +377,7 @@ async def _fetch_and_aggregate_motion(
         if ts is None or val is None:
             continue
         points.append((float(ts), float(val)))
-    return aggregate_motion(points, start, end, scale)
+    return aggregate_motion(points, start, end, scale), unavailable
 
 
 @router.get("/motion/{camera}")
@@ -383,8 +388,11 @@ async def motion(camera: str, start: float, end: float, scale: float, request: R
     truncation) by fetching at a safe scale and aggregating ourselves."""
     _require_series(start, end, scale)
     _require_known_camera(request, camera)
-    values = await _fetch_and_aggregate_motion(request, camera, start, end, scale)
-    return {"start": start, "interval": scale, "values": values}
+    values, unavailable = await _fetch_and_aggregate_motion(request, camera, start, end, scale)
+    body: dict[str, Any] = {"start": start, "interval": scale, "values": values}
+    if unavailable:
+        body["motion_unavailable"] = True
+    return body
 
 
 #: `annotation_offset` cache: (config mtime, epoch, offset seconds) per camera.
@@ -707,9 +715,11 @@ async def reel(
         }
         for r in bucket_rows
     ]
-    motion_values = await _fetch_and_aggregate_motion(request, camera, start, end, motion_scale)
+    motion_values, motion_unavailable = await _fetch_and_aggregate_motion(
+        request, camera, start, end, motion_scale
+    )
 
-    body = {
+    body: dict[str, Any] = {
         "queried": [start, end],
         "recorded": coverage_result["recorded"],
         "latest_segment_end": coverage_result["latest_segment_end"],
@@ -719,6 +729,8 @@ async def reel(
         "events": events,
         "reviews": reviews,
     }
+    if motion_unavailable:
+        body["motion_unavailable"] = True
     return _etagged(request, body)
 
 

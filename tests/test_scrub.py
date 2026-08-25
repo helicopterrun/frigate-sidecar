@@ -18,6 +18,7 @@ from PIL import Image
 
 from frigate_sidecar import auth, db
 from frigate_sidecar.config import FrigateSection, ScrubSection, Settings, SidecarSection
+from frigate_sidecar.frigate_api import FrigateAPIError
 from frigate_sidecar.routes import scrub as scrub_routes
 from frigate_sidecar.scrub import grid
 from frigate_sidecar.server import create_app
@@ -289,8 +290,8 @@ def test_reel_and_scrub_coverage_agree_on_derived_tier_exclusion(
 
     async def _fake_motion(
         settings: object, camera: str, start: float, end: float, scale: float
-    ) -> list[float]:
-        return [0.0] * int((end - start) / scale)
+    ) -> tuple[list[float], bool]:
+        return [0.0] * int((end - start) / scale), False
 
     monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _fake_motion)
 
@@ -423,9 +424,9 @@ def test_reel_bundle_shape(
 
     async def _fake_motion(
         settings: object, camera: str, start: float, end: float, scale: float
-    ) -> list[float]:
+    ) -> tuple[list[float], bool]:
         n = int((end - start) / scale)
-        return [0.0] * n
+        return [0.0] * n, False
 
     monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _fake_motion)
 
@@ -449,10 +450,44 @@ def test_reel_bundle_shape(
     assert len(body["frames"]) == 2  # straddles the 1.0/5.0 thinning boundary
     assert isinstance(body["motion"]["values"], list)
     assert len(body["motion"]["values"]) == int(3700 / 10)  # zero-filled to full range
+    assert "motion_unavailable" not in body  # success path omits the key entirely
 
     events_by_id = {e["id"]: e for e in body["events"]}
     assert events_by_id["ev1"]["end"] is not None
     assert events_by_id["ev2"]["end"] is None  # still-in-progress -> null, not omitted/placeholder
+
+
+def test_reel_flags_motion_unavailable_when_frigate_api_fails(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Frigate down must not masquerade as a genuinely quiet camera (§4.6):
+    events/coverage still come from the DB and stay valid, but the motion
+    trace is flagged so a flat line can be told apart from real silence."""
+    _skip_auth(monkeypatch)
+
+    async def _raising_activity_motion(
+        client: object, base_url: str, camera: str, start: float, end: float, scale: float
+    ) -> list[dict[str, object]]:
+        raise FrigateAPIError("frigate api down")
+
+    monkeypatch.setattr(scrub_routes, "async_activity_motion", _raising_activity_motion)
+
+    now = time.time()
+    _seed_bucket(sidecar_db_path, "doorbell", now - 300, now - 200, 1.0)
+
+    r = client.get(
+        "/v1/reel/doorbell",
+        params={"start": now - 3700, "end": now, "motion_scale": 10},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["motion_unavailable"] is True
+    assert body["motion"]["values"] == [0.0] * int(3700 / 10)  # zero-filled, unchanged
+    # DB-backed fields remain valid even though motion failed.
+    assert "events" in body
+    assert isinstance(body["events"], list)
+    assert "recorded" in body
 
 
 def test_motion_totalizes_full_range(
@@ -462,13 +497,13 @@ def test_motion_totalizes_full_range(
 
     async def _fake_motion(
         settings: object, camera: str, start: float, end: float, scale: float
-    ) -> list[float]:
+    ) -> tuple[list[float], bool]:
         from frigate_sidecar.scrub.motion import aggregate_motion
 
         # Only 9 of the requested buckets have "upstream" data -- simulates
         # the measured short-window cliff (§4.6).
         points = [(start + i * scale, 55.0) for i in range(9)]
-        return aggregate_motion(points, start, end, scale)
+        return aggregate_motion(points, start, end, scale), False
 
     monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _fake_motion)
 
@@ -483,6 +518,31 @@ def test_motion_totalizes_full_range(
     assert len(body["values"]) == 30  # full 1800/60, not truncated
     assert body["values"][:9] == [55.0] * 9
     assert body["values"][9:] == [0.0] * 21
+    assert "motion_unavailable" not in body  # success path omits the key entirely
+
+
+def test_motion_flags_unavailable_when_frigate_api_fails(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _skip_auth(monkeypatch)
+
+    async def _raising_activity_motion(
+        client: object, base_url: str, camera: str, start: float, end: float, scale: float
+    ) -> list[dict[str, object]]:
+        raise FrigateAPIError("frigate api down")
+
+    monkeypatch.setattr(scrub_routes, "async_activity_motion", _raising_activity_motion)
+
+    now = time.time()
+    r = client.get(
+        "/v1/motion/doorbell",
+        params={"start": now - 1800, "end": now, "scale": 60},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["motion_unavailable"] is True
+    assert body["values"] == [0.0] * 30  # zero-filled, unchanged
 
 
 def test_highlights_use_frigate_label_vocabulary(
@@ -757,6 +817,90 @@ def test_generation_loop_tick_is_the_finer_of_the_two_intervals(
     assert deadlines[0] == pytest.approx(510.0), "tick must be the 10s ceiling, not the 20s knob"
 
 
+def test_generation_loop_skips_generation_below_free_space_floor(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """A full cache filesystem used to retry `generate_cycle` every tick
+    forever, logging the same ENOSPC stack with no distinct signal and no
+    backoff. Below `scrub.min_free_bytes`, the loop must skip generation
+    (letting `prune` run so it can free space back up), must NOT advance
+    `scrub_last_cycle` (that's what lets healthz staleness surface the
+    condition), and must log the warning at most once per rate-limit window,
+    not once per tick.
+    """
+    import asyncio
+    from collections import namedtuple
+
+    from frigate_sidecar import server
+
+    cache_dir = tmp_path / "scrub"
+    cache_dir.mkdir()
+    settings = Settings(
+        scrub=ScrubSection(
+            cache_dir=cache_dir,
+            generate_interval_s=10.0,
+            live_edge_interval_s=10.0,
+            prune_interval_s=0.0,
+            min_free_bytes=2 * 1024 * 1024 * 1024,
+        )
+    )
+    app = type("_App", (), {"state": type("_S", (), {"settings": settings})})()
+
+    clock = {"monotonic": 1000.0}
+    ticks = 0
+    _Usage = namedtuple("_Usage", ["total", "used", "free"])
+
+    class _Clock:
+        @staticmethod
+        def monotonic() -> float:
+            return clock["monotonic"]
+
+        @staticmethod
+        def time() -> float:
+            return 1_800_000_000.0
+
+    async def _fake_cycle(*a: object, **kw: object) -> list[dict[str, object]]:
+        raise AssertionError("generate_cycle must not run below the free-space floor")
+
+    prune_calls = 0
+
+    async def _fake_to_thread(fn: object, *a: object, **kw: object) -> dict[str, object]:
+        nonlocal prune_calls
+        prune_calls += 1
+        return {}
+
+    async def _fake_sleep(seconds: float) -> None:
+        nonlocal ticks
+        ticks += 1
+        clock["monotonic"] += 10.0
+        if ticks >= 3:
+            raise asyncio.CancelledError
+
+    def _fake_disk_usage(path: object) -> object:
+        # Well below the 2GB floor.
+        return _Usage(total=10_000_000_000, used=9_999_000_000, free=1_000_000)
+
+    monkeypatch.setattr("frigate_sidecar.scrub.generator.generate_cycle", _fake_cycle)
+    monkeypatch.setattr(server.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(server.asyncio, "to_thread", _fake_to_thread)
+    monkeypatch.setattr(server, "time", _Clock)
+    monkeypatch.setattr(server.shutil, "disk_usage", _fake_disk_usage)
+
+    with (
+        caplog.at_level("WARNING", logger="frigate_sidecar.server"),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        asyncio.run(server._scrub_generation_loop(app))  # type: ignore[arg-type]
+
+    assert not hasattr(app.state, "scrub_last_cycle"), (
+        "floor-skip must not advance scrub_last_cycle -- that's what lets "
+        "healthz's staleness check surface the low-disk condition"
+    )
+    assert prune_calls >= 1, "pruning must still run below the floor -- it's what frees space"
+    warnings = [r for r in caplog.records if "below free-space floor" in r.message]
+    assert len(warnings) == 1, "warning must be rate-limited, not logged once per tick"
+
+
 # ----- /v1/highlights: score, ranking, clustering (§4.7) -----
 
 
@@ -807,8 +951,8 @@ def test_reel_events_also_carry_a_score(
 
     async def _no_motion(
         request: object, camera: str, s: float, e: float, sc: float
-    ) -> list[float]:
-        return []
+    ) -> tuple[list[float], bool]:
+        return [], False
 
     monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _no_motion)
     now = time.time()
@@ -1089,8 +1233,8 @@ def rich_client(
 def _rich_reel(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> dict:
     async def _no_motion(
         settings: object, camera: str, start: float, end: float, scale: float
-    ) -> list[float]:
-        return []
+    ) -> tuple[list[float], bool]:
+        return [], False
 
     monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _no_motion)
     now = time.time()
@@ -1131,8 +1275,8 @@ def test_reel_events_survive_a_frigate_without_the_new_columns(
 
     async def _no_motion(
         settings: object, camera: str, start: float, end: float, scale: float
-    ) -> list[float]:
-        return []
+    ) -> tuple[list[float], bool]:
+        return [], False
 
     monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _no_motion)
     now = time.time()
@@ -1263,8 +1407,8 @@ def test_reel_reviews_are_empty_without_a_reviewsegment_table(
 
     async def _no_motion(
         settings: object, camera: str, start: float, end: float, scale: float
-    ) -> list[float]:
-        return []
+    ) -> tuple[list[float], bool]:
+        return [], False
 
     monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _no_motion)
     now = time.time()
@@ -1314,8 +1458,8 @@ def test_reel_reviews_tolerate_a_malformed_data_blob(
 
     async def _no_motion(
         settings: object, camera: str, start: float, end: float, scale: float
-    ) -> list[float]:
-        return []
+    ) -> tuple[list[float], bool]:
+        return [], False
 
     monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _no_motion)
     r = tc.get(
@@ -1357,8 +1501,8 @@ def test_event_times_are_shifted_by_annotation_offset(
 
     async def _fake_motion(
         settings: object, camera: str, start: float, end: float, scale: float
-    ) -> list[float]:
-        return [0.0] * int((end - start) / scale)
+    ) -> tuple[list[float], bool]:
+        return [0.0] * int((end - start) / scale), False
 
     monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _fake_motion)
 
@@ -1402,8 +1546,8 @@ def test_event_times_unshifted_without_annotation_offset(
 
     async def _fake_motion(
         settings: object, camera: str, start: float, end: float, scale: float
-    ) -> list[float]:
-        return [0.0] * int((end - start) / scale)
+    ) -> tuple[list[float], bool]:
+        return [0.0] * int((end - start) / scale), False
 
     monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _fake_motion)
 
@@ -1434,8 +1578,8 @@ def test_reel_honours_sidecar_applied_offset(
 
     async def _fake_motion(
         settings: object, camera: str, start: float, end: float, scale: float
-    ) -> list[float]:
-        return [0.0] * int((end - start) / scale)
+    ) -> tuple[list[float], bool]:
+        return [0.0] * int((end - start) / scale), False
 
     monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _fake_motion)
 

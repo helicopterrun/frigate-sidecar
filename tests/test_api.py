@@ -123,6 +123,70 @@ def test_healthz_degraded_when_mqtt_disconnected(client: TestClient) -> None:
     assert body["checks"]["mqtt"] == "disconnected"
 
 
+def test_healthz_reports_frigate_ok_without_gating_status(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    class _Resp:
+        status_code = 200
+
+    def _fake_get(url: str, timeout: float) -> _Resp:
+        calls.append(url)
+        return _Resp()
+
+    monkeypatch.setattr("frigate_sidecar.routes.health.httpx.get", _fake_get)
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["checks"]["frigate"] == "ok"
+    assert calls == ["http://frigate.test:5000/api/version"]
+
+
+def test_healthz_frigate_unreachable_is_degraded_but_not_503(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Frigate being down must NOT flip /healthz's status code: watchdog.py
+    already restarts the Frigate container directly, and restarting the
+    sidecar (via a 503 here) would fix nothing while duplicating that
+    recovery path. It should still be visible in `checks`, though."""
+    import httpx
+
+    def _fake_get(url: str, timeout: float) -> None:
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr("frigate_sidecar.routes.health.httpx.get", _fake_get)
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["checks"]["frigate"] == "unreachable"
+
+
+def test_healthz_frigate_probe_is_cached_within_window(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    class _Resp:
+        status_code = 200
+
+    def _fake_get(url: str, timeout: float) -> _Resp:
+        calls.append(url)
+        return _Resp()
+
+    monkeypatch.setattr("frigate_sidecar.routes.health.httpx.get", _fake_get)
+    client.get("/healthz")
+    client.get("/healthz")
+    assert len(calls) == 1  # second call served from the cached verdict
+
+    # Force the cache to look stale: the third call re-probes.
+    cache_ts, verdict = client.app.state._frigate_health_cache
+    client.app.state._frigate_health_cache = (cache_ts - 3600, verdict)
+    client.get("/healthz")
+    assert len(calls) == 2
+
+
 def test_motion_blank_form(client: TestClient) -> None:
     # No baseline/target: page renders the form + a "set a target" empty state.
     r = client.get("/motion")

@@ -480,6 +480,54 @@ def test_prune_uses_a_sheets_own_end_time_not_a_hardcoded_interval(
         conn.close()
 
 
+def test_prune_reaps_only_stale_orphaned_publish_temp_files(env: Settings) -> None:
+    """`_publish_sheet_version` mkstemps `.publish-*` next to the sheet it's
+    about to write; a hard kill between mkstemp and the atomic replace leaves
+    one behind forever with nothing else to clean it up. `prune` should reap
+    only ones old enough to be orphans, not one a live publish might still be
+    writing."""
+    interval_dir = env.scrub.cache_dir / "doorbell" / "60"
+    interval_dir.mkdir(parents=True, exist_ok=True)
+    stale = interval_dir / ".publish-stale123"
+    fresh = interval_dir / ".publish-fresh456"
+    stale.write_bytes(b"x")
+    fresh.write_bytes(b"x")
+    now = 1_800_100_000.0
+    old_time = now - 7200  # 2h old, past the 1h reap threshold
+    os.utime(stale, (old_time, old_time))
+    os.utime(fresh, (now, now))
+
+    result = generator.prune(env, now=now)
+
+    assert result["publish_tmp_deleted"] == 1
+    assert not stale.exists()
+    assert fresh.exists()
+
+
+def test_prune_removes_now_empty_parent_dirs(env: Settings) -> None:
+    """`_prune_cell_dirs` rmtrees leaf sheet cell dirs but used to leave the
+    now-empty `.cells`/interval/camera dirs behind forever."""
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_camera(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
+                sem=asyncio.Semaphore(3),
+            )
+        )
+    finally:
+        conn.close()
+
+    cam_dir = env.scrub.cache_dir / "doorbell"
+    assert cam_dir.is_dir()
+
+    result = generator.prune(env, now=1_800_000_030.0 + 30 * 86400)
+    assert result["sheets_deleted"] > 0
+
+    assert not cam_dir.exists(), "camera dir should be removed once fully emptied"
+
+
 def test_sheet_row_count_matches_its_filename(env: Settings) -> None:
     """The row's `count` and the count baked into its immutable URL are the
     same key; they were computed from different values."""

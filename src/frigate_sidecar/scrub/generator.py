@@ -290,6 +290,15 @@ def _prune_cell_dirs(cache_dir: Path, camera: str | None, cutoff: float, span_ce
 
     Walked from disk rather than from the DB because a cell store outlives the
     row that produced it (rows are deleted first, then their files).
+
+    Also removes now-empty `.cells`/interval/camera parent directories left
+    behind once their last sheet dir is gone. `_prune_cell_dirs` runs after
+    `prune()` has already unlinked the published sheet files for `cutoff`, so
+    by the time this walk finishes an interval/camera dir with nothing left
+    really is done, not mid-generation. `os.rmdir` on a directory that still
+    has content (a racing generator wrote a new sheet, or the dir predates
+    `_CELLS_DIRNAME`) raises OSError, which is suppressed -- leaving it alone
+    is the correct outcome there.
     """
     if not cache_dir.is_dir():
         return 0
@@ -310,16 +319,49 @@ def _prune_cell_dirs(cache_dir: Path, camera: str | None, cutoff: float, span_ce
             except ValueError:
                 continue
             cells_root = interval_dir / _CELLS_DIRNAME
-            if not cells_root.is_dir():
-                continue
-            for sheet_dir in cells_root.iterdir():
-                try:
-                    sheet_start = float(sheet_dir.name)
-                except ValueError:
+            if cells_root.is_dir():
+                for sheet_dir in cells_root.iterdir():
+                    try:
+                        sheet_start = float(sheet_dir.name)
+                    except ValueError:
+                        continue
+                    if sheet_start + span_cells * interval_s < cutoff:
+                        shutil.rmtree(sheet_dir, ignore_errors=True)
+                        removed += 1
+                with contextlib.suppress(OSError):
+                    cells_root.rmdir()
+            with contextlib.suppress(OSError):
+                interval_dir.rmdir()
+        with contextlib.suppress(OSError):
+            cam_dir.rmdir()
+    return removed
+
+
+_PUBLISH_TMP_MAX_AGE_S = 3600.0
+
+
+def _reap_orphaned_publish_temp(cache_dir: Path, *, now: float, max_age_s: float) -> int:
+    """Unlink `.publish-*` temp files left behind by a hard kill between
+    `tempfile.mkstemp` and the `os.replace` that publishes it (see
+    `_publish_sheet_version`). Nothing else ever cleans these up, so an
+    unattended deployment that takes an OOM kill or a power loss mid-publish
+    leaks one forever. Only files older than `max_age_s` are touched -- a
+    fresh one may still be mid-write by a live generation pass.
+    """
+    if not cache_dir.is_dir():
+        return 0
+    removed = 0
+    for interval_dir in cache_dir.glob("*/*"):
+        if not interval_dir.is_dir():
+            continue
+        for tmp in interval_dir.glob(".publish-*"):
+            with contextlib.suppress(OSError):
+                if not tmp.is_file():
                     continue
-                if sheet_start + span_cells * interval_s < cutoff:
-                    shutil.rmtree(sheet_dir, ignore_errors=True)
-                    removed += 1
+                if now - tmp.stat().st_mtime < max_age_s:
+                    continue
+                tmp.unlink()
+                removed += 1
     return removed
 
 
@@ -1759,12 +1801,16 @@ def prune(
         cutoff,
         settings.scrub.sheet_cols * settings.scrub.sheet_rows,
     )
+    n_publish_tmp = _reap_orphaned_publish_temp(
+        settings.scrub.cache_dir, now=now, max_age_s=_PUBLISH_TMP_MAX_AGE_S
+    )
     return {
         "sheets_deleted": len(paths),
         "files_deleted": n_files,
         "buckets_deleted": n_buckets,
         "cell_dirs_deleted": n_cell_dirs,
         "superseded_versions_deleted": n_superseded,
+        "publish_tmp_deleted": n_publish_tmp,
     }
 
 

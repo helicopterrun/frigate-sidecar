@@ -99,7 +99,16 @@ async def map_footprints(request: Request) -> dict[str, Any]:
 async def map_live(request: Request, debug: int = Query(default=0)) -> dict[str, Any]:
     """Current fused object positions on the floorplan map, for the /cameras
     Live overlay (polled ~1 Hz). Cross-camera sightings of the same object
-    merge into one entry listing every contributing camera."""
+    merge into one entry listing every contributing camera.
+
+    Tracks are MQTT-fed in-memory state: if the broker/Frigate goes dark the
+    engine just stops updating and this would otherwise keep serving the
+    last-known (or empty) positions as if everything were fine forever. When
+    the same `push_subscriber` that /healthz's `mqtt` check reads has been
+    silent past `push.offline_silence_s`, the response carries `"stale":
+    true` so the map UI can show a banner instead of a confidently wrong
+    scene. Omitted entirely when the feed is fresh (additive, not a
+    breaking-change key)."""
     import time as _time
 
     from frigate_sidecar.push import fusion, ground
@@ -132,7 +141,11 @@ async def map_live(request: Request, debug: int = Query(default=0)) -> dict[str,
                     for m in c.members
                 ]
             objects.append(entry)
-    return {"t": now, "objects": objects}
+    result: dict[str, Any] = {"t": now, "objects": objects}
+    subscriber = getattr(request.app.state, "push_subscriber", None)
+    if subscriber is not None and subscriber.is_stale(now=now):
+        result["stale"] = True
+    return result
 
 
 @router.get("/map/track")

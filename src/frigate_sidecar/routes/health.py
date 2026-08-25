@@ -5,6 +5,13 @@ MQTT subscriber once died silently and stayed down for 41 hours while the
 static "ok" healthcheck kept reporting healthy (server.py `_push_subscriber_loop`
 docstring). A degraded check returns 503 so the Docker/compose healthchecks
 (which treat any non-2xx as unhealthy) and plain `curl -f` both notice.
+
+Frigate reachability is checked too (`checks["frigate"]`), but -- unlike
+mqtt/db/scrub/face_enrich -- it never flips the status code. `watchdog.py`
+already probes Frigate directly and restarts *that* container when it hangs;
+a 503 here would instead get the *sidecar* restarted by systemd/Docker,
+which fixes nothing and duplicates recovery logic in the wrong process. See
+`_probe_frigate` for detail.
 """
 
 from __future__ import annotations
@@ -12,6 +19,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
@@ -24,6 +32,37 @@ router = APIRouter(tags=["meta"])
 # cache is cold. Generous on purpose: a restart storm is worse than a late alarm.
 _SCRUB_STALE_TICKS = 10
 
+# Frigate reachability probe: cached at app-state level so /healthz polls
+# (Docker/systemd hit this every few seconds) don't hammer Frigate with an
+# extra request on top of everything else already probing it.
+_FRIGATE_PROBE_INTERVAL_S = 30.0
+_FRIGATE_PROBE_TIMEOUT_S = 3.0
+
+
+def _probe_frigate(app: Any, settings: Any, now: float) -> str:
+    """Cheap `/api/version` reachability check, rate-limited per app instance.
+
+    Deliberately does NOT feed into /healthz's overall `ok`/status code.
+    `watchdog.py` already probes Frigate directly and restarts the Frigate
+    container itself when it hangs; that is the correct recovery action.
+    Flipping /healthz to 503 here would instead prompt systemd/Docker to
+    restart the *sidecar*, which does nothing to fix Frigate and just adds a
+    second, redundant (and wrong) recovery path. This check exists so a
+    Frigate outage is visible in the sidecar's own health output, not to
+    trigger sidecar restarts.
+    """
+    cache = getattr(app.state, "_frigate_health_cache", None)
+    if cache is not None and (now - cache[0]) < _FRIGATE_PROBE_INTERVAL_S:
+        return cache[1]  # type: ignore[no-any-return]
+    url = settings.frigate.base_url.rstrip("/") + "/api/version"
+    try:
+        resp = httpx.get(url, timeout=_FRIGATE_PROBE_TIMEOUT_S)
+        status = "ok" if resp.status_code == 200 else "error"
+    except httpx.HTTPError:
+        status = "unreachable"
+    app.state._frigate_health_cache = (now, status)
+    return status
+
 
 @router.get("/healthz")
 def healthz(request: Request) -> JSONResponse:
@@ -32,6 +71,10 @@ def healthz(request: Request) -> JSONResponse:
     now = time.time()
     checks: dict[str, Any] = {}
     ok = True
+
+    # Informational only -- see `_probe_frigate` docstring for why this does
+    # not gate the status code.
+    checks["frigate"] = _probe_frigate(app, settings, now)
 
     # `push_subscriber` is set by the lifespan when push starts; its absence
     # means the lifespan hasn't run (tests, bare create_app under another

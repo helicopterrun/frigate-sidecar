@@ -121,6 +121,40 @@ def test_map_live_serves_fused_tracks(
     assert obj["members"][0]["forward_ft"] > 0
 
 
+class _FakeSubscriber:
+    """Minimal stand-in for MqttReviewSubscriber's staleness contract."""
+
+    def __init__(self, last_seen: float) -> None:
+        self.last_seen = last_seen
+
+    def is_stale(self, *, now: float) -> bool:
+        return (now - self.last_seen) > 60.0  # matches PushSection default
+
+
+def test_map_live_omits_stale_when_feed_is_fresh(
+    tmp_path: Path, frigate_db_path: Path, sidecar_db_path: Path,
+):
+    import time
+
+    client = _make_client(tmp_path, frigate_db_path, sidecar_db_path)
+    _apply_map_policy()
+    client.app.state.push_subscriber = _FakeSubscriber(time.time())
+    body = client.get("/v1/push/map/live").json()
+    assert "stale" not in body
+
+
+def test_map_live_flags_stale_when_feed_is_quiet(
+    tmp_path: Path, frigate_db_path: Path, sidecar_db_path: Path,
+):
+    import time
+
+    client = _make_client(tmp_path, frigate_db_path, sidecar_db_path)
+    _apply_map_policy()
+    client.app.state.push_subscriber = _FakeSubscriber(time.time() - 3600)
+    body = client.get("/v1/push/map/live").json()
+    assert body["stale"] is True
+
+
 def test_map_footprints_projects_placed_cameras(
     tmp_path: Path, frigate_db_path: Path, sidecar_db_path: Path,
 ):

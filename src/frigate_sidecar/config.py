@@ -334,6 +334,13 @@ class ScrubSection(BaseModel):
     cameras: list[str] = Field(default_factory=list)  # [] = all cameras
     cache_dir: Path = Path("/data/scrub")  # MUST be a separate filesystem from
     # frigate.recordings_path -- verified at startup, see routes/scrub.py.
+    # Floor on free space (bytes) on the cache filesystem below which the
+    # generation loop skips its cycle for that tick rather than grinding out
+    # the same ENOSPC failure every tick forever. Pruning still runs on its
+    # own cadence regardless -- it's what frees the space back up. ~2GB is
+    # comfortably above one sheet's worst-case size (§5.3 M4 measured ~1.1MB)
+    # with headroom for a burst of in-flight temp files.
+    min_free_bytes: int = 2 * 1024 * 1024 * 1024
     recent_interval_s: float = 1.0
     aged_interval_s: float = 5.0
     # Generate a camera at its own keyframe cadence when that is coarser than
