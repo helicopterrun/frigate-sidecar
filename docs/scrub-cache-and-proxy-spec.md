@@ -258,6 +258,8 @@ Re-serve Frigate's `/api/review/activity/motion` (which is genuinely good — 61
 
 Contract: **any `scale`, always covering the full requested `[start, end)`, zero-filled where there is genuinely no data.** The sidecar fetches from Frigate at a safe scale (≤300), aggregates/zero-fills to the requested grid, and returns the bare-array form. Then the client's `ReelGranularity.motionScale` and `aggregatesMotion` both disappear. (This is also the `motion` block inside §4.5 — implement once, expose both.)
 
+- **`motion_unavailable` (additive, shipped `7cddddd`).** Both `/v1/motion` and the `motion` block inside `/v1/reel` (§4.5) gained an additive boolean, true when the sidecar could not produce a motion series for the window (e.g. Frigate's motion source is down, or the window predates coverage). It exists so the zero-fill contract above doesn't get misread as "genuinely zero" — a client should draw nothing rather than a false flat line when this is set.
+
 ### 4.7 Highlights (Tier 1, after Tier 0) — `GET /v1/highlights/{camera}?before={ts}&limit=10`
 
 Turns the reel from a ruler into a search tool — "take me to the next interesting thing", which needs a ranked index across a long span that no Frigate endpoint provides.
@@ -404,6 +406,14 @@ Feature 2: make the sidecar the single origin. New router `routes/proxy.py`, reg
 ### 6.1 What it forwards
 
 A catch-all that streams to `frigate.proxy_base_url` (the authed `:8971`, §3.2): `/api/*`, `/vod/*`, `/live/*` (go2rtc MSE/WebRTC), `/preview/*`, and Frigate's own assets. The reel only *needs* `/api/*` and `/vod/*` proxied today, but a transparent catch-all is simpler and future-proofs live streaming.
+
+### 6.3 Related wire additions, shipped `7cddddd`
+
+Three small, additive changes landed alongside the client's build 207-208 scrub redesign:
+
+- **`/healthz` gained a `checks.frigate` entry** reporting whether the sidecar can currently reach Frigate. This is **informational only** — it never gates `/healthz`'s own status to a 503. The watchdog still owns Frigate recovery; a client should render "sidecar healthy, Frigate unreachable" rather than treating the whole stack as down when only this check is failing.
+- **`/v1/push/map/live` gained a stale flag** so a client polling the live map push can distinguish "no update because nothing moved" from "no update because the feed died."
+- **`scrub.min_free_bytes`** (default 2 GB) is a floor on the disk the generator (§5) writes to. Below the floor, sheet/frame generation pauses; pruning continues regardless, so the sidecar works its way back above the floor instead of wedging with generation and pruning fighting each other.
 
 ### 6.2 How — reuse the wildlife proxy pattern verbatim
 
