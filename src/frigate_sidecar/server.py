@@ -48,6 +48,7 @@ from frigate_sidecar.routes import replay as replay_routes
 from frigate_sidecar.routes import score_histogram as score_histogram_routes
 from frigate_sidecar.routes import scrub as scrub_routes
 from frigate_sidecar.routes import scrub_ui as scrub_ui_routes
+from frigate_sidecar.routes import search as search_routes
 from frigate_sidecar.routes import settings_page as settings_page_routes
 from frigate_sidecar.routes import status as status_routes
 from frigate_sidecar.routes import toybox as toybox_routes
@@ -540,6 +541,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(enrich_routes.router)
     app.include_router(toybox_routes.router)
     app.include_router(scrub_routes.router)
+    app.include_router(search_routes.router)
     app.include_router(push_routes.router)
     app.include_router(push_settings_routes.router)
     app.include_router(push_floorplan_routes.router)
