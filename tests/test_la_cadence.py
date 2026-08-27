@@ -108,9 +108,9 @@ def test_60s_visit_produces_at_most_6_pushes():
 
 def test_create_secondary_omits_elapsed_zero():
     # Secondary carries what the title doesn't: the camera, never a repeat
-    # of the place ("Person at Front Garden / Front Garden", 2026-08-14).
+    # of the place ("Person near Front Garden / Front Garden", 2026-08-14).
     primary, secondary = _copy("stranger", "person", "doorbell", "front_garden", 0.0)
-    assert primary == "Person in Front Garden"
+    assert primary == "Person near Front Garden"
     assert secondary == "Doorbell camera"
     assert "0s" not in secondary
 
@@ -130,7 +130,7 @@ def test_copy_prefers_frigate_friendly_name():
     policy_settings._zone_display_names = {"front_entry_person": "Front Walk"}
     try:
         primary, _ = _copy("stranger", "person", "garden", "front_entry_person", 0.0)
-        assert primary == "Person in Front Walk"
+        assert primary == "Person near Front Walk"
     finally:
         policy_settings._zone_display_names = {}
 
@@ -146,7 +146,7 @@ def test_copy_prefers_sidecar_zone_name_over_friendly_name():
         doc["zone_names"] = {"front_entry_person": "the front path"}
         policy_settings._active = doc
         primary, _ = _copy("stranger", "person", "garden", "front_entry_person", 0.0)
-        assert primary == "Person in the front path"
+        assert primary == "Person near the front path"
     finally:
         policy_settings._active = saved
         policy_settings._zone_display_names = {}

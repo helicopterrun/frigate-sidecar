@@ -277,7 +277,7 @@ def _copy(
     if zone_name:
         friendly = policy_settings.zone_display_name(zone_name)
         place = friendly or zone_name.replace("_", " ").title()
-        primary = f"{who} in {place}"
+        primary = f"{who} near {place}"
         detail = f"{camera_pretty} camera" if camera else ""
     else:
         primary = f"{who} · {camera_pretty} camera" if camera else who

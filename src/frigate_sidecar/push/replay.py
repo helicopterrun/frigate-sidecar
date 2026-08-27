@@ -405,7 +405,7 @@ def export_capture(
         zones = ", ".join(source["zones"]) or "no zones"
         description = (
             f"Captured {source['captured_from'][:16].replace('T', ' ')}Z: "
-            f"{camera or 'multi-camera'} {'/'.join(labels) or 'traffic'} at {zones} -- "
+            f"{camera or 'multi-camera'} {'/'.join(labels) or 'traffic'} near {zones} -- "
             f"{source['reviews']} reviews / {source['events']} events "
             f"over {source['window_s']:.0f}s of real wire."
         )
