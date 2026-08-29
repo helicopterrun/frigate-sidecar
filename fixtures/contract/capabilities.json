@@ -32,5 +32,8 @@
       3600.0
     ]
   },
+  "search": {
+    "enabled": true
+  },
   "version": "0.3.0"
 }
