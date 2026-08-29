@@ -35,6 +35,7 @@ def _row_to_card(row: sqlite3.Row) -> Card:
         resound_count=row["resound_count"],
         resolved=bool(row["resolved"]),
         closed=bool(row["closed"]),
+        zone_override_hit=bool(row["zone_override_hit"]),
     )
 
 
@@ -68,18 +69,24 @@ def upsert_card(
     if zone_name:
         zone_set.add(zone_name)
     existing = conn.execute(
-        "SELECT zones_csv FROM push_cards WHERE card_key = ?", (card.card_key,)
+        "SELECT zones_csv, zone_override_hit FROM push_cards WHERE card_key = ?",
+        (card.card_key,),
     ).fetchone()
     if existing is not None and existing["zones_csv"]:
         zone_set.update(z for z in existing["zones_csv"].split(",") if z)
     zones_csv = ",".join(sorted(zone_set))
+    # Sticky: once a zone override fires for this story, it stays true for
+    # the story's lifetime (read at resolve time -- see `send_card_mutation`).
+    zone_override_hit = card.zone_override_hit
+    if existing is not None:
+        zone_override_hit = zone_override_hit or bool(existing["zone_override_hit"])
     conn.execute(
         "INSERT INTO push_cards "
         "(card_key, level, peak_level, subject_kind, place_class, camera, zone_name, "
         " zones_csv, "
         " created_at, updated_at, state_since_at, sound_count, handled, handled_at, "
-        " last_sound_at, resound_count, resolved, closed) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " last_sound_at, resound_count, resolved, closed, zone_override_hit) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(card_key) DO UPDATE SET "
         "level=excluded.level, peak_level=excluded.peak_level, "
         "subject_kind=excluded.subject_kind, "
@@ -90,13 +97,13 @@ def upsert_card(
         "sound_count=excluded.sound_count, handled=excluded.handled, "
         "handled_at=excluded.handled_at, last_sound_at=excluded.last_sound_at, "
         "resound_count=excluded.resound_count, resolved=excluded.resolved, "
-        "closed=excluded.closed",
+        "closed=excluded.closed, zone_override_hit=excluded.zone_override_hit",
         (
             card.card_key, card.level, card.peak_level, subject_kind, place_class,
             camera, zone_name, zones_csv,
             card.created_at, card.updated_at, card.state_since_at, card.sound_count,
             int(card.handled), card.handled_at, card.last_sound_at, card.resound_count,
-            int(card.resolved), int(card.closed),
+            int(card.resolved), int(card.closed), int(zone_override_hit),
         ),
     )
     conn.commit()

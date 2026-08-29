@@ -95,6 +95,11 @@ class Card:
     resound_count: int = 0
     resolved: bool = False
     closed: bool = False  # true after SUPPRESSED or a terminal resolve is acked
+    #: Sticky: true once a zone override has fired for this story at any
+    #: point in its lifetime (set by the wire-up layer, never cleared).
+    #: Read at resolve time to decide whether the final resolve push is
+    #: worth keeping around (`ephemeral` payload field in `delivery.py`).
+    zone_override_hit: bool = False
 
     @property
     def sound_budget_remaining(self) -> bool:

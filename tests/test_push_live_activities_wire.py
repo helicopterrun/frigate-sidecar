@@ -1219,3 +1219,54 @@ async def test_escalate_clears_tombstone_and_starts_a_new_activity(sidecar_db_pa
     ) is None
 
 
+
+
+@pytest.mark.asyncio
+async def test_escalation_bypasses_min_interval_throttle(sidecar_db_path: Path):
+    """An ESCALATE mutation must reach the Live Activity even when it lands
+    well inside the update throttle window -- an escalation is by
+    definition alert-worthy, and the LA carrying the alert is what lets the
+    card push be demoted (§1 of the ephemeral/escalation spec). Without the
+    bypass, `min_interval` would swallow this update since it lands 1s after
+    the create, far under the 3s fast-cadence floor."""
+    from frigate_sidecar.push import ladder_policy, policy_settings
+
+    settings = policy_settings.default_settings()
+    settings["mute_sounds"] = False
+    policy_settings.apply_settings(settings)
+    custom_table = {k: dict(v) for k, v in ladder_policy.TABLE.items()}
+    custom_table["person"]["doors"] = "notify"
+    ladder_policy.set_table(custom_table)
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+    card_key = "doorbell:person:trk1"
+    track_id = "trk1"
+
+    # Create at notify -> LA start.
+    await handle_delivery_event(
+        make_event("doorbell", track_id, "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    assert [s for s in la_sends(transport) if s["event"] == "start"]
+    attach_token(conn, device=device, card_key=card_key, track_id=track_id, token="perAct1")
+
+    # Escalate to urgent only 1s later -- well inside the 3s fast-cadence
+    # throttle floor.
+    await handle_delivery_event(
+        make_event("doorbell", track_id, "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=1.0,
+    )
+    updates = [
+        r for r in la_sends(transport)
+        if r["event"] == "update" and r["token"] == "perAct1"
+    ]
+    assert len(updates) == 1, "throttled escalate update must still bypass min_interval"
+    assert "alert" in updates[0]["payload"]["aps"]
+
+    # The card is demoted for this device -- the LA update it just received
+    # is what covers it (only confirmed sends demote_tokens per §1).
+    esc_cards = [c for c in card_sends(transport) if c["payload"]["mutation"] == "escalate"]
+    assert esc_cards == []

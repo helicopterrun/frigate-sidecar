@@ -382,6 +382,15 @@ async def send_card_mutation(
         payload["aps"] = dict(payload["aps"])
         payload["aps"].pop("sound", None)
         payload["aps"]["interruption-level"] = "passive"
+        # Additive (deep_link precedent, ~payload builder above): a resolve
+        # push for a story that never reached urgent and never tripped a
+        # zone override is scoped to the event's lifetime -- the app removes
+        # it from Notification Center at once. Always explicit, never
+        # omitted: the app reads absent as "old sidecar" and falls back to
+        # its 24 h sweep, while an explicit false means "user-chosen
+        # critical story, keep indefinitely".
+        worth_keeping = card.peak_level == "urgent" or card.zone_override_hit
+        payload["ephemeral"] = not worth_keeping
 
     has_sound = bool(payload.get("aps", {}).get("sound"))
 

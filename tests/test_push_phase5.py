@@ -498,3 +498,108 @@ async def test_non_covered_device_resolve_row_is_immediate(sidecar_db_path: Path
         demote_tokens=set(), suppress_demoted=True,
     )
     assert len(situation_sends(transport)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Ephemeral resolve flag (event-lifetime notifications)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_push_is_ephemeral_for_notify_peak_story(sidecar_db_path: Path):
+    """A resolve push for a story that peaked at notify (not urgent) and
+    never tripped a zone override carries `ephemeral: true` -- it's scoped
+    to the event's lifetime, not kept around like an alarm record."""
+    from frigate_sidecar.push.cards import RESOLVE, Card
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    card = Card(
+        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        created_at=1.0, updated_at=9.0, state_since_at=1.0,
+        resolved=True, closed=True,
+    )
+    payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+    await send_card_mutation(
+        conn, transport, [device], card, RESOLVE, payload,
+        subject_kind="person", camera="doorbell", now=10.0,
+        demote_tokens=set(), suppress_demoted=True,
+    )
+    sends = situation_sends(transport)
+    assert len(sends) == 1
+    assert sends[0]["payload"]["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_push_not_ephemeral_for_urgent_peak_story(sidecar_db_path: Path):
+    """A story that ever peaked urgent (alarm outcome) keeps its resolve
+    push around -- explicit `ephemeral: false` (absent would read as
+    old-sidecar to the app and get the 24 h sweep instead of keep)."""
+    from frigate_sidecar.push.cards import RESOLVE, Card
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    card = Card(
+        card_key="doorbell:person:trk1", level="notify", peak_level="urgent",
+        created_at=1.0, updated_at=9.0, state_since_at=1.0,
+        resolved=True, closed=True,
+    )
+    payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+    await send_card_mutation(
+        conn, transport, [device], card, RESOLVE, payload,
+        subject_kind="person", camera="doorbell", now=10.0,
+        demote_tokens=set(), suppress_demoted=True,
+    )
+    sends = situation_sends(transport)
+    assert len(sends) == 1
+    assert sends[0]["payload"]["ephemeral"] is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_push_not_ephemeral_for_zone_override_story(sidecar_db_path: Path):
+    """A story that tripped a zone override at any point keeps its resolve
+    push around -- explicit `ephemeral: false`, even at notify peak."""
+    from frigate_sidecar.push.cards import RESOLVE, Card
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    card = Card(
+        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        created_at=1.0, updated_at=9.0, state_since_at=1.0,
+        resolved=True, closed=True, zone_override_hit=True,
+    )
+    payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+    await send_card_mutation(
+        conn, transport, [device], card, RESOLVE, payload,
+        subject_kind="person", camera="doorbell", now=10.0,
+        demote_tokens=set(), suppress_demoted=True,
+    )
+    sends = situation_sends(transport)
+    assert len(sends) == 1
+    assert sends[0]["payload"]["ephemeral"] is False
+
+
+@pytest.mark.asyncio
+async def test_quiet_peak_story_still_sends_no_resolve_push(sidecar_db_path: Path):
+    """Unchanged: a card whose peak never exceeded quiet still gets no
+    resolve push at all -- the ephemeral flag only applies to resolves that
+    already send a push."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    await handle_delivery_event(
+        make_event("cam1", "trk1", "package", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    transport.sent.clear()
+
+    await handle_delivery_resolve(
+        "cam1", "trk1", conn=conn, devices=[device], transport=transport,
+        config=config, subject_kind="thing", now=30.0,
+    )
+    assert situation_sends(transport) == []

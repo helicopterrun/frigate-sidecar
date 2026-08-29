@@ -281,7 +281,13 @@ CREATE TABLE IF NOT EXISTS push_cards (
     resound_count INTEGER NOT NULL DEFAULT 0,
     resolved      INTEGER NOT NULL DEFAULT 0,
     closed        INTEGER NOT NULL DEFAULT 0,
-    peak_level    TEXT NOT NULL DEFAULT 'log'
+    peak_level    TEXT NOT NULL DEFAULT 'log',
+    -- True once a zone override has fired for this story at any point
+    -- (delivery_wire.py's `_zone_override_hit`), sticky for the card's
+    -- lifetime. Read back at resolve time (delivery.py's
+    -- `send_card_mutation`) to decide whether the final resolve push is
+    -- worth keeping around (`ephemeral: false`) vs. safe to mark ephemeral.
+    zone_override_hit INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_push_cards_open
     ON push_cards(closed, level, last_sound_at);
@@ -423,6 +429,9 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # only zone_name (the review's first zone) missed merges whenever
         # overlapping cameras listed the same walk under different first-zones.
         ("zones_csv", "TEXT NOT NULL DEFAULT ''"),
+        # Sticky "did a zone override ever fire for this story" flag, read
+        # back at resolve time to decide the `ephemeral` payload field.
+        ("zone_override_hit", "INTEGER NOT NULL DEFAULT 0"),
     ],
     "push_devices": [
         # v2 registration shape (notification-experience plan §8). Everything

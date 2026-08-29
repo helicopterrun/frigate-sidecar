@@ -908,16 +908,19 @@ async def _deliver_live_activities(
             prev_heading=prev.get("heading"),
         )
         last_la_push = float(row["last_push_at"] or 0)
-        if delta_reason is None:
+        is_escalate = mutation == ESCALATE
+        if delta_reason is None and not is_escalate:
             continue
         min_interval = (
             _LA_UPDATE_MIN_INTERVAL_S
             if device.frequent_pushes_enabled
             else _LA_UPDATE_MIN_INTERVAL_SLOW_S
         )
-        if now - last_la_push < min_interval:
+        if now - last_la_push < min_interval and not is_escalate:
             continue
-        logger.info("la-push reason=%s card_key=%s", delta_reason, card_key)
+        logger.info(
+            "la-push reason=%s card_key=%s", delta_reason or "escalate", card_key,
+        )
 
         content_state = live_activities.build_content_state(
             level=card.level, mutation=mutation, glyph=glyph_val,
@@ -1218,6 +1221,11 @@ async def handle_delivery_event(
             geo_enabled=bool(policy.get("geometric_dedup")),
         )
         card, mutation, sound = _advance_card(existing, level, card_key=card_key, now=now)
+        if _zone_override_hit:
+            # Sticky for the story's lifetime -- `card_store.upsert_card`
+            # ORs this with whatever's already on the row, so a single hit
+            # anywhere in the story keeps the resolve push non-ephemeral.
+            card.zone_override_hit = True
         if via_geo and "geo_dedup" not in trace_reasons:
             trace_reasons.append("geo_dedup")
 
