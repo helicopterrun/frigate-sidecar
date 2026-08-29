@@ -104,6 +104,37 @@ def test_unregister_unknown_token_is_still_200(client: TestClient) -> None:
     assert r.json() == {"unregistered": True}
 
 
+def test_register_frequent_pushes_enabled_true_round_trips(
+    client: TestClient, sidecar_db_path: Path
+) -> None:
+    r = client.put(
+        "/v1/push/devices/tok-abc123",
+        json={
+            "bundle_id": "com.x", "environment": "sandbox",
+            "frequent_pushes_enabled": True,
+        },
+    )
+    assert r.status_code == 200
+    from frigate_sidecar import db
+
+    device = store.list_devices(db.open_sidecar(sidecar_db_path))[0]
+    assert device.frequent_pushes_enabled is True
+
+
+def test_register_frequent_pushes_enabled_defaults_false(
+    client: TestClient, sidecar_db_path: Path
+) -> None:
+    r = client.put(
+        "/v1/push/devices/tok-abc123",
+        json={"bundle_id": "com.x", "environment": "sandbox"},
+    )
+    assert r.status_code == 200
+    from frigate_sidecar import db
+
+    device = store.list_devices(db.open_sidecar(sidecar_db_path))[0]
+    assert device.frequent_pushes_enabled is False
+
+
 def test_capabilities_reports_push_disabled_by_default(client: TestClient) -> None:
     r = client.get("/v1/capabilities")
     assert r.status_code == 200

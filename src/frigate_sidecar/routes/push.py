@@ -84,6 +84,11 @@ class DeviceRegistration(BaseModel):
 
     # Accepted, persisted, and deliberately unread (Phase 4's digest and LLM).
     la_capable: bool = True
+    # Phase A: opt this device into the fast (3s) Live Activity update
+    # cadence instead of the default slow (15s) one. Absent/false keeps the
+    # default -- most devices don't need tighter pacing and it costs more
+    # APNs traffic.
+    frequent_pushes_enabled: bool = False
     live_activity_token: str = ""
     morning_digest: dict[str, Any] | None = None
     llm: dict[str, Any] | None = None
@@ -188,6 +193,7 @@ async def register_device(
             llm=body.llm,
             push_to_start_token=body.push_to_start_token,
             la_capable=body.la_capable,
+            frequent_pushes_enabled=body.frequent_pushes_enabled,
         )
         if body.snoozes is not None:
             store.replace_snoozes(conn, apns_token=apns_token, snoozes=body.snoozes)
@@ -524,20 +530,30 @@ async def upload_activity_token(
 
 @router.delete("/activity/token/{activity_id}")
 async def delete_activity_token(
-    activity_id: Annotated[str, Path(min_length=1)], request: Request
+    activity_id: Annotated[str, Path(min_length=1)],
+    request: Request,
+    dismissed: bool = False,
 ) -> dict[str, Any]:
     """The app ended the activity locally (user swiped it away, or its own
     lifecycle finished).
 
-    Drops the row outright rather than marking it ended: there is nothing left
-    to send an end push to, and leaving a tokened row behind would have the
-    sweeper try. Idempotent -- an unknown id is still a 200, since the end
+    `dismissed=false` (default): drops the row outright -- there is nothing
+    left to send an end push to, and leaving a tokened row behind would have
+    the sweeper try. Idempotent -- an unknown id is still a 200, since the end
     state either way is "the sidecar isn't tracking that activity".
+
+    `dismissed=true`: the user explicitly swiped the activity away, so
+    instead of a hard delete the row is closed as a dismissal tombstone
+    (Phase A §3) -- a future CREATE/UPDATE for the same (device, situation,
+    track) is suppressed until an ESCALATE breaks through it.
     """
     settings = request.app.state.settings
 
     def _delete(conn: Any) -> Any:
-        removed = store.delete_activity(conn, activity_id)
+        if dismissed:
+            removed = store.dismiss_activity(conn, activity_id)
+        else:
+            removed = store.delete_activity(conn, activity_id)
         conn.commit()
         return removed
 

@@ -109,6 +109,8 @@ class Device:
     #: alert pushes ("the app works without Phase 2").
     push_to_start_token: str = ""
     la_capable: bool = True
+    #: Phase A: fast (3s) vs default (15s) Live Activity update cadence.
+    frequent_pushes_enabled: bool = False
 
     @property
     def can_live_activity(self) -> bool:

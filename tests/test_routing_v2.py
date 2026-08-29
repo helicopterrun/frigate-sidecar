@@ -26,11 +26,16 @@ from frigate_sidecar.push.models import Device, ReviewEvent
 from frigate_sidecar.push.transport import LogTransport
 
 
-def _device(token: str = "tok1", *, push_to_start: str = "pts1") -> Device:
+def _device(
+    token: str = "tok1", *, push_to_start: str = "pts1", frequent_pushes_enabled: bool = True,
+) -> Device:
+    # Defaults to the fast (3s) LA update cadence: this file's timing
+    # assumptions predate Phase A's two-tier pacing (15s default absent the
+    # flag).
     return Device(
         apns_token=token, device_id=f"d_{token}", bundle_id="com.pondhouse.Elsinore",
         environment="sandbox", push_to_start_token=push_to_start,
-        min_severity="detection",
+        min_severity="detection", frequent_pushes_enabled=frequent_pushes_enabled,
     )
 
 

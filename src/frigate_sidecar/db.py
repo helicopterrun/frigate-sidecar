@@ -129,7 +129,10 @@ CREATE TABLE IF NOT EXISTS push_devices (
     -- Activities. Absent means "this device isn't ready for Live Activities"
     -- and its Present-tier situations fall back to alert pushes.
     push_to_start_token TEXT NOT NULL DEFAULT '',
-    la_capable INTEGER NOT NULL DEFAULT 1
+    la_capable INTEGER NOT NULL DEFAULT 1,
+    -- Phase A: opts this device into the fast (3s) Live Activity update
+    -- cadence instead of the default slow (15s) one.
+    frequent_pushes_enabled INTEGER NOT NULL DEFAULT 0
 );
 
 -- Opaque, sidecar-minted, short-lived handles standing in for
@@ -434,6 +437,8 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("llm", "TEXT"),  # JSON; Phase 4
         ("push_to_start_token", "TEXT NOT NULL DEFAULT ''"),  # Phase 2
         ("la_capable", "INTEGER NOT NULL DEFAULT 1"),
+        # Phase A: fast (3s) vs default (15s) Live Activity update cadence.
+        ("frequent_pushes_enabled", "INTEGER NOT NULL DEFAULT 0"),
     ],
     "push_handles": [
         ("situation_id", "TEXT NOT NULL DEFAULT ''"),

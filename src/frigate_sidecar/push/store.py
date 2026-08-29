@@ -82,6 +82,7 @@ def _row_to_device(row: sqlite3.Row) -> Device:
         la_capable=bool(
             int(_col(row, "la_capable", 1) if _col(row, "la_capable", 1) is not None else 1)
         ),
+        frequent_pushes_enabled=bool(int(_col(row, "frequent_pushes_enabled", 0) or 0)),
     )
 
 
@@ -109,6 +110,7 @@ def upsert_device(
     llm: dict[str, Any] | None = None,
     push_to_start_token: str = "",
     la_capable: bool = True,
+    frequent_pushes_enabled: bool = False,
 ) -> str:
     """Idempotent PUT on the token (spec §1) -- overwrites filter state in
     place rather than accumulating duplicate rows that would double-fire
@@ -125,8 +127,8 @@ def upsert_device(
         "(apns_token, device_id, bundle_id, environment, app_version, cameras, labels, "
         " min_severity, registered_at, updated_at, schema_version, timezone, location, "
         " situations, live_activity_token, morning_digest, llm, push_to_start_token, "
-        " la_capable) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " la_capable, frequent_pushes_enabled) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(apns_token) DO UPDATE SET "
         "bundle_id=excluded.bundle_id, environment=excluded.environment, "
         "app_version=excluded.app_version, cameras=excluded.cameras, labels=excluded.labels, "
@@ -136,6 +138,7 @@ def upsert_device(
         "live_activity_token=excluded.live_activity_token, "
         "morning_digest=excluded.morning_digest, llm=excluded.llm, "
         "la_capable=excluded.la_capable, "
+        "frequent_pushes_enabled=excluded.frequent_pushes_enabled, "
         # A re-registration that omits the token must not blank a working one:
         # the app uploads it from an async token stream, so the first PUT after
         # launch can legitimately race ahead of the token arriving.
@@ -149,7 +152,7 @@ def upsert_device(
             json.dumps(situations or []), live_activity_token,
             json.dumps(morning_digest) if morning_digest is not None else None,
             json.dumps(llm) if llm is not None else None,
-            push_to_start_token, int(la_capable),
+            push_to_start_token, int(la_capable), int(frequent_pushes_enabled),
         ),
     )
     return device_id
@@ -528,6 +531,44 @@ def delete_activity(conn: sqlite3.Connection, activity_id: str) -> bool:
     cur = conn.execute("DELETE FROM push_activities WHERE activity_id = ?", (activity_id,))
     conn.execute("DELETE FROM push_activity_sends WHERE activity_id = ?", (activity_id,))
     return cur.rowcount > 0
+
+
+def dismiss_activity(
+    conn: sqlite3.Connection, activity_id: str, *, now: float | None = None
+) -> bool:
+    """The app-side dismissal tombstone (Phase A §3): close the row instead of
+    deleting it, so a re-start for the same (device, situation, track) can be
+    suppressed until an escalation breaks through it. Returns whether a row
+    was actually tracked."""
+    now = time.time() if now is None else now
+    cur = conn.execute(
+        "UPDATE push_activities SET ended_at = ?, stage = 'dismissed' "
+        "WHERE activity_id = ? AND ended_at IS NULL",
+        (now, activity_id),
+    )
+    if cur.rowcount > 0:
+        return True
+    # Idempotent: a second dismiss (or a dismiss racing close_activity) on an
+    # already-ended row is still "was tracked" if the row exists at all.
+    return get_activity(conn, activity_id) is not None
+
+
+def find_dismissed_activity(
+    conn: sqlite3.Connection, *, apns_token: str, situation_id: str, track_id: str
+) -> sqlite3.Row | None:
+    """Mirrors `find_activity`, but for the dismissal tombstone left behind by
+    `dismiss_activity`: an ended, `stage='dismissed'` row for the same
+    (device, situation, track), which suppresses a future CREATE/UPDATE start
+    until an ESCALATE clears it (Phase A §3)."""
+    return cast(
+        "sqlite3.Row | None",
+        conn.execute(
+            "SELECT * FROM push_activities WHERE apns_token = ? AND situation_id = ? "
+            "AND track_id = ? AND ended_at IS NOT NULL AND stage = 'dismissed' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (apns_token, situation_id, track_id),
+        ).fetchone(),
+    )
 
 
 def stale_activities(

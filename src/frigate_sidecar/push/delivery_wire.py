@@ -79,8 +79,13 @@ _MEDIA_MUTATIONS = frozenset({CREATE, ENRICH})
 #: a constant like every other MVP threshold in this module.
 _DEDUP_WINDOW_S = 15.0
 
-#: §8 LA cadence: minimum seconds between content-state pushes per activity.
+#: §8 LA cadence: minimum seconds between content-state pushes per activity,
+#: for a device with `frequent_pushes_enabled` set.
 _LA_UPDATE_MIN_INTERVAL_S = 3.0
+#: Phase A default pacing for a device that hasn't opted into frequent
+#: pushes -- most devices don't need tighter cadence and it costs more APNs
+#: traffic / battery on the receiving end.
+_LA_UPDATE_MIN_INTERVAL_SLOW_S = 15.0
 #: §8 path growth threshold: push only when this many new points have arrived.
 _LA_PATH_GROWTH_THRESHOLD = 3
 
@@ -766,6 +771,14 @@ async def _deliver_live_activities(
                     covered.add(device.apns_token)
                 store.close_activity(conn, row["activity_id"], now=now)
                 _la_prev_state.pop((card_key, device.apns_token), None)
+                # A closed card's dismissal tombstone (if any -- e.g. the app
+                # re-dismissed a stale row) must not outlive it either.
+                tombstone = store.find_dismissed_activity(
+                    conn, apns_token=device.apns_token, situation_id=card_key,
+                    track_id=la_track_id,
+                )
+                if tombstone is not None:
+                    store.delete_activity(conn, tombstone["activity_id"])
             else:
                 # Fast create→resolve: the app hasn't uploaded the
                 # per-activity token yet, and iOS only accepts `start` on
@@ -798,6 +811,21 @@ async def _deliver_live_activities(
             if _is_snoozed(conn, device, camera, now=now):
                 logger.info("push: LA skip device=%s reason=snoozed", device.device_id)
                 continue
+            tombstone = store.find_dismissed_activity(
+                conn, apns_token=device.apns_token, situation_id=card_key,
+                track_id=la_track_id,
+            )
+            if tombstone is not None:
+                if mutation == ESCALATE:
+                    # Escalation breaks through a dismissal: the user swiped
+                    # away a quiet card, but this story just got more
+                    # important than the dismissal anticipated.
+                    store.delete_activity(conn, tombstone["activity_id"])
+                else:
+                    logger.info(
+                        "push: LA skip device=%s reason=dismissed", device.device_id,
+                    )
+                    continue
             content_state = live_activities.build_content_state(
                 level=card.level, mutation=mutation,
                 glyph=live_activities.glyph_for(
@@ -882,7 +910,12 @@ async def _deliver_live_activities(
         last_la_push = float(row["last_push_at"] or 0)
         if delta_reason is None:
             continue
-        if now - last_la_push < _LA_UPDATE_MIN_INTERVAL_S:
+        min_interval = (
+            _LA_UPDATE_MIN_INTERVAL_S
+            if device.frequent_pushes_enabled
+            else _LA_UPDATE_MIN_INTERVAL_SLOW_S
+        )
+        if now - last_la_push < min_interval:
             continue
         logger.info("la-push reason=%s card_key=%s", delta_reason, card_key)
 
@@ -994,6 +1027,14 @@ async def end_activity_if_card_closed(
         if row is None:
             break
         store.close_activity(conn, row["activity_id"], now=now)
+    # A closed card's own dismissal tombstone must not outlive it -- a future
+    # card reusing the same (device, situation, track) key deserves its own
+    # fresh start, not a suppression left over from the card that just ended.
+    tombstone = store.find_dismissed_activity(
+        conn, apns_token=device.apns_token, situation_id=card_key, track_id=track_id,
+    )
+    if tombstone is not None:
+        store.delete_activity(conn, tombstone["activity_id"])
     logger.info(
         "push: LA deferred end card_key=%s ok=%s error=%s", card_key, result.ok, result.error,
     )

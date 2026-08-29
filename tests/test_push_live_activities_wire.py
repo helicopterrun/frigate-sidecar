@@ -30,11 +30,18 @@ def _reset_ladder_table():
     ladder_policy.set_table({k: dict(v) for k, v in ladder_policy.TABLE.items()})
 
 
-def make_device(token: str = "tok1", *, push_to_start: str = "pts1") -> Device:
+def make_device(
+    token: str = "tok1", *, push_to_start: str = "pts1", frequent_pushes_enabled: bool = True,
+) -> Device:
+    # Defaults to the fast (3s) cadence: this file's existing timing
+    # assumptions predate the Phase A two-tier pacing default (15s absent the
+    # flag) and were all written against the old single 3s interval.
+    # `test_update_pacing_frequent_pushes_enabled_3s_vs_default_15s` covers
+    # the two-tier behavior explicitly (including the slow/default tier).
     return Device(
         apns_token=token, device_id=f"d_{token}", bundle_id="com.pondhouse.Elsinore",
         environment="sandbox", push_to_start_token=push_to_start,
-        min_severity="detection",
+        min_severity="detection", frequent_pushes_enabled=frequent_pushes_enabled,
     )
 
 
@@ -1006,3 +1013,209 @@ async def test_muted_notify_stays_non_alerting(sidecar_db_path: Path):
     aps = cards[0]["payload"]["aps"]
     assert aps["interruption-level"] == "active"
     assert "sound" not in aps
+
+
+@pytest.mark.asyncio
+async def test_update_pacing_frequent_pushes_enabled_3s_vs_default_15s(sidecar_db_path: Path):
+    """Phase A two-tier update pacing: a device with `frequent_pushes_enabled`
+    gets LA updates gated at 3s; the default (False) device is gated at 15s.
+
+    Uses a large epoch-like base for `now` (not 0.0): `last_push_at` defaults
+    to 0 in the row, so a small absolute `now` would spuriously look "recent"
+    against that default and get gated regardless of the flag -- real traffic
+    never has this problem since wall-clock `now` is always large."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    fast_device = make_device(token="fast1")  # default True
+    slow_device = make_device(token="slow1", frequent_pushes_enabled=False)
+    config = PushSection(delivery_enabled=True)
+    base = 1_000_000.0
+
+    # Different cameras *and* a >15s gap: keeps the two devices' tracks from
+    # being cross-camera-deduped onto a single shared card.
+    for device, camera, start_at in (
+        (fast_device, "doorbell-fast", base), (slow_device, "doorbell-slow", base + 100.0),
+    ):
+        card_key = f"{camera}:person:{device.apns_token}trk"
+        track_id = f"{device.apns_token}trk"
+        await handle_delivery_event(
+            make_event(camera, track_id, "person", zones=("front_door",)),
+            conn=conn, devices=[device], transport=transport, config=config, now=start_at,
+        )
+        attach_token(
+            conn, device=device, card_key=card_key, track_id=track_id,
+            token=f"perAct-{device.apns_token}",
+        )
+
+    def updates_for(token: str) -> list[dict]:
+        return [
+            r for r in la_sends(transport)
+            if r["event"] == "update" and r["token"] == f"perAct-{token}"
+        ]
+
+    # First update (zone change -> visible delta), well past both thresholds
+    # from the create -- establishes `last_push_at` for both devices.
+    await handle_delivery_event(
+        make_event("doorbell-fast", "fast1trk", "person", zones=("pool",)),
+        conn=conn, devices=[fast_device], transport=transport, config=config, now=base + 30.0,
+    )
+    await handle_delivery_event(
+        make_event("doorbell-slow", "slow1trk", "person", zones=("pool",)),
+        conn=conn, devices=[slow_device], transport=transport, config=config, now=base + 130.0,
+    )
+    assert len(updates_for("fast1")) == 1
+    assert len(updates_for("slow1")) == 1
+
+    # Second update 5s after the last push for each device -- straddles both
+    # thresholds (3s < 5s < 15s).
+    await handle_delivery_event(
+        make_event("doorbell-fast", "fast1trk", "person", zones=("porch",)),
+        conn=conn, devices=[fast_device], transport=transport, config=config, now=base + 35.0,
+    )
+    await handle_delivery_event(
+        make_event("doorbell-slow", "slow1trk", "person", zones=("porch",)),
+        conn=conn, devices=[slow_device], transport=transport, config=config, now=base + 135.0,
+    )
+    assert len(updates_for("fast1")) == 2, "3s-cadence device should not be gated at 5s"
+    assert len(updates_for("slow1")) == 1, "default 15s-cadence device must be gated at 5s"
+
+
+def test_dismiss_activity_closes_row_as_dismissed_and_is_idempotent(sidecar_db_path: Path):
+    """`store.dismiss_activity` closes the row with stage='dismissed' rather
+    than deleting it, returns True while the row is tracked (including a
+    second dismiss on an already-ended row), and False for an unknown id."""
+    conn = db.open_sidecar(sidecar_db_path)
+    activity_id = "a_dismiss1"
+    store.open_activity(
+        conn, activity_id=activity_id, apns_token="tok1", situation_id="doorbell:person:trk1",
+        track_id="trk1", camera="doorbell", collapse_id="doorbell:person:trk1", handle="",
+        now=0.0,
+    )
+
+    assert store.dismiss_activity(conn, activity_id, now=5.0) is True
+    row = store.get_activity(conn, activity_id)
+    assert row is not None
+    assert row["stage"] == "dismissed"
+    assert row["ended_at"] == 5.0
+
+    # Idempotent: dismissing the same (already-ended) row again is still True.
+    assert store.dismiss_activity(conn, activity_id, now=6.0) is True
+
+    # Unknown id: not tracked.
+    assert store.dismiss_activity(conn, "a_never_existed") is False
+
+
+def test_plain_delete_activity_hard_deletes_the_row(sidecar_db_path: Path):
+    """`dismissed=False` (the route's default) is `store.delete_activity`:
+    a hard delete, not a tombstone."""
+    conn = db.open_sidecar(sidecar_db_path)
+    activity_id = "a_delete1"
+    store.open_activity(
+        conn, activity_id=activity_id, apns_token="tok1", situation_id="doorbell:person:trk1",
+        track_id="trk1", camera="doorbell", collapse_id="doorbell:person:trk1", handle="",
+        now=0.0,
+    )
+    assert store.delete_activity(conn, activity_id) is True
+    assert store.get_activity(conn, activity_id) is None
+    # Second delete of the same (now-gone) id: not tracked.
+    assert store.delete_activity(conn, activity_id) is False
+
+
+@pytest.mark.asyncio
+async def test_dismissal_tombstone_suppresses_create_and_undemotes_card_push(
+    sidecar_db_path: Path,
+):
+    """After the app dismisses an activity, a subsequent CREATE for the same
+    (device, card_key, track) is suppressed: no LA start, no new
+    `push_activities` row -- and, since no LA covers the device, the ordinary
+    card push is NOT demoted (this is also the guarantee behind
+    test_la_first_delivery's demoted/covered story: a suppressed LA path must
+    behave like no LA at all)."""
+    from frigate_sidecar.push import policy_settings
+    policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device(token="tokDismiss1")
+    config = PushSection(delivery_enabled=True)
+    track_id = "trkDismiss1"
+    card_key = f"doorbell:person:{track_id}"
+
+    # Simulate an earlier activity for this exact key that the user dismissed.
+    tombstone_id = "a_tombstone1"
+    store.open_activity(
+        conn, activity_id=tombstone_id, apns_token=device.apns_token, situation_id=card_key,
+        track_id=track_id, camera="doorbell", collapse_id=card_key, handle="", now=-100.0,
+    )
+    store.dismiss_activity(conn, tombstone_id, now=-50.0)
+
+    await handle_delivery_event(
+        make_event("doorbell", track_id, "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    assert la_sends(transport) == []
+    # No new activity row was minted -- only the tombstone remains.
+    rows = conn.execute(
+        "SELECT * FROM push_activities WHERE apns_token = ? AND situation_id = ? "
+        "AND track_id = ?",
+        (device.apns_token, card_key, track_id),
+    ).fetchall()
+    assert [r["activity_id"] for r in rows] == [tombstone_id]
+
+    # Undemoted: the card push carries the full alert (active + sound), since
+    # no LA covers this device.
+    cards = card_sends(transport)
+    assert len(cards) == 1
+    assert cards[0]["payload"]["aps"]["interruption-level"] == "active"
+    assert cards[0]["payload"]["aps"].get("sound")
+
+
+@pytest.mark.asyncio
+async def test_escalate_clears_tombstone_and_starts_a_new_activity(sidecar_db_path: Path):
+    """An ESCALATE mutation breaks through a dismissal tombstone: the
+    tombstone is deleted and a fresh Live Activity starts."""
+    from frigate_sidecar.push import ladder_policy, policy_settings
+
+    settings = policy_settings.default_settings()
+    settings["mute_sounds"] = False
+    policy_settings.apply_settings(settings)
+    custom_table = {k: dict(v) for k, v in ladder_policy.TABLE.items()}
+    custom_table["person"]["doors"] = "quiet"
+    ladder_policy.set_table(custom_table)
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device(token="tokEscTomb1")
+    config = PushSection(delivery_enabled=True)
+    track_id = "trkEscTomb1"
+    card_key = f"doorbell:person:{track_id}"
+
+    tombstone_id = "a_tombstone2"
+    store.open_activity(
+        conn, activity_id=tombstone_id, apns_token=device.apns_token, situation_id=card_key,
+        track_id=track_id, camera="doorbell", collapse_id=card_key, handle="", now=-100.0,
+    )
+    store.dismiss_activity(conn, tombstone_id, now=-50.0)
+
+    # Create at quiet (custom table): no LA -- the tombstone is untouched by
+    # a mutation the code never reaches the tombstone check for.
+    await handle_delivery_event(
+        make_event("doorbell", track_id, "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    assert la_sends(transport) == []
+    assert store.get_activity(conn, tombstone_id) is not None
+
+    # Escalate to urgent (pool = off_limits): tombstone is cleared, LA starts.
+    await handle_delivery_event(
+        make_event("doorbell", track_id, "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+    starts = [s for s in la_sends(transport) if s["event"] == "start"]
+    assert len(starts) == 1
+    assert store.get_activity(conn, tombstone_id) is None
+    assert store.find_dismissed_activity(
+        conn, apns_token=device.apns_token, situation_id=card_key, track_id=track_id,
+    ) is None
+
+
