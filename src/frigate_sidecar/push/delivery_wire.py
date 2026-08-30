@@ -826,7 +826,7 @@ async def _deliver_live_activities(
             payload = live_activities.build_la_start_payload(
                 content_state=content_state, family=primary_ctx.get("family") or family,
                 camera=primary_ctx.get("camera", camera), track_id=_DEVICE_TRACK_ID,
-                card_key=primary_card.card_key, now=now, stale_s=stale_s,
+                card_key=_DEVICE_SITUATION_ID, now=now, stale_s=stale_s,
                 sound=la_start_sound,
             )
             logger.info(

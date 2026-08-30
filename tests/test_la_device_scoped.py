@@ -351,6 +351,147 @@ async def test_card_with_no_media_ever_minted_omits_thumbnail_handle(sidecar_db_
     assert "thumbnail_handle" not in updates[0]["payload"]["aps"]["content-state"]
 
 
+@pytest.mark.asyncio
+async def test_start_payload_card_key_is_sentinel(sidecar_db_path: Path):
+    """The start push's `attributes.card_key` must be the device sentinel,
+    not the primary story's real card key -- that real key still reaches the
+    app via content-state's `deep_link_card_key`. Regression for the prod
+    bug where the two disagreed, which broke `attach_activity_token`'s
+    upsert (see below) into overwriting the sentinel with a real card key.
+    """
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trkA", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    starts = [r for r in la_sends(transport) if r["event"] == "start"]
+    assert len(starts) == 1
+    attributes = starts[0]["payload"]["aps"]["attributes"]
+    assert attributes["card_key"] == store.DEVICE_SITUATION_ID
+    assert attributes["track_id"] == store.DEVICE_TRACK_ID
+    content_state = starts[0]["payload"]["aps"]["content-state"]
+    assert content_state["deep_link_card_key"] == "doorbell:person:trkA"
+
+
+@pytest.mark.asyncio
+async def test_token_post_with_sentinel_situation_id_keeps_activity_findable(
+    sidecar_db_path: Path,
+):
+    """Realistic full cycle: the app posts the token back with the SENTINEL
+    situation_id it read off `attributes.card_key` -- `find_activity` must
+    still find the row, the next mutation must send an UPDATE (not a second
+    start), and the device must be `covered` (card push demoted to passive).
+    """
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trkA", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    row = find_activity_row(conn, apns_token=device.apns_token)
+    store.attach_activity_token(
+        conn, activity_id=row["activity_id"], apns_token=device.apns_token,
+        situation_id=store.DEVICE_SITUATION_ID, track_id=store.DEVICE_TRACK_ID,
+        token="perActivity1",
+    )
+    conn.commit()
+
+    assert store.find_activity(conn, apns_token=device.apns_token) is not None
+
+    before_card_sends = len(card_sends(transport))
+    await handle_delivery_event(
+        make_event("doorbell", "trkA", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+    starts = [r for r in la_sends(transport) if r["event"] == "start"]
+    assert len(starts) == 1  # no duplicate start
+    updates = [r for r in la_sends(transport) if r["event"] == "update"]
+    assert len(updates) == 1
+
+    new_card_sends = card_sends(transport)[before_card_sends:]
+    assert new_card_sends
+    for s in new_card_sends:
+        assert s["payload"]["aps"]["interruption-level"] == "passive"
+
+
+@pytest.mark.asyncio
+async def test_token_post_with_real_card_key_does_not_clobber_sentinel(
+    sidecar_db_path: Path,
+):
+    """REGRESSION for the exact prod failure: a stale/mismatched client
+    posts the token with a REAL card key as `situation_id` (what the old
+    client did) instead of the sentinel. The row must stay findable by
+    `find_activity` (situation_id preserved as the sentinel, not
+    overwritten) and must NOT cause a duplicate start on the next mutation.
+    """
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trkA", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    row = find_activity_row(conn, apns_token=device.apns_token)
+    # Old/mismatched client: posts a real card key instead of the sentinel.
+    store.attach_activity_token(
+        conn, activity_id=row["activity_id"], apns_token=device.apns_token,
+        situation_id="doorbell:person:trkA", track_id="trkA",
+        token="perActivity1",
+    )
+    conn.commit()
+
+    stored = conn.execute(
+        "SELECT situation_id, track_id FROM push_activities WHERE activity_id = ?",
+        (row["activity_id"],),
+    ).fetchone()
+    assert stored["situation_id"] == store.DEVICE_SITUATION_ID
+    assert stored["track_id"] == store.DEVICE_TRACK_ID
+
+    assert store.find_activity(conn, apns_token=device.apns_token) is not None
+
+    await handle_delivery_event(
+        make_event("doorbell", "trkA", "person", zones=("pool",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=10.0,
+    )
+    starts = [r for r in la_sends(transport) if r["event"] == "start"]
+    assert len(starts) == 1  # still no duplicate start
+    updates = [r for r in la_sends(transport) if r["event"] == "update"]
+    assert len(updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_demo_row_insert_path_keeps_its_own_situation_id(sidecar_db_path: Path):
+    """The demo row path (INSERT, no existing row for that activity_id)
+    still stores whatever situation_id/track_id the app supplies, and stays
+    inert (never surfaced by `find_activity`)."""
+    conn = db.open_sidecar(sidecar_db_path)
+    device = make_device()
+
+    store.attach_activity_token(
+        conn, activity_id="demo-activity-2", apns_token=device.apns_token,
+        situation_id="demo:person:test-002", track_id="demo-test-002",
+        token="demoToken2",
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT * FROM push_activities WHERE activity_id = 'demo-activity-2'"
+    ).fetchone()
+    assert row["situation_id"] == "demo:person:test-002"
+    assert row["track_id"] == "demo-test-002"
+    assert row["token"] == "demoToken2"
+    assert store.find_activity(conn, apns_token=device.apns_token) is None
+
+
 def card_sends(transport: LogTransport) -> list[dict]:
     return [r for r in transport.sent if not r.get("live_activity") and not r.get("test")]
 
@@ -495,3 +636,154 @@ async def test_demo_row_never_updated_or_ended_by_delivery(sidecar_db_path: Path
         "SELECT * FROM push_activities WHERE activity_id = 'demo-activity-1'"
     ).fetchone()
     assert demo_row["ended_at"] is None  # untouched by the resolve/sweep path
+
+
+@pytest.mark.asyncio
+async def test_start_payload_attributes_card_key_is_sentinel(sidecar_db_path: Path):
+    """Regression test for the prod bug: `attributes.card_key` on the start
+    payload must be the device-scoped sentinel `store.DEVICE_SITUATION_ID`,
+    NOT the real card key -- the app echoes `attributes.cardKey` back as the
+    activity's `situation_id` when it posts its token, so if the start
+    payload disagreed with `open_activity`'s own sentinel row, the app's
+    token upload would silently retarget the row under a real card key and
+    `find_activity` (sentinel-scoped) would never see it again. The real
+    card key still routes deep-linking via content-state.
+    """
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trkA", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    starts = [r for r in la_sends(transport) if r["event"] == "start"]
+    assert len(starts) == 1
+    attributes = starts[0]["payload"]["aps"]["attributes"]
+    assert attributes["card_key"] == store.DEVICE_SITUATION_ID
+    content_state = starts[0]["payload"]["aps"]["content-state"]
+    assert content_state["deep_link_card_key"] == "doorbell:person:trkA"
+
+    row = find_activity_row(conn, apns_token=device.apns_token)
+    assert row["situation_id"] == store.DEVICE_SITUATION_ID
+
+
+@pytest.mark.asyncio
+async def test_full_cycle_token_posted_with_sentinel_situation_id(sidecar_db_path: Path):
+    """The realistic happy path: the app posts its token using the sentinel
+    `situation_id`/`track_id` straight off `attributes` (now correct, per
+    the fix above). `find_activity` must still find the row, the next
+    mutation must send an UPDATE (not a second start), and the device must
+    land in `covered` so the ordinary card push is demoted to passive.
+    """
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trkA", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    attach_token(
+        conn, device=device, card_key=store.DEVICE_SITUATION_ID,
+        track_id=store.DEVICE_TRACK_ID, token="perActivity1",
+    )
+
+    assert store.find_activity(conn, apns_token=device.apns_token) is not None
+
+    before_card_sends = len(card_sends(transport))
+    await handle_delivery_event(
+        make_event("doorbell", "trkB", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=20.0,
+    )
+
+    starts = [r for r in la_sends(transport) if r["event"] == "start"]
+    assert len(starts) == 1  # no duplicate start
+    updates = [r for r in la_sends(transport) if r["event"] == "update"]
+    assert len(updates) == 1
+
+    new_card_sends = card_sends(transport)[before_card_sends:]
+    assert new_card_sends
+    for s in new_card_sends:
+        assert s["payload"]["aps"]["interruption-level"] == "passive"
+
+
+@pytest.mark.asyncio
+async def test_regression_app_posts_token_with_real_card_key(sidecar_db_path: Path):
+    """Exact prod failure mode: a stale/mismatched client posts its token
+    with a REAL card key as `situation_id` instead of the sentinel. Per the
+    `attach_activity_token` fix, an UPSERT against an EXISTING row (the
+    sidecar's own) must leave `situation_id`/`track_id` untouched, so the row
+    stays findable under the sentinel and the next mutation is an UPDATE, not
+    a duplicate start.
+    """
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trkA", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    row = find_activity_row(conn, apns_token=device.apns_token)
+    assert row["situation_id"] == store.DEVICE_SITUATION_ID
+
+    # The mismatched/old client posts back a REAL card key, not the sentinel.
+    store.attach_activity_token(
+        conn, activity_id=row["activity_id"], apns_token=device.apns_token,
+        situation_id="doorbell:person:trkA", track_id="trkA", token="perActivity1",
+    )
+    conn.commit()
+
+    # The sentinel must have survived the upsert -- NOT clobbered.
+    row = find_activity_row(conn, apns_token=device.apns_token)
+    assert row["situation_id"] == store.DEVICE_SITUATION_ID
+    assert row["track_id"] == store.DEVICE_TRACK_ID
+    assert row["token"] == "perActivity1"
+
+    assert store.find_activity(conn, apns_token=device.apns_token) is not None
+
+    await handle_delivery_event(
+        make_event("doorbell", "trkB", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=20.0,
+    )
+
+    starts = [r for r in la_sends(transport) if r["event"] == "start"]
+    assert len(starts) == 1  # NOT a duplicate start
+    updates = [r for r in la_sends(transport) if r["event"] == "update"]
+    assert len(updates) == 1
+
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM push_activities WHERE apns_token = ? AND ended_at IS NULL",
+        (device.apns_token,),
+    ).fetchone()[0]
+    assert rows == 1  # still exactly one open row for this device
+
+
+@pytest.mark.asyncio
+async def test_demo_row_insert_keeps_app_supplied_situation_id(sidecar_db_path: Path):
+    """The INSERT branch (no existing row -- the app's debug demo activity,
+    which the sidecar never opened) must keep storing the app-supplied
+    `situation_id`/`track_id` exactly as before; only the UPDATE branch
+    protects the sidecar's own sentinel row."""
+    conn = db.open_sidecar(sidecar_db_path)
+    device = make_device()
+
+    store.attach_activity_token(
+        conn, activity_id="demo-activity-2", apns_token=device.apns_token,
+        situation_id="demo:person:test-002", track_id="demo-test-002",
+        token="demoToken2",
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT * FROM push_activities WHERE activity_id = 'demo-activity-2'"
+    ).fetchone()
+    assert row["situation_id"] == "demo:person:test-002"
+    assert row["track_id"] == "demo-test-002"
+    assert row["token"] == "demoToken2"
+    # Inert: never found as the device activity.
+    assert store.find_activity(conn, apns_token=device.apns_token) is None

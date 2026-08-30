@@ -454,13 +454,27 @@ def attach_activity_token(
     a token can arrive for an activity the sidecar started under a synthetic
     id, or (with push-to-start) for one it started without knowing the id iOS
     would assign.
+
+    On CONFLICT (a row already exists -- i.e. an activity the *sidecar*
+    started, keyed under its `DEVICE_SITUATION_ID`/`DEVICE_TRACK_ID`
+    sentinel) only `token`/`apns_token`/`last_seen_at` are updated:
+    `situation_id`/`track_id` are deliberately left alone. The app posts
+    back whatever `attributes.cardKey`/`trackId` it read off the activity --
+    for a device-scoped activity that's just the sentinel, echoed as-is, but
+    a stale/mismatched client can post a real card key instead, and
+    clobbering the sentinel with that would make `find_activity` (which
+    looks up by `DEVICE_SITUATION_ID`) unable to find the sidecar's own row
+    ever again, causing missed updates and a duplicate start on the next
+    mutation. On INSERT (no existing row -- e.g. the app's Settings -> "Try"
+    debug demo activity, which the sidecar never opened) there is nothing to
+    protect, so the app-supplied `situation_id`/`track_id` are stored as
+    given, exactly as before.
     """
     now = time.time() if now is None else now
     conn.execute(
         "INSERT INTO push_activities (activity_id, apns_token, situation_id, track_id, "
         " token, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(activity_id) DO UPDATE SET token=excluded.token, "
-        " situation_id=excluded.situation_id, track_id=excluded.track_id, "
         " apns_token=excluded.apns_token, last_seen_at=excluded.last_seen_at",
         (activity_id, apns_token, situation_id, track_id, token, now, now),
     )
