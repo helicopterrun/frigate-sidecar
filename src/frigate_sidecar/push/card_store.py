@@ -324,6 +324,55 @@ def find_open_card_for_track(
     return None
 
 
+def find_card_row_by_event_suffix(
+    conn: sqlite3.Connection, event_id: str
+) -> sqlite3.Row | None:
+    """The `push_cards` row whose `card_key` ends with `:{event_id}` --
+    `card_key` has no dedicated event-id column, so the id is recovered from
+    its position as the trailing `{camera}:{subject_kind}:{track_id}`
+    component (frigate's tracked-object id IS the event id).
+
+    Matched with `substr`/`length` rather than `LIKE`, so an event id
+    containing `%` or `_` (both LIKE wildcards) can never match the wrong
+    row -- the comparison is a literal suffix compare, not a pattern.
+    """
+    suffix = ":" + event_id
+    rows = conn.execute(
+        "SELECT * FROM push_cards WHERE substr(card_key, -length(?)) = ?",
+        (suffix, suffix),
+    ).fetchall()
+    if not rows:
+        return None
+    # Prefer the newest if more than one row's card_key happens to end with
+    # this exact suffix (shouldn't normally happen -- card_key is a primary
+    # key -- but track_id values are attacker/Frigate-controlled strings, so
+    # don't assume uniqueness of the suffix match itself).
+    return cast(sqlite3.Row, max(rows, key=lambda r: r["updated_at"]))
+
+
+def find_track_alias_card_key(conn: sqlite3.Connection, track_id: str) -> str | None:
+    """`push_card_track_aliases.card_key` for any row whose `track_id`
+    matches, regardless of camera -- the fallback path when no `push_cards`
+    row's key itself ends with this event id (the track merged into a card
+    under a different track's identity)."""
+    row = conn.execute(
+        "SELECT card_key FROM push_card_track_aliases WHERE track_id = ? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (track_id,),
+    ).fetchone()
+    return row["card_key"] if row is not None else None
+
+
+def get_card_row(conn: sqlite3.Connection, card_key: str) -> sqlite3.Row | None:
+    """Raw row for `card_key`, for callers (e.g. the card-for-event route)
+    that need columns `Card` itself doesn't carry (`camera`, `zones_csv`,
+    `label`, `family`, ...) instead of the `_row_to_card` projection."""
+    return cast(
+        "sqlite3.Row | None",
+        conn.execute("SELECT * FROM push_cards WHERE card_key = ?", (card_key,)).fetchone(),
+    )
+
+
 def get_track_alias(conn: sqlite3.Connection, camera: str, track_id: str) -> str | None:
     row = conn.execute(
         "SELECT card_key FROM push_card_track_aliases WHERE camera = ? AND track_id = ?",

@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from frigate_sidecar import db
-from frigate_sidecar.push import decision_trace, library, store
+from frigate_sidecar.push import card_store, decision_trace, library, store
 from frigate_sidecar.push.situations import Situation
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,7 @@ _ERR_TEST_SEND_FAILED = "test_send_failed"
 _ERR_SITUATION_NOT_FOUND = "situation_not_found"
 _ERR_THUMBNAIL_NOT_FOUND = "thumbnail_not_found"
 _ERR_BAD_SCOPE = "bad_scope"
+_ERR_CARD_NOT_FOUND = "card_not_found"
 
 
 class DeviceLocation(BaseModel):
@@ -610,6 +611,75 @@ async def redeem_handle(handle: str, request: Request) -> dict[str, Any]:
         "camera": data["camera"],
         "event_id": data["event_id"],
         "snapshot_url": f"/api/events/{data['event_id']}/snapshot.jpg",
+    }
+
+
+@router.get("/card-for-event/{event_id}")
+async def card_for_event(
+    event_id: Annotated[str, Path(min_length=1)], request: Request
+) -> dict[str, Any]:
+    """The persisted push-card outcome for a Frigate event id (the event
+    detail screen's "why did this alert me (or not)").
+
+    `push_cards.card_key` has no dedicated event-id column -- it's built as
+    `{camera}:{subject_kind}:{track_id}` and Frigate's tracked-object id IS
+    the event id (`push/delivery.py`'s `build_card_key`). Resolution order:
+    1. A `push_cards` row whose `card_key` ends with `:{event_id}` directly.
+    2. `push_card_track_aliases` keyed by `track_id = event_id`, for a track
+       that got folded into a card under a different track's identity
+       (cross-camera dedup / label-flip merges).
+    """
+    settings = request.app.state.settings
+
+    def _lookup(conn: Any) -> tuple[Any, str] | None:
+        row = card_store.find_card_row_by_event_suffix(conn, event_id)
+        if row is not None:
+            return row, "card_key"
+        alias_key = card_store.find_track_alias_card_key(conn, event_id)
+        if alias_key is not None:
+            aliased_row = card_store.get_card_row(conn, alias_key)
+            if aliased_row is not None:
+                return aliased_row, "alias"
+        return None
+
+    found = await db.with_sidecar(settings.sidecar.db_path, _lookup)
+    if found is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": _ERR_CARD_NOT_FOUND,
+                "message": "no push card found for that event id",
+            },
+        )
+    row, matched_via = found
+    zones_csv = row["zones_csv"] or ""
+    zones = [z for z in zones_csv.split(",") if z]
+
+    # Best-effort only (docstring on `decision_trace.reasons_for`): the ring
+    # buffer is in-memory and bounded, so this is commonly `[]` for anything
+    # but a very recent event -- the client must treat it as optional.
+    reasons = decision_trace.reasons_for(event_id)
+
+    return {
+        "card_key": row["card_key"],
+        "camera": row["camera"],
+        "subject_kind": row["subject_kind"],
+        "place_class": row["place_class"],
+        "label": row["label"],
+        "family": row["family"],
+        "level": row["level"],
+        "peak_level": row["peak_level"],
+        "zone_override_hit": bool(row["zone_override_hit"]),
+        "zone_name": row["zone_name"],
+        "zones": zones,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "state_since_at": row["state_since_at"],
+        "handled": bool(row["handled"]),
+        "resolved": bool(row["resolved"]),
+        "closed": bool(row["closed"]),
+        "matched_via": matched_via,
+        "reasons": reasons,
     }
 
 

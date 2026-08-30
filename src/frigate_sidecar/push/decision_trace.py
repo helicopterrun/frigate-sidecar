@@ -76,6 +76,20 @@ def annotate(
                 return
 
 
+def reasons_for(event_id: str) -> list[str]:
+    """Best-effort `reasons` for the newest buffered entry matching
+    `event_id`, or `[]` when it has already rotated out of the bounded ring
+    (or was never recorded). Volatile by construction -- callers (e.g. the
+    card-for-event route) must treat this as optional context, never as a
+    durable record."""
+    with _lock:
+        for entry in reversed(_buffer):
+            if entry["event_id"] == event_id:
+                reasons = entry.get("reasons") or []
+                return list(reasons)
+    return []
+
+
 def recent(limit: int = 50) -> list[dict[str, Any]]:
     """Return up to `limit` most recent entries, newest first."""
     limit = max(1, min(limit, _SERVE_CAP))
