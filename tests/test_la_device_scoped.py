@@ -14,7 +14,11 @@ import pytest
 from frigate_sidecar import db
 from frigate_sidecar.config import PushSection
 from frigate_sidecar.push import store
-from frigate_sidecar.push.delivery_wire import handle_delivery_event, handle_delivery_resolve
+from frigate_sidecar.push.delivery_wire import (
+    end_activity_if_card_closed,
+    handle_delivery_event,
+    handle_delivery_resolve,
+)
 from frigate_sidecar.push.engine import PushEngine
 from frigate_sidecar.push.transport import LogTransport
 from tests.test_push_live_activities_wire import (
@@ -25,6 +29,23 @@ from tests.test_push_live_activities_wire import (
     make_device,
     make_event,
 )
+
+
+def _open_demo_activity(conn, *, device) -> None:
+    """Simulate the app's Settings -> "Try" debug demo activity: a row the
+    app uploads via `attach_activity_token` with its own real situation/track
+    id, distinct from the sidecar's `store.DEVICE_SITUATION_ID` sentinel."""
+    store.open_activity(
+        conn, activity_id="demo-activity-1", apns_token=device.apns_token,
+        situation_id="demo:person:test-001", track_id="demo-test-001",
+        camera="", collapse_id="demo:person:test-001", handle="",
+    )
+    store.attach_activity_token(
+        conn, activity_id="demo-activity-1", apns_token=device.apns_token,
+        situation_id="demo:person:test-001", track_id="demo-test-001",
+        token="demoPerActivityToken",
+    )
+    conn.commit()
 
 #: Mirrors `test_push_delivery_wire.EXTERNAL_BASE_URL` -- needed alongside a
 #: real `PushEngine` to actually mint a `media_handle` (`_media_for` mints
@@ -376,3 +397,101 @@ async def test_la_first_demotion_covers_all_stories(sidecar_db_path: Path):
         conn=conn, devices=[device], transport=transport, config=config, now=40.0,
     )
     _assert_all_passive(card_sends(transport)[before:])
+
+
+@pytest.mark.asyncio
+async def test_demo_row_not_found_as_device_activity(sidecar_db_path: Path):
+    """The app's debug demo activity (Settings -> "Try") is a real row in
+    `push_activities`, but it isn't the sidecar's device activity: it must
+    never come back from `find_activity`/`find_dismissed_activity`."""
+    conn = db.open_sidecar(sidecar_db_path)
+    device = make_device()
+    _open_demo_activity(conn, device=device)
+
+    assert store.find_activity(conn, apns_token=device.apns_token) is None
+
+    store.dismiss_activity(conn, "demo-activity-1")
+    assert store.find_dismissed_activity(conn, apns_token=device.apns_token) is None
+
+
+@pytest.mark.asyncio
+async def test_deferred_end_sends_nothing_with_only_demo_row_open(sidecar_db_path: Path):
+    """With only a demo row open (no device activity), the deferred-end path
+    must find nothing to end and must not send anything at it."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    _open_demo_activity(conn, device=device)
+
+    ended = await end_activity_if_card_closed(
+        conn, device, transport, token="demoPerActivityToken", now=1.0,
+    )
+    assert ended is False
+    assert la_sends(transport) == []
+
+    row = find_activity_row(conn, apns_token=device.apns_token)
+    assert row is not None
+    assert row["ended_at"] is None  # the demo row was left completely alone
+
+
+@pytest.mark.asyncio
+async def test_create_starts_genuine_activity_despite_open_demo_row(sidecar_db_path: Path):
+    """A real CREATE mutation must start a genuine device activity rather
+    than treating the open demo row as "the device activity" and routing an
+    update to it instead."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+    _open_demo_activity(conn, device=device)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trkA", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+
+    starts = [r for r in la_sends(transport) if r["event"] == "start"]
+    assert len(starts) == 1  # a genuine start, not a demo-row update
+
+    rows = conn.execute(
+        "SELECT situation_id FROM push_activities WHERE apns_token = ? AND ended_at IS NULL",
+        (device.apns_token,),
+    ).fetchall()
+    situation_ids = {r["situation_id"] for r in rows}
+    assert situation_ids == {store.DEVICE_SITUATION_ID, "demo:person:test-001"}
+
+
+@pytest.mark.asyncio
+async def test_demo_row_never_updated_or_ended_by_delivery(sidecar_db_path: Path):
+    """Once a genuine device activity exists alongside the demo row, further
+    delivery traffic (update, resolve) must only ever touch the device row --
+    the demo row's own token must never appear as an update/end target."""
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    config = PushSection(delivery_enabled=True)
+    _open_demo_activity(conn, device=device)
+
+    await handle_delivery_event(
+        make_event("doorbell", "trkA", "person", zones=("front_door",)),
+        conn=conn, devices=[device], transport=transport, config=config, now=0.0,
+    )
+    attach_token(conn, device=device, card_key="doorbell:person:trkA", track_id="trkA",
+                 token="perActivity1")
+
+    await handle_delivery_resolve(
+        "doorbell", "trkA", conn=conn, devices=[device], transport=transport,
+        config=config, subject_kind="person", now=5.0,
+    )
+
+    demo_targets = [
+        r for r in la_sends(transport)
+        if r["token"] == "demoPerActivityToken"
+        or r.get("collapse_id") == "demo:person:test-001"
+    ]
+    assert demo_targets == []
+
+    demo_row = conn.execute(
+        "SELECT * FROM push_activities WHERE activity_id = 'demo-activity-1'"
+    ).fetchone()
+    assert demo_row["ended_at"] is None  # untouched by the resolve/sweep path

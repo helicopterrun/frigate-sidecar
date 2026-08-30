@@ -33,6 +33,18 @@ from frigate_sidecar.push.models import Device
 logger = logging.getLogger(__name__)
 
 
+def _exc_error(exc: BaseException) -> str:
+    """A `TransportResult.error` string that is never empty.
+
+    `str(exc)` is blank for some httpx exceptions (e.g. certain
+    `ConnectError`/`ReadTimeout` instances carry no message), which produced
+    logs like `ok=False error=` with nothing to diagnose. Falling back to the
+    exception's class name keeps `error` diagnostic even then.
+    """
+    text = str(exc)
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 @dataclass
 class TransportResult:
     ok: bool
@@ -315,7 +327,7 @@ class RelayTransport:
         try:
             resp = await self._client.post(url, json=payload, headers=self._headers())
         except httpx.HTTPError as exc:
-            return TransportResult(ok=False, error=str(exc))
+            return TransportResult(ok=False, error=_exc_error(exc))
 
         return self._result(resp)
 
@@ -338,7 +350,7 @@ class RelayTransport:
         try:
             resp = await self._client.post(url, json=body, headers=self._headers())
         except httpx.HTTPError as exc:
-            return TransportResult(ok=False, error=str(exc))
+            return TransportResult(ok=False, error=_exc_error(exc))
         return self._result(resp)
 
     async def send_live_activity(
@@ -364,7 +376,7 @@ class RelayTransport:
         try:
             resp = await self._client.post(url, json=body, headers=self._headers())
         except httpx.HTTPError as exc:
-            return TransportResult(ok=False, error=str(exc))
+            return TransportResult(ok=False, error=_exc_error(exc))
         return self._result(resp)
 
     async def send_test(self, device: Device) -> TransportResult:
@@ -388,7 +400,7 @@ class RelayTransport:
         try:
             resp = await self._client.post(url, json=payload, headers=self._headers())
         except httpx.HTTPError as exc:
-            return TransportResult(ok=False, error=str(exc))
+            return TransportResult(ok=False, error=_exc_error(exc))
         return self._result(resp)
 
     @staticmethod

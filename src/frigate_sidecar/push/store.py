@@ -395,6 +395,17 @@ def prune_old_sends(
 
 # -- Live Activities (Phase 2) ----------------------------------------------
 
+#: Sentinel (device-scoped) identity the sidecar itself writes for the one
+#: Live Activity per device it manages (Elsinore Phase 4). Any other row --
+#: notably the app's Settings -> "Try" debug demo activity, whose upload goes
+#: through `attach_activity_token` with its own real `situation_id`/
+#: `track_id` -- is not owned by the sidecar's lifecycle: it must never be
+#: returned as "the device activity", ended, or updated by the delivery/
+#: engine code. `delivery_wire.py` imports these rather than redefining them
+#: so the two modules can't drift.
+DEVICE_SITUATION_ID = "device:elsinore"
+DEVICE_TRACK_ID = "device"
+
 
 def open_activity(
     conn: sqlite3.Connection,
@@ -459,17 +470,18 @@ def find_activity(conn: sqlite3.Connection, *, apns_token: str) -> sqlite3.Row |
     """The single open live activity for this device, if any.
 
     Device-scoped (Elsinore Phase 4): one Live Activity per device now
-    aggregates every open card, so lookup keys on `apns_token` alone --
-    `situation_id`/`track_id` are no longer part of the identity (the app
-    posts a sentinel `"device:elsinore"` / `"device"` for both, which this
-    query never needs to inspect).
+    aggregates every open card, so lookup keys on `apns_token` plus the
+    sidecar's own `DEVICE_SITUATION_ID` sentinel -- any other row (e.g. the
+    app's debug demo activity, uploaded via `attach_activity_token` with its
+    own real situation/track id) is not the device activity and must never
+    be returned here.
     """
     return cast(
         "sqlite3.Row | None",
         conn.execute(
-            "SELECT * FROM push_activities WHERE apns_token = ? "
+            "SELECT * FROM push_activities WHERE apns_token = ? AND situation_id = ? "
             "AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1",
-            (apns_token,),
+            (apns_token, DEVICE_SITUATION_ID),
         ).fetchone(),
     )
 
@@ -565,14 +577,16 @@ def find_dismissed_activity(
     `dismiss_activity`: an ended, `stage='dismissed'` row for this device,
     which suppresses a future re-start (including a brand-new story joining)
     until an ESCALATE clears it, or the device's last open story closes
-    clears it (device-scoped quiet period, Elsinore Phase 4 §4)."""
+    clears it (device-scoped quiet period, Elsinore Phase 4 §4). Scoped to
+    `DEVICE_SITUATION_ID` for the same reason as `find_activity`: a demo row
+    is never a real-story tombstone."""
     return cast(
         "sqlite3.Row | None",
         conn.execute(
-            "SELECT * FROM push_activities WHERE apns_token = ? "
+            "SELECT * FROM push_activities WHERE apns_token = ? AND situation_id = ? "
             "AND ended_at IS NOT NULL AND stage = 'dismissed' "
             "ORDER BY created_at DESC LIMIT 1",
-            (apns_token,),
+            (apns_token, DEVICE_SITUATION_ID),
         ).fetchone(),
     )
 
@@ -585,11 +599,19 @@ def stale_activities(
     This is resolution: the object stopped being reported, so the situation is
     over. Frigate's own `end` message is the faster signal and the engine acts
     on it directly; this catches the case where it never arrives.
+
+    Scoped to `DEVICE_SITUATION_ID`: the sweeper sends an `end` push for
+    every row it returns, and a demo row (Settings -> "Try") must never be
+    sent anything by the sidecar's lifecycle code. A quiet demo row isn't
+    "stale" in any sense this sweep cares about -- it just sits there until
+    the app itself ends it -- so excluding it here is the semantically
+    correct behavior, not just a safety filter.
     """
     now = time.time() if now is None else now
     return conn.execute(
-        "SELECT * FROM push_activities WHERE ended_at IS NULL AND last_seen_at <= ?",
-        (now - quiet_for,),
+        "SELECT * FROM push_activities WHERE ended_at IS NULL AND situation_id = ? "
+        "AND last_seen_at <= ?",
+        (DEVICE_SITUATION_ID, now - quiet_for),
     ).fetchall()
 
 

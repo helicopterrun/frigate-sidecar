@@ -729,8 +729,8 @@ async def test_la_push_to_start_persists_across_mutations(tmp_path):
     assert activity_row is not None, "activity row must survive conn1.close()"
     store.attach_activity_token(
         conn_attach, activity_id=activity_row["activity_id"],
-        apns_token=dev.apns_token, situation_id="doorbell:person:trk1",
-        track_id="trk1", token="per-activity-tok",
+        apns_token=dev.apns_token, situation_id=store.DEVICE_SITUATION_ID,
+        track_id=store.DEVICE_TRACK_ID, token="per-activity-tok",
     )
     conn_attach.commit()
     conn_attach.close()

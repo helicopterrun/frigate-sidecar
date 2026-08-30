@@ -1171,13 +1171,17 @@ async def test_dismissal_tombstone_suppresses_create_and_undemotes_card_push(
     device = make_device(token="tokDismiss1")
     config = PushSection(delivery_enabled=True)
     track_id = "trkDismiss1"
-    card_key = f"doorbell:person:{track_id}"
+    _card_key = f"doorbell:person:{track_id}"
 
     # Simulate an earlier activity for this exact key that the user dismissed.
+    # Device-scoped tombstones are written under the sidecar's own
+    # `DEVICE_SITUATION_ID` sentinel (what `open_activity` always uses in
+    # production), not the card's key.
     tombstone_id = "a_tombstone1"
     store.open_activity(
-        conn, activity_id=tombstone_id, apns_token=device.apns_token, situation_id=card_key,
-        track_id=track_id, camera="doorbell", collapse_id=card_key, handle="", now=-100.0,
+        conn, activity_id=tombstone_id, apns_token=device.apns_token,
+        situation_id=store.DEVICE_SITUATION_ID, track_id=store.DEVICE_TRACK_ID,
+        camera="doorbell", collapse_id=store.DEVICE_SITUATION_ID, handle="", now=-100.0,
     )
     store.dismiss_activity(conn, tombstone_id, now=-50.0)
 
@@ -1190,7 +1194,7 @@ async def test_dismissal_tombstone_suppresses_create_and_undemotes_card_push(
     rows = conn.execute(
         "SELECT * FROM push_activities WHERE apns_token = ? AND situation_id = ? "
         "AND track_id = ?",
-        (device.apns_token, card_key, track_id),
+        (device.apns_token, store.DEVICE_SITUATION_ID, store.DEVICE_TRACK_ID),
     ).fetchall()
     assert [r["activity_id"] for r in rows] == [tombstone_id]
 
@@ -1220,12 +1224,13 @@ async def test_escalate_clears_tombstone_and_starts_a_new_activity(sidecar_db_pa
     device = make_device(token="tokEscTomb1")
     config = PushSection(delivery_enabled=True)
     track_id = "trkEscTomb1"
-    card_key = f"doorbell:person:{track_id}"
+    _card_key = f"doorbell:person:{track_id}"
 
     tombstone_id = "a_tombstone2"
     store.open_activity(
-        conn, activity_id=tombstone_id, apns_token=device.apns_token, situation_id=card_key,
-        track_id=track_id, camera="doorbell", collapse_id=card_key, handle="", now=-100.0,
+        conn, activity_id=tombstone_id, apns_token=device.apns_token,
+        situation_id=store.DEVICE_SITUATION_ID, track_id=store.DEVICE_TRACK_ID,
+        camera="doorbell", collapse_id=store.DEVICE_SITUATION_ID, handle="", now=-100.0,
     )
     store.dismiss_activity(conn, tombstone_id, now=-50.0)
 

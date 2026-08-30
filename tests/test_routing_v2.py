@@ -221,8 +221,8 @@ async def test_recognition_la_update_no_alert(sidecar_db_path: Path):
     assert row is not None, f"no activity row for {card_key}"
     store.attach_activity_token(
         conn, activity_id=row["activity_id"],
-        apns_token=device.apns_token, situation_id=card_key,
-        track_id="trk1", token="perAct1",
+        apns_token=device.apns_token, situation_id=store.DEVICE_SITUATION_ID,
+        track_id=store.DEVICE_TRACK_ID, token="perAct1",
     )
 
     transport2 = LogTransport()

@@ -102,9 +102,12 @@ _la_prev_state: dict[str, dict[str, Any]] = {}
 
 #: Sentinel (device-scoped) identity the app posts as `situationId`/`trackId`
 #: for the one Live Activity per device now runs, and the row's own
-#: `collapse_id` -- see `_deliver_live_activities`'s docstring.
-_DEVICE_SITUATION_ID = "device:elsinore"
-_DEVICE_TRACK_ID = "device"
+#: `collapse_id` -- see `_deliver_live_activities`'s docstring. Defined in
+#: `store.py` (which `find_activity`/`find_dismissed_activity`/
+#: `stale_activities` filter on) so this module and the store can't drift;
+#: re-exported under the historical private names used throughout this file.
+_DEVICE_SITUATION_ID = store.DEVICE_SITUATION_ID
+_DEVICE_TRACK_ID = store.DEVICE_TRACK_ID
 
 #: Frigate labels this MVP treats as an animal subject, beyond the
 #: dangerous-animal labels `ladder.py` already reclassifies via `label`
