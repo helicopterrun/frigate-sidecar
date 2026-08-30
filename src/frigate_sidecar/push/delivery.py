@@ -347,6 +347,8 @@ async def send_card_mutation(
     zone_name: str = "",
     labels: tuple[str, ...] = (),
     zones: tuple[str, ...] = (),
+    label: str = "",
+    family: str = "",
     now: float | None = None,
     demote_tokens: frozenset[str] | set[str] = frozenset(),
     suppress_demoted: bool = False,
@@ -355,9 +357,19 @@ async def send_card_mutation(
     filtering, snooze, quiet resolves, and the global sounding rate cap.
 
     `demote_tokens`: apns tokens whose own Live Activity demonstrably covers
-    this mutation -- their card push is demoted to passive/silent, while
-    devices without a working LA keep the full alerting card. Per-device on
-    purpose: one device's confirmed LA must not silence another's banner."""
+    this mutation -- their card push is demoted to passive/silent (sound
+    dropped, `interruption-level: passive`), while devices without a working
+    LA keep the full alerting card. `mutable-content` and the card's
+    `apns-collapse-id` are unchanged, so the app's Notification Service
+    Extension still runs and history collapses to one row. Per-device on
+    purpose: one device's confirmed LA must not silence another's banner.
+
+    `suppress_demoted`: la_first-only. RESOLVE for a demoted device is held
+    until just after the LA's own dismissal window (`_schedule_deferred_resolve`)
+    so the durable history row doesn't land on top of the still-visible LA.
+    Non-RESOLVE mutations for demoted devices always deliver passive --
+    la_first and la_only behave identically there; the NSE must fire to
+    pre-warm snapshots for the Live Activity."""
     import time as _time
 
     from frigate_sidecar.push import store
@@ -365,7 +377,7 @@ async def send_card_mutation(
     now = _time.time() if now is None else now
     card_store.upsert_card(
         conn, card, subject_kind=subject_kind, place_class=place_class,
-        camera=camera, zone_name=zone_name, zones=zones,
+        camera=camera, zone_name=zone_name, zones=zones, label=label, family=family,
     )
     if payload is None:
         return 0
@@ -411,16 +423,6 @@ async def send_card_mutation(
                 transport, device, payload=payload,
                 collapse_id=card.card_key, delay_s=RESOLVE_DEFER_S,
             )
-            continue
-        if demoted and suppress_demoted and mutation != RESOLVE:
-            # LA-first only (`suppress_demoted`): while a Live Activity
-            # demonstrably covers this device, the story sends NO card
-            # pushes at all — a passive row updating alongside the LA read
-            # as duplicate noise (user feedback 2026-08-14). The RESOLVE
-            # push is the one durable Notification Center record, written
-            # when the story ends; escalations reach the user through the
-            # LA's own alert. `la_only` keeps its passive rows — its
-            # contract is "silently to Notification Center", not silence.
             continue
         if demoted:
             dev_payload = dict(payload)

@@ -739,15 +739,23 @@ async def dry_run_scenario(
                 step_decision["category"] = p.get("aps", {}).get("category", "")
                 if p.get("aps", {}).get("sound"):
                     step_decision["sound_name"] = p["aps"]["sound"]
+                if la_sends and step_decision["interruption_level"] == "passive":
+                    # la_first (and la_only) demote the card push to passive
+                    # while an LA covers the device -- it still delivers (the
+                    # NSE must still run to pre-warm snapshots), just without
+                    # sound/banner, so flag it rather than reading as a full
+                    # alert.
+                    step_decision["card"] = "demoted (LA covers)"
             elif la_sends:
-                # la_first suppresses card pushes while an LA covers the
-                # device — the routing decision still happened, so read
-                # mutation/level from the LA's content-state instead of
-                # reporting a misleading "(no push)".
+                # The card push genuinely didn't send this step (e.g. a
+                # quiet-peak resolve, or a resolve held for the LA's
+                # dismissal window) -- read mutation/level from the LA's
+                # content-state instead of reporting a misleading
+                # "(no push)".
                 state = la_sends[0].get("payload", {}).get("aps", {}).get("content-state", {})
                 step_decision["mutation"] = state.get("mutation", "")
                 step_decision["level"] = state.get("level", "")
-                step_decision["card"] = "suppressed (LA covers)"
+                step_decision["card"] = "no card send (LA covers)"
             else:
                 step_decision["mutation"] = "(no push)"
 

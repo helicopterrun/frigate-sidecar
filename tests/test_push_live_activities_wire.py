@@ -56,22 +56,25 @@ def la_sends(transport: LogTransport) -> list[dict]:
     return [r for r in transport.sent if r.get("live_activity")]
 
 
-def find_activity_row(conn, *, apns_token: str, card_key: str, track_id: str):
+def find_activity_row(conn, *, apns_token: str, card_key: str = "", track_id: str = ""):
+    """The single open device-scoped live activity row for this device.
+
+    Device-scoped (Elsinore Phase 4): one Live Activity per device, keyed on
+    `apns_token` alone. `card_key`/`track_id` are accepted (and ignored) for
+    call-site compatibility with earlier per-card lookups.
+    """
     return conn.execute(
-        "SELECT * FROM push_activities WHERE apns_token = ? AND situation_id = ? "
-        "AND track_id = ?",
-        (apns_token, card_key, track_id),
+        "SELECT * FROM push_activities WHERE apns_token = ?",
+        (apns_token,),
     ).fetchone()
 
 
 def attach_token(conn, *, device: Device, card_key: str, track_id: str, token: str) -> None:
-    row = find_activity_row(
-        conn, apns_token=device.apns_token, card_key=card_key, track_id=track_id,
-    )
+    row = find_activity_row(conn, apns_token=device.apns_token)
     assert row is not None
     store.attach_activity_token(
         conn, activity_id=row["activity_id"], apns_token=device.apns_token,
-        situation_id=card_key, track_id=track_id, token=token,
+        situation_id=row["situation_id"], track_id=row["track_id"], token=token,
     )
 
 
@@ -229,7 +232,9 @@ async def test_late_per_activity_token_drops_update_until_it_arrives(sidecar_db_
     )
     sends = la_sends(transport)
     assert len(sends) == 2
-    assert sends[1]["event"] == "update"
+    # Moving to "porch" drops the package card to "log" (below LA
+    # eligibility), so the aggregate activity ends rather than updating.
+    assert sends[1]["event"] == "end"
     assert sends[1]["token"] == "late-token"
 
 
@@ -356,10 +361,11 @@ def card_sends(transport: LogTransport) -> list[dict]:
 
 @pytest.mark.asyncio
 async def test_card_push_suppressed_while_la_confirmed(sidecar_db_path: Path):
-    """la_first: once the LA demonstrably exists, the story sends NO card
-    pushes to that device at all — a passive row updating alongside the LA
-    was duplicate noise (2026-08-14). The resolve push (elsewhere) is the
-    one durable Notification Center record."""
+    """la_first: once the LA demonstrably exists, the story's card pushes to
+    that device still go out, but demoted to passive (no sound, no banner) —
+    the NSE must still run on each one to pre-warm snapshots for the LA, and
+    the collapsed row is what the resolve push (elsewhere) eventually
+    replaces with the durable Notification Center record."""
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device()
@@ -367,18 +373,24 @@ async def test_card_push_suppressed_while_la_confirmed(sidecar_db_path: Path):
     card_key = "doorbell:person:trk1"
 
     # create: person at front_door -> notify; LA start accepted by the mock
-    # transport, so the create card push is suppressed entirely.
+    # transport, so the create card push delivers passive.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     assert la_sends(transport)[0]["event"] == "start"
-    assert card_sends(transport) == []
+    create_card = card_sends(transport)[0]
+    create_aps = create_card["payload"]["aps"]
+    assert create_aps["interruption-level"] == "passive"
+    assert not create_aps.get("sound")
+    assert create_aps["mutable-content"] == 1
+    create_collapse_id = create_card["collapse_id"]
 
     attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perActivity1")
 
     # escalate: person moves to pool (off_limits -> urgent). LA update lands
-    # on the confirmed token and carries the escalation alert; still no card.
+    # on the confirmed token and carries the escalation alert; the card push
+    # still delivers, still passive, same collapse id.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
@@ -386,7 +398,13 @@ async def test_card_push_suppressed_while_la_confirmed(sidecar_db_path: Path):
     last_la = la_sends(transport)[-1]
     assert last_la["event"] == "update"
     assert last_la["payload"]["aps"].get("alert") is not None
-    assert card_sends(transport) == []
+    esc_cards = [c for c in card_sends(transport) if c["payload"]["mutation"] == "escalate"]
+    assert len(esc_cards) == 1
+    esc_aps = esc_cards[0]["payload"]["aps"]
+    assert esc_aps["interruption-level"] == "passive"
+    assert not esc_aps.get("sound")
+    assert esc_aps["mutable-content"] == 1
+    assert esc_cards[0]["collapse_id"] == create_collapse_id
 
 
 @pytest.mark.asyncio
@@ -485,11 +503,13 @@ async def test_deferred_end_when_token_arrives_after_resolve(sidecar_db_path: Pa
     row = find_activity_row(
         conn, apns_token=device.apns_token, card_key=card_key, track_id="trk1",
     )
-    assert row["ended_at"] is None and row["stage"] == "pending_end"
+    # Device-scoped (Elsinore Phase 4): no per-card "pending_end" stage
+    # bookkeeping anymore -- the row is simply left open until the
+    # per-activity token lands.
+    assert row["ended_at"] is None
 
     ended = await end_activity_if_card_closed(
-        conn, device, transport, card_key=card_key, track_id="trk1",
-        token="lateToken", now=6.0,
+        conn, device, transport, token="lateToken", now=6.0,
     )
     assert ended is True
     end = la_sends(transport)[-1]
@@ -713,9 +733,12 @@ async def test_multi_device_demotion_is_per_device(sidecar_db_path: Path):
     assert [r["device_id"] for r in starts] == ["d_tokA"]
 
     cards = {r["device_id"]: r for r in card_sends(transport)}
-    # A: suppressed entirely — its LA start was APNs-accepted (la_first).
+    # A: demoted to passive — its LA start was APNs-accepted (la_first).
     # B: full alerting card — no LA covers it.
-    assert set(cards) == {"d_tokB"}
+    assert set(cards) == {"d_tokA", "d_tokB"}
+    assert cards["d_tokA"]["payload"]["aps"]["interruption-level"] == "passive"
+    assert not cards["d_tokA"]["payload"]["aps"].get("sound")
+    assert cards["d_tokA"]["payload"]["aps"]["mutable-content"] == 1
     assert cards["d_tokB"]["payload"]["aps"]["interruption-level"] == "active"
     assert cards["d_tokB"]["payload"]["aps"].get("sound")
 
@@ -755,11 +778,14 @@ async def test_urgent_escalation_late_starts_la_with_sound(sidecar_db_path: Path
     )
     start = [s for s in la_sends(transport) if s["event"] == "start"][-1]
     assert start["payload"]["aps"]["alert"]["sound"] == "urgent.caf"
-    # Card push stays demoted — the LA carries the sound now.
-    # The card push is suppressed entirely — the LA is the only surface;
-    # only the pre-LA quiet create ever produced a card send.
+    # Card push stays demoted to passive — the LA carries the sound/alert;
+    # the card still delivers (NSE must still run to pre-warm snapshots).
     esc_cards = [c for c in card_sends(transport) if c["payload"]["mutation"] == "escalate"]
-    assert esc_cards == []
+    assert len(esc_cards) == 1
+    esc_aps = esc_cards[0]["payload"]["aps"]
+    assert esc_aps["interruption-level"] == "passive"
+    assert not esc_aps.get("sound")
+    assert esc_aps["mutable-content"] == 1
 
 
 @pytest.mark.asyncio
@@ -846,7 +872,13 @@ async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: P
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=30.0,
     )
-    reesc = [s for s in la_sends(transport) if s["event"] == "update"][-1]
+    # The deescalate to front_door dropped below LA eligibility (device-scoped
+    # "quiet" is off the floor), so the activity ended in between -- the
+    # re-escalation is a fresh "start", not an "update". The sound budget is
+    # per-card and survives the activity churn, so it still carries an alert
+    # without a sound.
+    reesc = la_sends(transport)[-1]
+    assert reesc["event"] == "start"
     assert reesc["payload"]["aps"].get("alert") is not None
     assert "sound" not in reesc["payload"]["aps"].get("alert", {})
 
@@ -1197,14 +1229,16 @@ async def test_escalate_clears_tombstone_and_starts_a_new_activity(sidecar_db_pa
     )
     store.dismiss_activity(conn, tombstone_id, now=-50.0)
 
-    # Create at quiet (custom table): no LA -- the tombstone is untouched by
-    # a mutation the code never reaches the tombstone check for.
+    # Create at quiet (custom table): no LA. Device-scoped (Elsinore Phase
+    # 4): the tombstone check now runs per-device on every mutation, and a
+    # quiet-only create has no eligible open story -- "clean slate" clears
+    # the tombstone here already, rather than surviving to the escalate.
     await handle_delivery_event(
         make_event("doorbell", track_id, "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     assert la_sends(transport) == []
-    assert store.get_activity(conn, tombstone_id) is not None
+    assert store.get_activity(conn, tombstone_id) is None
 
     # Escalate to urgent (pool = off_limits): tombstone is cleared, LA starts.
     await handle_delivery_event(
@@ -1214,9 +1248,7 @@ async def test_escalate_clears_tombstone_and_starts_a_new_activity(sidecar_db_pa
     starts = [s for s in la_sends(transport) if s["event"] == "start"]
     assert len(starts) == 1
     assert store.get_activity(conn, tombstone_id) is None
-    assert store.find_dismissed_activity(
-        conn, apns_token=device.apns_token, situation_id=card_key, track_id=track_id,
-    ) is None
+    assert store.find_dismissed_activity(conn, apns_token=device.apns_token) is None
 
 
 
@@ -1266,7 +1298,12 @@ async def test_escalation_bypasses_min_interval_throttle(sidecar_db_path: Path):
     assert len(updates) == 1, "throttled escalate update must still bypass min_interval"
     assert "alert" in updates[0]["payload"]["aps"]
 
-    # The card is demoted for this device -- the LA update it just received
-    # is what covers it (only confirmed sends demote_tokens per §1).
+    # The card is demoted to passive for this device -- the LA update it
+    # just received is what covers it (only confirmed sends demote_tokens
+    # per §1) -- but it still delivers so the NSE still runs.
     esc_cards = [c for c in card_sends(transport) if c["payload"]["mutation"] == "escalate"]
-    assert esc_cards == []
+    assert len(esc_cards) == 1
+    esc_aps = esc_cards[0]["payload"]["aps"]
+    assert esc_aps["interruption-level"] == "passive"
+    assert not esc_aps.get("sound")
+    assert esc_aps["mutable-content"] == 1

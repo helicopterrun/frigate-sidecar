@@ -287,7 +287,21 @@ CREATE TABLE IF NOT EXISTS push_cards (
     -- lifetime. Read back at resolve time (delivery.py's
     -- `send_card_mutation`) to decide whether the final resolve push is
     -- worth keeping around (`ephemeral: false`) vs. safe to mark ephemeral.
-    zone_override_hit INTEGER NOT NULL DEFAULT 0
+    zone_override_hit INTEGER NOT NULL DEFAULT 0,
+    -- Raw Frigate label (e.g. "person"/"car") and the LA family this card's
+    -- last mutation classified into (empty = none). Device-scoped Live
+    -- Activities (Elsinore Phase 4 aggregation) need both to re-derive
+    -- eligibility/curated-family membership for *other* open cards it isn't
+    -- currently mutating, without re-running the full ladder/opening-picks
+    -- logic against stale context.
+    label         TEXT NOT NULL DEFAULT '',
+    family        TEXT NOT NULL DEFAULT '',
+    -- Sticky media handle (delivery_wire.py's `_media_for`) for this card's
+    -- most recently minted thumbnail. Only CREATE/ENRICH mutations mint a
+    -- fresh handle; ESCALATE/RESOLVE mint none, so the content-state builder
+    -- falls back to this persisted value instead of losing the thumbnail
+    -- mid-story. '' means "no media ever minted" -- treated as absent.
+    media_handle  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_push_cards_open
     ON push_cards(closed, level, last_sound_at);
@@ -432,6 +446,15 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # Sticky "did a zone override ever fire for this story" flag, read
         # back at resolve time to decide the `ephemeral` payload field.
         ("zone_override_hit", "INTEGER NOT NULL DEFAULT 0"),
+        # Device-scoped Live Activities aggregation (2026-08-29): raw label
+        # and classified LA family, so the device-wide aggregate can
+        # re-derive eligibility for open cards it isn't currently mutating.
+        ("label", "TEXT NOT NULL DEFAULT ''"),
+        ("family", "TEXT NOT NULL DEFAULT ''"),
+        # Sticky thumbnail handle (2026-08-29): persisted so an ESCALATE/
+        # RESOLVE mutation (which mints no fresh media) can still surface the
+        # card's last-known thumbnail instead of blanking it in the widget.
+        ("media_handle", "TEXT NOT NULL DEFAULT ''"),
     ],
     "push_devices": [
         # v2 registration shape (notification-experience plan §8). Everything

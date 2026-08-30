@@ -519,8 +519,7 @@ async def upload_activity_token(
         conn = db.open_sidecar(settings.sidecar.db_path)
         try:
             await end_activity_if_card_closed(
-                conn, device, engine.transport,
-                card_key=body.situation_id, track_id=body.track_id, token=body.token,
+                conn, device, engine.transport, token=body.token,
             )
             conn.commit()
         finally:

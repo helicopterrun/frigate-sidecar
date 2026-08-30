@@ -257,10 +257,20 @@ def build_content_state(
     motion: dict[str, Any] | None = None,
     zones: dict[str, Any] | None = None,
     path: dict[str, Any] | None = None,
+    extra_stories: int = 0,
+    camera: str | None = None,
 ) -> dict[str, Any]:
     """The dynamic half of the activity, snake_case to match the Swift
     type's `CodingKeys` exactly -- these field names are load-bearing wire
-    contract, not a style choice."""
+    contract, not a style choice.
+
+    `extra_stories`/`camera` are additive (Elsinore Phase 4, device-scoped
+    Live Activities): the count of other eligible open stories beyond the
+    primary one this content-state otherwise describes, and the primary's
+    camera. Both omitted when there is nothing to add -- `extra_stories`
+    stays off the wire at 0 (the common single-story case looks exactly like
+    before), `camera` only when the caller has one to report.
+    """
     state: dict[str, Any] = {
         "level": level,
         "mutation": mutation,
@@ -281,6 +291,10 @@ def build_content_state(
         state["zones"] = zones
     if path is not None:
         state["path"] = path
+    if extra_stories:
+        state["extra_stories"] = extra_stories
+    if camera:
+        state["camera"] = camera
     encoded_size = len(json.dumps(state, separators=(",", ":")).encode())
     assert encoded_size <= _CONTENT_STATE_BUDGET, (
         f"content-state {encoded_size} bytes exceeds {_CONTENT_STATE_BUDGET} byte budget"

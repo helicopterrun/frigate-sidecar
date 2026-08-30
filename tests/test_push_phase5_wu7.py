@@ -725,10 +725,7 @@ async def test_la_push_to_start_persists_across_mutations(tmp_path):
     # Simulate the app attaching a per-activity token (iOS gives it after
     # ActivityKit creates the Live Activity from the push-to-start).
     conn_attach = engine._conn()
-    activity_row = store.find_activity(
-        conn_attach, apns_token=dev.apns_token,
-        situation_id="doorbell:person:trk1", track_id="trk1",
-    )
+    activity_row = store.find_activity(conn_attach, apns_token=dev.apns_token)
     assert activity_row is not None, "activity row must survive conn1.close()"
     store.attach_activity_token(
         conn_attach, activity_id=activity_row["activity_id"],

@@ -94,10 +94,17 @@ _PLACE_ORDER = ("street", "yard", "doors", "private", "off_limits")
 
 logger = logging.getLogger(__name__)
 
-#: Per-(card_key, apns_token) snapshot of the last LA push, for delta
-#: detection. In-memory only — a sidecar restart flushes it, which just
-#: means the first post-restart push always goes out (safe).
-_la_prev_state: dict[tuple[str, str], dict[str, Any]] = {}
+#: Per-apns_token snapshot of the last LA push, for delta detection.
+#: In-memory only — a sidecar restart flushes it, which just means the first
+#: post-restart push always goes out (safe). Device-scoped (Elsinore Phase
+#: 4): one Live Activity per device now, so the key drops `card_key`.
+_la_prev_state: dict[str, dict[str, Any]] = {}
+
+#: Sentinel (device-scoped) identity the app posts as `situationId`/`trackId`
+#: for the one Live Activity per device now runs, and the row's own
+#: `collapse_id` -- see `_deliver_live_activities`'s docstring.
+_DEVICE_SITUATION_ID = "device:elsinore"
+_DEVICE_TRACK_ID = "device"
 
 #: Frigate labels this MVP treats as an animal subject, beyond the
 #: dangerous-animal labels `ladder.py` already reclassifies via `label`
@@ -691,47 +698,46 @@ async def _deliver_live_activities(
     motion: dict[str, Any] | None = None,
     zones: dict[str, Any] | None = None,
     path: dict[str, Any] | None = None,
+    place_class: str = "",
 ) -> set[str]:
     """The Live Activity side of one card mutation, one iteration per
-    registered device (Elsinore Phase 3, `docs/push-notifications.md` "Live
-    Activity lifecycle"). Independent of the ordinary card push above: a
-    device with no push-to-start token, or a family the config has turned
-    off, simply never gets an activity while its card push is unaffected.
+    registered device (Elsinore Phase 4, device-scoped aggregation).
 
-    Reuses the same `push_activities` table and `store.py` helpers the
-    (unrelated) situations Live Activity already uses -- `situation_id` is
-    just a text column and a card's `card_key` fits it exactly as well as a
-    situation id does. This is *why* the row lives there and not as a new
-    column on `push_cards`: a Live Activity is one per *(device, card)*, not
-    one per card, so a single nullable column on the card row can't
-    represent a card with two push-to-start-registered devices running two
-    independent activities.
+    One Live Activity per *device* now, not one per (device, card): every
+    device that can run an activity has at most a single open
+    `push_activities` row, keyed on `apns_token` alone under the sentinel
+    `situation_id`/`track_id` pair `_DEVICE_SITUATION_ID`/`_DEVICE_TRACK_ID`
+    the app posts back (`store.find_activity`/`find_dismissed_activity` are
+    device-scoped to match). That row's content-state describes the PRIMARY
+    story -- the highest-level currently-open, eligible card for this
+    device, tie-broken by most recently updated -- with `extra_stories`
+    reporting how many other eligible open stories exist alongside it.
 
-    `family` is `None` for a card that never qualified (in which case this
-    is a no-op for every device -- `store.find_activity` never finds a row
-    either) or on `resolve` (ending an already-running activity needs no
-    re-qualification).
+    `card`/`mutation`/`family`/`camera`/... describe the ONE card mutation
+    that triggered this call; the aggregate primary may or may not be that
+    same card. When it is, the caller's rich copy/motion/zones/path (all
+    freshly computed for this mutation) are used verbatim. When some other
+    already-open card outranks it, this function rebuilds that card's
+    primary/secondary copy from its stored `push_cards` context (label,
+    camera, zone_name, state_since_at) -- good enough for a card that isn't
+    the one actively mutating, but necessarily without its live
+    motion/zones/path (not persisted per-card) or its identity/story copy
+    embellishments (also not persisted) -- documented simplification.
 
     Returns the apns tokens of devices whose Live Activity *demonstrably*
-    covers this mutation: a start APNs accepted, or an update/end sent to a
-    confirmed per-activity token. The caller demotes the ordinary card push
-    to silent for exactly those devices -- per-device, so one phone's
-    working LA never silences another's banner, and gated on confirmation
-    (not intent) so a silently-failed LA never eats a notification.
+    covers this mutation: a start/update/end APNs send that succeeded. The
+    caller demotes the ordinary card push to silent for exactly those
+    devices.
     """
     covered: set[str] = set()
     if not config.delivery_la_enabled:
         logger.info("push: LA skipped — delivery_la_enabled=False")
         return covered
+    card_key = card.card_key
     logger.info(
         "push: LA enter mutation=%s family=%s card_key=%s devices=%d",
-        mutation, family, card.card_key, len(devices),
+        mutation, family, card_key, len(devices),
     )
-    card_key = card.card_key
-    # The primary/original subject id, stable across cross-camera dedup --
-    # `card_key` is always `{camera}:{subject_kind}:{subject_id}`, so this is
-    # the same value regardless of which camera's event triggered this call.
-    la_track_id = card_key.split(":", 2)[-1]
 
     policy = policy_settings.get_active()
     la_settings = policy.get("live_activities", {})
@@ -739,64 +745,61 @@ async def _deliver_live_activities(
     escalation_sound = policy.get("escalation_sound", "urgent")
     stale_s = config.delivery_la_stale_s
 
-    for device in devices:
-        row = store.find_activity(
-            conn, apns_token=device.apns_token, situation_id=card_key, track_id=la_track_id,
+    # Every other currently-open card, from the DB -- the current card's own
+    # row hasn't been upserted yet at this point in the pipeline (that
+    # happens later, in `send_card_mutation`), so it's overlaid below with
+    # the live values this call was given instead of whatever's stale in
+    # the DB (or absent, on a brand-new card's first mutation).
+    open_cards = {c.card_key: (c, ctx) for c, ctx in card_store.list_open_cards(conn)}
+    if mutation == RESOLVE or card.closed or card.resolved:
+        open_cards.pop(card_key, None)
+    else:
+        open_cards[card_key] = (
+            card,
+            {
+                "subject_kind": subject_kind, "place_class": place_class,
+                "camera": camera, "zone_name": "", "label": label,
+                "family": family or "", "media_handle": card.media_handle,
+            },
         )
 
-        if mutation == RESOLVE:
-            if row is None:
-                continue
-            content_state = live_activities.build_content_state(
-                level=card.level, mutation=mutation,
-                glyph=live_activities.glyph_for(
-                    family or "", subject_kind=subject_kind, label=label, mutation=mutation,
-                ),
-                primary=primary, secondary=secondary, elapsed_seconds=elapsed_seconds,
-                card_key=card_key, thumbnail_handle=None,
-                thumbnail_revision=int(row["thumbnail_revision"] or 1),
-                state_since_ts=state_since_ts,
-                motion=motion, zones=zones, path=path,
-            )
-            payload = live_activities.build_la_end_payload(
-                content_state=content_state, now=now, dismissal_offset=30.0,
-            )
-            token = row["token"]
-            if token:
-                result = await transport.send_live_activity(
-                    device, token=token, payload=payload, collapse_id=card_key, event="end",
-                    apns_priority=5,
-                )
-                if result.ok:
-                    covered.add(device.apns_token)
-                store.close_activity(conn, row["activity_id"], now=now)
-                _la_prev_state.pop((card_key, device.apns_token), None)
-                # A closed card's dismissal tombstone (if any -- e.g. the app
-                # re-dismissed a stale row) must not outlive it either.
-                tombstone = store.find_dismissed_activity(
-                    conn, apns_token=device.apns_token, situation_id=card_key,
-                    track_id=la_track_id,
-                )
-                if tombstone is not None:
-                    store.delete_activity(conn, tombstone["activity_id"])
-            else:
-                # Fast create→resolve: the app hasn't uploaded the
-                # per-activity token yet, and iOS only accepts `start` on
-                # the p2s token (commit 0916731) — an end sent there is
-                # rejected. Leave the row open, flagged pending-end; the
-                # token-upload route sends the deferred end the moment the
-                # token lands, instead of stranding the LA on the lock
-                # screen until its stale-date.
-                store.touch_activity(conn, row["activity_id"], stage="pending_end", now=now)
-            continue
+    for device in devices:
+        device_row = store.find_activity(conn, apns_token=device.apns_token)
+        tombstone = store.find_dismissed_activity(conn, apns_token=device.apns_token)
 
-        if row is None:
-            # CREATE is the normal birth; ESCALATE is the late start — a
-            # story that routed quiet at create didn't qualify for a person
-            # LA (routing-gated families), but the moment it escalates into
-            # notify/urgent it deserves its instrument. The start push's
-            # mandatory alert (with sound, budget permitting) doubles as
-            # the escalation alert itself.
+        eligible = [
+            (c, ctx) for c, ctx in open_cards.values()
+            if ctx.get("family")
+            and _device_eligible(
+                device, camera=ctx.get("camera", ""),
+                labels=(ctx.get("label", ""),), card_level=c.level,
+            )
+            and not _is_snoozed(conn, device, ctx.get("camera", ""), now=now)
+        ]
+        is_triggering_eligible = any(c.card_key == card_key for c, _ in eligible)
+
+        if tombstone is not None:
+            if mutation == ESCALATE:
+                # Escalation breaks through a dismissal: the user swiped
+                # away a quiet activity, but this story just got more
+                # important than the dismissal anticipated.
+                store.delete_activity(conn, tombstone["activity_id"])
+                tombstone = None
+            elif not eligible:
+                # The device's last open story just closed while dismissed
+                # -- clean slate, so a genuinely new story later gets its
+                # own fresh start rather than an inherited suppression.
+                store.delete_activity(conn, tombstone["activity_id"])
+                tombstone = None
+            else:
+                # Quiet period: no re-start on CREATE/UPDATE, including a
+                # brand-new story joining.
+                logger.info("push: LA skip device=%s reason=dismissed", device.device_id)
+                continue
+
+        if device_row is None:
+            if not eligible or not is_triggering_eligible:
+                continue
             if mutation not in (CREATE, ESCALATE) or family is None or not device.can_live_activity:
                 logger.info(
                     "push: LA skip device=%s reason=no_row mutation=%s family=%s"
@@ -805,49 +808,22 @@ async def _deliver_live_activities(
                     bool(device.push_to_start_token),
                 )
                 continue
-            if not _device_eligible(device, camera=camera, labels=(label,), card_level=card.level):
-                logger.info("push: LA skip device=%s reason=not_eligible", device.device_id)
-                continue
-            if _is_snoozed(conn, device, camera, now=now):
-                logger.info("push: LA skip device=%s reason=snoozed", device.device_id)
-                continue
-            tombstone = store.find_dismissed_activity(
-                conn, apns_token=device.apns_token, situation_id=card_key,
-                track_id=la_track_id,
+            primary_card, primary_ctx = _pick_primary(eligible)
+            content_state = _build_aggregate_state(
+                primary_card, primary_ctx, eligible, card_key=card_key,
+                mutation=mutation, thumbnail_revision=1,
+                current=(primary, secondary, elapsed_seconds, media_handle,
+                         state_since_ts, motion, zones, path),
             )
-            if tombstone is not None:
-                if mutation == ESCALATE:
-                    # Escalation breaks through a dismissal: the user swiped
-                    # away a quiet card, but this story just got more
-                    # important than the dismissal anticipated.
-                    store.delete_activity(conn, tombstone["activity_id"])
-                else:
-                    logger.info(
-                        "push: LA skip device=%s reason=dismissed", device.device_id,
-                    )
-                    continue
-            content_state = live_activities.build_content_state(
-                level=card.level, mutation=mutation,
-                glyph=live_activities.glyph_for(
-                    family, subject_kind=subject_kind, label=label, mutation=mutation,
-                ),
-                primary=primary, secondary=secondary, elapsed_seconds=elapsed_seconds,
-                card_key=card_key, thumbnail_handle=media_handle, thumbnail_revision=1,
-                state_since_ts=state_since_ts,
-                motion=motion, zones=zones, path=path,
-            )
-            # Honor the card path's sound accounting (mute, quiet hours,
-            # per-card budget): the start's required `alert` dict stays,
-            # but sound is only attached when a card push would have
-            # sounded too.
             la_start_sound = (
                 sound_name_for_card(card.level, subject_kind, label,
                                     escalation_sound=escalation_sound)
                 if sound_allowed and not la_only else None
             )
             payload = live_activities.build_la_start_payload(
-                content_state=content_state, family=family, camera=camera,
-                track_id=la_track_id, card_key=card_key, now=now, stale_s=stale_s,
+                content_state=content_state, family=primary_ctx.get("family") or family,
+                camera=primary_ctx.get("camera", camera), track_id=_DEVICE_TRACK_ID,
+                card_key=primary_card.card_key, now=now, stale_s=stale_s,
                 sound=la_start_sound,
             )
             logger.info(
@@ -856,47 +832,90 @@ async def _deliver_live_activities(
             )
             result = await transport.send_live_activity(
                 device, token=device.push_to_start_token, payload=payload,
-                collapse_id=card_key, event="start",
+                collapse_id=_DEVICE_SITUATION_ID, event="start",
                 apns_priority=10, apns_expiration=int(now + 900),
             )
-            logger.info(
-                "push: LA start result ok=%s error=%s", result.ok, result.error,
-            )
+            logger.info("push: LA start result ok=%s error=%s", result.ok, result.error)
             if not result.ok:
                 continue
             covered.add(device.apns_token)
             activity_id = f"a_{secrets.token_urlsafe(8)}"
             store.open_activity(
                 conn, activity_id=activity_id, apns_token=device.apns_token,
-                situation_id=card_key, track_id=la_track_id, camera=camera,
-                collapse_id=card_key, handle=media_handle or "", now=now,
+                situation_id=_DEVICE_SITUATION_ID, track_id=_DEVICE_TRACK_ID,
+                camera=primary_ctx.get("camera", camera), collapse_id=_DEVICE_SITUATION_ID,
+                handle=media_handle or "", now=now,
             )
             store.record_activity_send(conn, activity_id=activity_id, now=now)
             continue
 
-        if not row["token"]:
+        if not device_row["token"]:
             # No per-activity token yet (app hasn't confirmed the start) --
             # keep the row alive so the sweep doesn't reap a young LA.
-            store.touch_activity(conn, row["activity_id"], now=now)
+            store.touch_activity(conn, device_row["activity_id"], now=now)
             continue
-        revision = int(row["thumbnail_revision"] or 1)
-        if media_handle:
+
+        if not eligible:
+            # END: nothing eligible remains open for this device.
+            content_state = live_activities.build_content_state(
+                level=card.level, mutation=RESOLVE,
+                glyph=live_activities.glyph_for(
+                    family or "", subject_kind=subject_kind, label=label, mutation=RESOLVE,
+                ),
+                primary=primary, secondary=secondary, elapsed_seconds=elapsed_seconds,
+                card_key=card_key, thumbnail_handle=None,
+                thumbnail_revision=int(device_row["thumbnail_revision"] or 1),
+                state_since_ts=state_since_ts, motion=motion, zones=zones, path=path,
+                camera=camera,
+            )
+            payload = live_activities.build_la_end_payload(
+                content_state=content_state, now=now, dismissal_offset=30.0,
+            )
+            token = device_row["token"]
+            result = await transport.send_live_activity(
+                device, token=token, payload=payload, collapse_id=_DEVICE_SITUATION_ID,
+                event="end", apns_priority=5,
+            )
+            if result.ok:
+                covered.add(device.apns_token)
+            store.close_activity(conn, device_row["activity_id"], now=now)
+            _la_prev_state.pop(device.apns_token, None)
+            continue
+
+        primary_card, primary_ctx = _pick_primary(eligible)
+        # A brand-new eligible story joining an already-live device activity
+        # (whether or not it becomes the primary) is treated the same as an
+        # escalation: it bypasses the pacing/delta gates and carries an
+        # alert, reusing the start's sound accounting.
+        new_story_join = mutation == CREATE and is_triggering_eligible
+        is_escalate = mutation == ESCALATE
+        bypass = is_escalate or new_story_join
+
+        revision = int(device_row["thumbnail_revision"] or 1)
+        current_is_primary = primary_card.card_key == card_key
+        if current_is_primary and media_handle:
             revision += 1
-        # §8 delta detection: suppress LA pushes that carry no visible change.
-        glyph_val = live_activities.glyph_for(
-            family or "", subject_kind=subject_kind, label=label, mutation=mutation,
+
+        content_state = _build_aggregate_state(
+            primary_card, primary_ctx, eligible, card_key=card_key,
+            mutation=mutation, thumbnail_revision=revision,
+            current=(primary, secondary, elapsed_seconds, media_handle,
+                     state_since_ts, motion, zones, path),
         )
-        heading_val = motion.get("heading") if motion else None
-        current_zones_tuple = tuple(zones["ladder"]) if zones else ()
-        path_len = len(path["points"]) if path else 0
-        prev_key = (card_key, device.apns_token)
-        prev = _la_prev_state.get(prev_key, {})
+        p_primary = content_state["primary"]
+        p_secondary = content_state["secondary"]
+        glyph_val = content_state["glyph"]
+
+        heading_val = motion.get("heading") if (current_is_primary and motion) else None
+        current_zones_tuple = tuple(zones["ladder"]) if (current_is_primary and zones) else ()
+        path_len = len(path["points"]) if (current_is_primary and path) else 0
+        prev = _la_prev_state.get(device.apns_token, {})
         delta_reason = _la_has_visible_delta(
             mutation=mutation,
             prev_mutation=prev.get("mutation"),
             prev_level=prev.get("level"),
-            level=card.level,
-            primary=primary,
+            level=primary_card.level,
+            primary=p_primary,
             prev_primary=prev.get("primary"),
             glyph=glyph_val,
             prev_glyph=prev.get("glyph"),
@@ -907,44 +926,35 @@ async def _deliver_live_activities(
             heading=heading_val,
             prev_heading=prev.get("heading"),
         )
-        last_la_push = float(row["last_push_at"] or 0)
-        is_escalate = mutation == ESCALATE
-        if delta_reason is None and not is_escalate:
+        last_la_push = float(device_row["last_push_at"] or 0)
+        if delta_reason is None and not bypass:
             continue
         min_interval = (
             _LA_UPDATE_MIN_INTERVAL_S
             if device.frequent_pushes_enabled
             else _LA_UPDATE_MIN_INTERVAL_SLOW_S
         )
-        if now - last_la_push < min_interval and not is_escalate:
+        if now - last_la_push < min_interval and not bypass:
             continue
         logger.info(
-            "la-push reason=%s card_key=%s", delta_reason or "escalate", card_key,
+            "la-push reason=%s card_key=%s primary=%s",
+            delta_reason or ("new_story" if new_story_join else "escalate"),
+            card_key, primary_card.card_key,
         )
 
-        content_state = live_activities.build_content_state(
-            level=card.level, mutation=mutation, glyph=glyph_val,
-            primary=primary, secondary=secondary, elapsed_seconds=elapsed_seconds,
-            card_key=card_key, thumbnail_handle=media_handle, thumbnail_revision=revision,
-            state_since_ts=state_since_ts,
-            motion=motion, zones=zones, path=path,
-        )
-
-        # Escalation alert: when level rises to notify/urgent, the LA update
-        # carries an alert dict + sound so iOS surfaces a banner.
         wants_alert = False
         la_sound = None
         la_interruption = None
         if la_only:
-            # No banner ever: the LA's own state change (level color, copy)
-            # is the whole signal; alert dicts on updates are what banner.
             pass
-        elif mutation == ESCALATE and card.level in ("notify", "urgent"):
+        elif bypass:
             wants_alert = True
-            if sound_allowed and card.level == "urgent":
-                la_sound = sound_name_for_card(card.level, subject_kind, label,
-                                              escalation_sound=escalation_sound)
-            la_interruption = "time-sensitive" if card.level == "urgent" else "active"
+            if sound_allowed and (is_escalate and primary_card.level == "urgent" or new_story_join):
+                la_sound = sound_name_for_card(
+                    primary_card.level, primary_ctx.get("subject_kind", ""),
+                    primary_ctx.get("label", ""), escalation_sound=escalation_sound,
+                )
+            la_interruption = "time-sensitive" if primary_card.level == "urgent" else "active"
         elif family == live_activities.PERSON_RESTRICTED and mutation != RESOLVE:
             wants_alert = True
             la_interruption = "time-sensitive"
@@ -952,21 +962,22 @@ async def _deliver_live_activities(
         priority = 10 if wants_alert else 5
         payload = live_activities.build_la_update_payload(
             content_state=content_state, now=now, stale_s=stale_s,
-            alert=wants_alert, alert_title=primary, alert_body=secondary,
+            alert=wants_alert, alert_title=p_primary, alert_body=p_secondary,
             sound=la_sound, interruption_level=la_interruption,
         )
         result = await transport.send_live_activity(
-            device, token=row["token"], payload=payload, collapse_id=card_key, event="update",
+            device, token=device_row["token"], payload=payload,
+            collapse_id=_DEVICE_SITUATION_ID, event="update",
             apns_priority=priority, apns_expiration=int(now + 900),
         )
         if result.ok:
             covered.add(device.apns_token)
         store.touch_activity(
-            conn, row["activity_id"], thumbnail_revision=revision, pushed=True, now=now,
+            conn, device_row["activity_id"], thumbnail_revision=revision, pushed=True, now=now,
         )
-        store.record_activity_send(conn, activity_id=row["activity_id"], now=now)
-        _la_prev_state[(card_key, device.apns_token)] = {
-            "mutation": mutation, "level": card.level, "primary": primary,
+        store.record_activity_send(conn, activity_id=device_row["activity_id"], now=now)
+        _la_prev_state[device.apns_token] = {
+            "mutation": mutation, "level": primary_card.level, "primary": p_primary,
             "glyph": glyph_val, "zones": current_zones_tuple,
             "path_len": path_len, "heading": heading_val,
         }
@@ -974,72 +985,152 @@ async def _deliver_live_activities(
     return covered
 
 
+_LEVEL_RANK = {"log": 0, "quiet": 1, "notify": 2, "urgent": 3}
+
+
+def _pick_primary(
+    eligible: list[tuple[Card, dict[str, str]]],
+) -> tuple[Card, dict[str, str]]:
+    """Highest level wins; ties go to the most recently updated story."""
+    return max(eligible, key=lambda t: (_LEVEL_RANK.get(t[0].level, 0), t[0].updated_at))
+
+
+def _build_aggregate_state(
+    primary_card: Card,
+    primary_ctx: dict[str, str],
+    eligible: list[tuple[Card, dict[str, str]]],
+    *,
+    card_key: str,
+    mutation: str,
+    thumbnail_revision: int,
+    current: tuple[
+        str, str, int, str | None, float | None,
+        dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None,
+    ],
+) -> dict[str, Any]:
+    """The device-wide content-state: the PRIMARY story's copy/instrument
+    fields, plus `extra_stories`/`camera`. When the primary IS the card that
+    triggered this call, the caller's freshly-computed copy/motion/zones/
+    path/thumbnail are used as-is; otherwise they're rebuilt from the
+    primary's stored `push_cards` context (see `_deliver_live_activities`
+    docstring for what's necessarily lost in that case).
+    """
+    (cur_primary, cur_secondary, cur_elapsed, cur_thumbnail, cur_state_since,
+     cur_motion, cur_zones, cur_path) = current
+    extra_stories = max(0, len(eligible) - 1)
+    camera = primary_ctx.get("camera", "")
+    if primary_card.card_key == card_key:
+        p_primary, p_secondary, p_elapsed = cur_primary, cur_secondary, cur_elapsed
+        # `cur_thumbnail` is only non-None on CREATE/ENRICH (the mutations
+        # that mint fresh media, `_MEDIA_MUTATIONS`) -- an escalate/resolve
+        # for this same card falls back to the card's own persisted handle
+        # instead of blanking the widget's thumbnail mid-story.
+        p_thumbnail = cur_thumbnail or (primary_card.media_handle or None)
+        p_state_since = cur_state_since
+        p_motion, p_zones, p_path = cur_motion, cur_zones, cur_path
+        glyph = live_activities.glyph_for(
+            primary_ctx.get("family", ""), subject_kind=primary_ctx.get("subject_kind", ""),
+            label=primary_ctx.get("label", ""), mutation=mutation,
+        )
+        state_mutation = mutation
+    else:
+        p_elapsed = int(max(0.0, time.time() - primary_card.state_since_at))
+        p_primary, p_secondary = _copy(
+            primary_ctx.get("subject_kind", ""), primary_ctx.get("label", ""),
+            camera, primary_ctx.get("zone_name", ""), p_elapsed,
+        )
+        # Non-triggering primary: no live mint happened this call, so use
+        # its own persisted handle (carried on the `push_cards` context by
+        # `list_open_cards`/`_row_to_ctx`, alongside label/family/camera) --
+        # '' counts as "no handle at all" and is treated as None.
+        p_thumbnail = primary_ctx.get("media_handle") or primary_card.media_handle or None
+        p_state_since = (
+            round(primary_card.state_since_at, 1) if primary_card.state_since_at else None
+        )
+        p_motion = p_zones = p_path = None
+        glyph = live_activities.glyph_for(
+            primary_ctx.get("family", ""), subject_kind=primary_ctx.get("subject_kind", ""),
+            label=primary_ctx.get("label", ""), mutation=ENRICH,
+        )
+        state_mutation = "update"
+
+    return live_activities.build_content_state(
+        level=primary_card.level, mutation=state_mutation, glyph=glyph,
+        primary=p_primary, secondary=p_secondary, elapsed_seconds=p_elapsed,
+        card_key=primary_card.card_key, thumbnail_handle=p_thumbnail,
+        thumbnail_revision=thumbnail_revision, state_since_ts=p_state_since,
+        motion=p_motion, zones=p_zones, path=p_path,
+        extra_stories=extra_stories, camera=camera,
+    )
+
+
+
 async def end_activity_if_card_closed(
     conn: sqlite3.Connection,
     device: Device,
     transport: PushTransport,
     *,
-    card_key: str,
-    track_id: str,
     token: str,
     now: float | None = None,
 ) -> bool:
-    """Deferred end for the fast create→resolve race.
+    """Deferred end for the fast create→resolve race, device-scoped
+    (Elsinore Phase 4): the app now posts `attach_activity_token` for the
+    one device-wide activity, and by the time the token lands every open
+    story it covered may already have closed. `_deliver_live_activities`
+    can't send that end itself in that case (iOS rejects `end` on the p2s
+    token), so it leaves the row open; the token-upload route calls this the
+    moment the token lands to send the deferred end instead of stranding the
+    LA on the lock screen until its stale-date.
 
-    When a card resolves before the app has uploaded the per-activity token,
-    `_deliver_live_activities` can't send the end (iOS rejects end on the
-    p2s token) and leaves the row open. The token-upload route calls this
-    the moment the token lands: if the card is already closed, end the
-    activity now instead of stranding it until its stale-date.
+    No card key to check anymore -- the device's *aggregate* eligibility
+    (any open, eligible story) is what decides whether there's still
+    something to show.
     """
     now = time.time() if now is None else now
-    card = card_store.get_card(conn, card_key)
-    if card is None or not card.closed:
+    eligible = [
+        (c, ctx) for c, ctx in card_store.list_open_cards(conn)
+        if ctx.get("family")
+        and _device_eligible(
+            device, camera=ctx.get("camera", ""),
+            labels=(ctx.get("label", ""),), card_level=c.level,
+        )
+        and not _is_snoozed(conn, device, ctx.get("camera", ""), now=now)
+    ]
+    if eligible:
         return False
-    ctx = card_store.get_card_context(conn, card_key) or {}
-    kind = ctx.get("subject_kind", "")
-    # Resolve copy carries the STORY duration (first sighting -> end), the
-    # same clock the LA's frozen timer shows -- not time-in-latest-state,
-    # which read "3s" next to an LA frozen at "11s" (observed 2026-08-14).
-    # This end is deferred (sent when the token lands, possibly seconds
-    # after the story closed), so the clock stops at the card's resolve
-    # write (`updated_at`), never at push time.
-    elapsed = max(0.0, card.updated_at - card.created_at)
-    primary, secondary = _copy(
-        kind, "", ctx.get("camera", ""), ctx.get("zone_name", ""), 0.0,
-        story=f"left after {_fmt_elapsed(elapsed)}",
-    )
+    device_row = store.find_activity(conn, apns_token=device.apns_token)
+    if device_row is None:
+        return False
+    # No specific closed card to rebuild copy from (the situation id is the
+    # device sentinel, not a card key) -- reuse the last content this
+    # device's activity actually showed.
+    prev = _la_prev_state.get(device.apns_token, {})
     content_state = live_activities.build_content_state(
-        level=card.level, mutation=RESOLVE,
-        glyph=live_activities.glyph_for("", subject_kind=kind, label="", mutation=RESOLVE),
-        primary=primary, secondary=secondary, elapsed_seconds=int(elapsed),
-        card_key=card_key, thumbnail_handle=None, thumbnail_revision=1,
-        state_since_ts=round(card.state_since_at, 1) if card.state_since_at else None,
+        level=prev.get("level", "log"), mutation=RESOLVE,
+        glyph=prev.get("glyph")
+        or live_activities.glyph_for("", subject_kind="", label="", mutation=RESOLVE),
+        primary=prev.get("primary", ""), secondary="", elapsed_seconds=0,
+        card_key=_DEVICE_SITUATION_ID, thumbnail_handle=None,
+        thumbnail_revision=int(device_row["thumbnail_revision"] or 1),
     )
     payload = live_activities.build_la_end_payload(
         content_state=content_state, now=now, dismissal_offset=30.0,
     )
     result = await transport.send_live_activity(
-        device, token=token, payload=payload, collapse_id=card_key, event="end",
+        device, token=token, payload=payload, collapse_id=_DEVICE_SITUATION_ID, event="end",
         apns_priority=5,
     )
-    while True:
-        row = store.find_activity(
-            conn, apns_token=device.apns_token, situation_id=card_key, track_id=track_id,
-        )
-        if row is None:
-            break
-        store.close_activity(conn, row["activity_id"], now=now)
-    # A closed card's own dismissal tombstone must not outlive it -- a future
-    # card reusing the same (device, situation, track) key deserves its own
-    # fresh start, not a suppression left over from the card that just ended.
-    tombstone = store.find_dismissed_activity(
-        conn, apns_token=device.apns_token, situation_id=card_key, track_id=track_id,
-    )
+    store.close_activity(conn, device_row["activity_id"], now=now)
+    _la_prev_state.pop(device.apns_token, None)
+    # A closed device activity's own dismissal tombstone must not outlive it
+    # -- a future story deserves its own fresh start, not a suppression left
+    # over from the activity that just ended.
+    tombstone = store.find_dismissed_activity(conn, apns_token=device.apns_token)
     if tombstone is not None:
         store.delete_activity(conn, tombstone["activity_id"])
     logger.info(
-        "push: LA deferred end card_key=%s ok=%s error=%s", card_key, result.ok, result.error,
+        "push: LA deferred end device=%s ok=%s error=%s",
+        device.device_id, result.ok, result.error,
     )
     return result.ok
 
@@ -1316,6 +1407,13 @@ async def handle_delivery_event(
             media_handle, media, warm_task = _media_for(
                 mutation, event, conn=conn, engine=engine, config=config,
             )
+        if media_handle:
+            # Sticky, same shape as zone_override_hit above -- only
+            # CREATE/ENRICH mint a fresh handle (`_MEDIA_MUTATIONS`), so an
+            # escalate/resolve mutation leaves this untouched and
+            # `card_store.upsert_card` falls back to whatever was last
+            # persisted instead of blanking the story's thumbnail.
+            card.media_handle = media_handle
 
         # Live Activities go first so the card push below knows whether an
         # LA demonstrably covers this mutation (start accepted by APNs, or
@@ -1430,29 +1528,34 @@ async def handle_delivery_event(
                     la_reason=la_reason,
                 )
         # la_first demotion: if the delivery mode is la_first and this is
-        # NOT an escalation, broaden demotion to all la_capable devices that
-        # have an open activity for this card — even if the LA update was
-        # delta-suppressed this tick.
+        # NOT an escalation, broaden demotion to all la_capable devices whose
+        # (device-wide) Live Activity is open AND covers this card as one of
+        # its eligible open stories — even if the LA update was
+        # delta-suppressed this tick. Device-scoped (Elsinore Phase 4): the
+        # LA is one per device now, so "covers this card" means the device
+        # activity is open and this card independently qualifies as an
+        # eligible story for that device, not a card-scoped row lookup.
         delivery_mode = policy["live_activities"].get("delivery", "la_first")
         is_escalation = mutation == ESCALATE and card.level in ("notify", "urgent")
         demote_tokens: set[str] = set(la_covered)
-        if delivery_mode == "la_first" and not la_only and not is_escalation:
-            la_track_id = card_key.split(":", 2)[-1]
+        if delivery_mode == "la_first" and not la_only and not is_escalation and family is not None:
             for device in devices:
-                if device.apns_token in demote_tokens:
+                if device.apns_token in demote_tokens or not device.la_capable:
                     continue
-                if not device.la_capable:
-                    continue
-                row = store.find_activity(
-                    conn, apns_token=device.apns_token,
-                    situation_id=card_key, track_id=la_track_id,
-                )
-                if row is not None and not row["ended_at"]:
+                row = store.find_activity(conn, apns_token=device.apns_token)
+                if (
+                    row is not None and not row["ended_at"]
+                    and _device_eligible(
+                        device, camera=owning_camera, labels=(snapshot.label,),
+                        card_level=card.level,
+                    )
+                    and not _is_snoozed(conn, device, owning_camera, now=now)
+                ):
                     demote_tokens.add(device.apns_token)
 
         if demote_tokens:
             logger.info(
-                "push: card push demoted to silent for %d device(s) — LA covers %s mutation=%s",
+                "push: card push demoted to passive for %d device(s) — LA covers %s mutation=%s",
                 len(demote_tokens), card_key, mutation,
             )
 
@@ -1471,6 +1574,7 @@ async def handle_delivery_event(
             subject_kind=subject_kind, place_class=place_class,
             camera=owning_camera, zone_name=zone_name,
             labels=event.labels, zones=event.zones, now=now,
+            label=snapshot.label, family=family or "",
             demote_tokens=demote_tokens,
             suppress_demoted=delivery_mode == "la_first" and not la_only,
         )
@@ -1584,19 +1688,12 @@ async def handle_delivery_resolve(
         )
         policy = policy_settings.get_active()
         la_only = bool(policy.get("live_activities", {}).get("la_only", False))
-        demote_resolve: set[str] = set(la_covered)
         delivery_mode = policy.get("live_activities", {}).get("delivery", "la_first")
-        if delivery_mode == "la_first" and not la_only:
-            la_tid = card_key.split(":", 2)[-1]
-            for device in devices:
-                if device.apns_token in demote_resolve or not device.la_capable:
-                    continue
-                row = store.find_activity(
-                    conn, apns_token=device.apns_token,
-                    situation_id=card_key, track_id=la_tid,
-                )
-                if row is not None and not row["ended_at"]:
-                    demote_resolve.add(device.apns_token)
+        # RESOLVE is terminal for this card -- no future tick to catch a
+        # delta-suppressed miss, so `la_covered` (an end or update that
+        # demonstrably sent) is definitive; no broadening needed the way the
+        # ongoing-mutation demotion above does.
+        demote_resolve: set[str] = set(la_covered)
         payload = None
         if should_push(card.level):
             payload = build_card_payload(
@@ -1796,28 +1893,40 @@ async def handle_recognition_event(
     primary, secondary = _copy(
         subject_kind, label, owning_camera, zone_name, elapsed, identity=sub_label,
     )
+    # The deescalated level may have dropped this card out of (or, in
+    # principle, kept it in) LA eligibility -- re-derive rather than passing
+    # `family=None`, which would otherwise stomp the card's stored `family`
+    # to empty on every recognition relax regardless of the new level.
+    relaxed_family = live_activities.classify_family(
+        subject_kind=subject_kind, label=label, place_class=place_class, level=card.level,
+    )
 
     la_covered = await _deliver_live_activities(
         conn, devices, transport, config=config, card=card, mutation=mutation,
-        family=None, camera=owning_camera, subject_kind=subject_kind, label=label,
+        family=relaxed_family, camera=owning_camera, subject_kind=subject_kind, label=label,
         primary=primary, secondary=secondary, elapsed_seconds=int(elapsed),
         media_handle=None, now=now, sound_allowed=False,
         state_since_ts=round(card.state_since_at, 1) if card.state_since_at else None,
+        place_class=place_class,
     )
     demote_recog: set[str] = set(la_covered)
     recog_policy = policy_settings.get_active()
     recog_la_only = bool(recog_policy.get("live_activities", {}).get("la_only", False))
     recog_delivery = recog_policy.get("live_activities", {}).get("delivery", "la_first")
-    if recog_delivery == "la_first" and not recog_la_only:
-        la_tid = card_key.split(":", 2)[-1]
+    recog_family = context.get("family") or None
+    if recog_delivery == "la_first" and not recog_la_only and recog_family is not None:
         for device in devices:
             if device.apns_token in demote_recog or not device.la_capable:
                 continue
-            row = store.find_activity(
-                conn, apns_token=device.apns_token,
-                situation_id=card_key, track_id=la_tid,
-            )
-            if row is not None and not row["ended_at"]:
+            row = store.find_activity(conn, apns_token=device.apns_token)
+            if (
+                row is not None and not row["ended_at"]
+                and _device_eligible(
+                    device, camera=owning_camera, labels=(context.get("label", ""),),
+                    card_level=card.level,
+                )
+                and not _is_snoozed(conn, device, owning_camera, now=now)
+            ):
                 demote_recog.add(device.apns_token)
     payload = None
     if should_push(card.level):
@@ -1834,6 +1943,7 @@ async def handle_recognition_event(
         conn, transport, devices, card, mutation, payload,
         subject_kind=subject_kind, place_class=place_class,
         camera=owning_camera, zone_name=zone_name, now=now,
+        label=label, family=relaxed_family or "",
         demote_tokens=demote_recog,
         suppress_demoted=_recog_la.get("delivery", "la_first") == "la_first"
         and not _recog_la.get("la_only", False),

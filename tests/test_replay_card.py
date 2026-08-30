@@ -154,13 +154,15 @@ async def test_dry_run_scenario_notify_resolve():
     assert len(decisions) == 3
     assert decisions[0]["mutation"] == "create"
     assert decisions[0]["level"] == "notify"
-    # LA start accepted → the card push is suppressed entirely (la_first);
-    # the LA is the only surface until resolve writes the history row.
-    assert decisions[0]["card"] == "suppressed (LA covers)"
+    # LA start accepted → the card push still delivers, demoted to passive
+    # (la_first); the NSE still runs on it, but the LA carries the alert.
+    assert decisions[0]["card"] == "demoted (LA covers)"
+    assert decisions[0]["interruption_level"] == "passive"
+    assert not decisions[0]["sounded"]
     assert decisions[0]["la_action"] == "start"
 
     assert decisions[1]["mutation"] == "enrich"
-    assert decisions[1]["card"] == "suppressed (LA covers)"
+    assert decisions[1]["card"] == "demoted (LA covers)"
 
     assert decisions[2]["mutation"] == "resolve"
     assert decisions[2]["level"] == "notify"
@@ -177,9 +179,10 @@ async def test_dry_run_scenario_escalate_urgent():
     decisions = await replay_card.dry_run_scenario(messages, speed=100.0, camera="patio")
 
     mutations = [d["mutation"] for d in decisions]
-    # The quiet-level create no longer pushes (2026-08-14) -- it surfaces in
-    # the trace as "(no push)"; the story's first push is the escalation.
-    assert "(no push)" in mutations
+    # The quiet-level create still sends a card push -- demoted to passive
+    # once its LA covers the device, but delivered (2026-08-29: la_first
+    # demotion delivers passive instead of suppressing).
+    assert "create" in mutations
     assert "escalate" in mutations
 
     escalate = next(d for d in decisions if d["mutation"] == "escalate")
@@ -187,10 +190,11 @@ async def test_dry_run_scenario_escalate_urgent():
     # Merged ladder (2026-08-16): the quiet create's glance outcome already
     # started the activity, so the escalation UPDATES it (the dry-run
     # simulates the app's token upload, so the update covers and the card
-    # push is suppressed); the urgent sound rides the update alert.
+    # push is demoted to passive); the urgent sound rides the update alert.
     create = decisions[0]
     assert create.get("la_action") == "start"
-    assert escalate["card"] == "suppressed (LA covers)"
+    assert escalate["card"] == "demoted (LA covers)"
+    assert not escalate["sounded"]
     assert escalate["la_action"] == "update"
     assert escalate["la_sound_name"] == "urgent.caf"
 

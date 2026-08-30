@@ -455,16 +455,21 @@ def attach_activity_token(
     )
 
 
-def find_activity(
-    conn: sqlite3.Connection, *, apns_token: str, situation_id: str, track_id: str
-) -> sqlite3.Row | None:
-    """The live activity for this (device, situation, track), if any."""
+def find_activity(conn: sqlite3.Connection, *, apns_token: str) -> sqlite3.Row | None:
+    """The single open live activity for this device, if any.
+
+    Device-scoped (Elsinore Phase 4): one Live Activity per device now
+    aggregates every open card, so lookup keys on `apns_token` alone --
+    `situation_id`/`track_id` are no longer part of the identity (the app
+    posts a sentinel `"device:elsinore"` / `"device"` for both, which this
+    query never needs to inspect).
+    """
     return cast(
         "sqlite3.Row | None",
         conn.execute(
-            "SELECT * FROM push_activities WHERE apns_token = ? AND situation_id = ? "
-            "AND track_id = ? AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1",
-            (apns_token, situation_id, track_id),
+            "SELECT * FROM push_activities WHERE apns_token = ? "
+            "AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1",
+            (apns_token,),
         ).fetchone(),
     )
 
@@ -554,19 +559,20 @@ def dismiss_activity(
 
 
 def find_dismissed_activity(
-    conn: sqlite3.Connection, *, apns_token: str, situation_id: str, track_id: str
+    conn: sqlite3.Connection, *, apns_token: str
 ) -> sqlite3.Row | None:
     """Mirrors `find_activity`, but for the dismissal tombstone left behind by
-    `dismiss_activity`: an ended, `stage='dismissed'` row for the same
-    (device, situation, track), which suppresses a future CREATE/UPDATE start
-    until an ESCALATE clears it (Phase A §3)."""
+    `dismiss_activity`: an ended, `stage='dismissed'` row for this device,
+    which suppresses a future re-start (including a brand-new story joining)
+    until an ESCALATE clears it, or the device's last open story closes
+    clears it (device-scoped quiet period, Elsinore Phase 4 §4)."""
     return cast(
         "sqlite3.Row | None",
         conn.execute(
-            "SELECT * FROM push_activities WHERE apns_token = ? AND situation_id = ? "
-            "AND track_id = ? AND ended_at IS NOT NULL AND stage = 'dismissed' "
+            "SELECT * FROM push_activities WHERE apns_token = ? "
+            "AND ended_at IS NOT NULL AND stage = 'dismissed' "
             "ORDER BY created_at DESC LIMIT 1",
-            (apns_token, situation_id, track_id),
+            (apns_token,),
         ).fetchone(),
     )
 

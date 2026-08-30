@@ -100,6 +100,12 @@ class Card:
     #: Read at resolve time to decide whether the final resolve push is
     #: worth keeping around (`ephemeral` payload field in `delivery.py`).
     zone_override_hit: bool = False
+    #: Sticky: the most recently minted media handle for this card's
+    #: thumbnail (delivery_wire.py's `_media_for`), set by the wire-up layer
+    #: only on mutations that mint fresh media (create/enrich) and never
+    #: cleared otherwise -- an escalate/resolve mutation mints no media of
+    #: its own but the story keeps its picture. `""` means "none minted yet".
+    media_handle: str = ""
 
     @property
     def sound_budget_remaining(self) -> bool:

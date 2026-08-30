@@ -260,10 +260,7 @@ class PushEngine:
         if row is None:
             conn = self._conn()
             try:
-                row = store.find_activity(
-                    conn, apns_token=device.apns_token,
-                    situation_id=situation.id, track_id=track_id,
-                )
+                row = store.find_activity(conn, apns_token=device.apns_token)
             finally:
                 conn.close()
         self.tracks.set_stage(camera, track_id, device.apns_token, situation.id, STAGE_ENDING)

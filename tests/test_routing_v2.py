@@ -215,8 +215,8 @@ async def test_recognition_la_update_no_alert(sidecar_db_path: Path):
     assert len(starts) == 1
 
     row = conn.execute(
-        "SELECT activity_id FROM push_activities WHERE apns_token = ? AND situation_id = ?",
-        (device.apns_token, card_key),
+        "SELECT activity_id FROM push_activities WHERE apns_token = ?",
+        (device.apns_token,),
     ).fetchone()
     assert row is not None, f"no activity row for {card_key}"
     store.attach_activity_token(
@@ -233,7 +233,11 @@ async def test_recognition_la_update_no_alert(sidecar_db_path: Path):
     )
     la = _la_sends(transport2)
     assert len(la) >= 1
-    update = [s for s in la if s["event"] == "update"][-1]
+    # Device-scoped LA: relaxing to "quiet" drops the card below LA
+    # eligibility, so this now closes the aggregate activity ("end") rather
+    # than sending a card-specific "update". Either way it must stay silent:
+    # no alert, no sound.
+    update = [s for s in la if s["event"] in ("update", "end")][-1]
     assert "alert" not in update["payload"]["aps"]
     assert "sound" not in update["payload"]["aps"]
 

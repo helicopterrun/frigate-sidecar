@@ -36,6 +36,7 @@ def _row_to_card(row: sqlite3.Row) -> Card:
         resolved=bool(row["resolved"]),
         closed=bool(row["closed"]),
         zone_override_hit=bool(row["zone_override_hit"]),
+        media_handle=row["media_handle"],
     )
 
 
@@ -55,6 +56,8 @@ def upsert_card(
     camera: str = "",
     zone_name: str = "",
     zones: tuple[str, ...] = (),
+    label: str = "",
+    family: str = "",
 ) -> None:
     """Insert or fully overwrite the row for `card.card_key`.
 
@@ -69,7 +72,8 @@ def upsert_card(
     if zone_name:
         zone_set.add(zone_name)
     existing = conn.execute(
-        "SELECT zones_csv, zone_override_hit FROM push_cards WHERE card_key = ?",
+        "SELECT zones_csv, zone_override_hit, media_handle FROM push_cards "
+        "WHERE card_key = ?",
         (card.card_key,),
     ).fetchone()
     if existing is not None and existing["zones_csv"]:
@@ -80,13 +84,21 @@ def upsert_card(
     zone_override_hit = card.zone_override_hit
     if existing is not None:
         zone_override_hit = zone_override_hit or bool(existing["zone_override_hit"])
+    # Sticky, same shape as zone_override_hit: a fresh handle (`card.media_handle`
+    # non-empty) always wins, but a mutation that mints no media of its own
+    # (escalate/resolve) falls back to whatever was last persisted instead of
+    # blanking the story's thumbnail.
+    media_handle = card.media_handle
+    if not media_handle and existing is not None:
+        media_handle = existing["media_handle"] or ""
     conn.execute(
         "INSERT INTO push_cards "
         "(card_key, level, peak_level, subject_kind, place_class, camera, zone_name, "
         " zones_csv, "
         " created_at, updated_at, state_since_at, sound_count, handled, handled_at, "
-        " last_sound_at, resound_count, resolved, closed, zone_override_hit) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " last_sound_at, resound_count, resolved, closed, zone_override_hit, "
+        " label, family, media_handle) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(card_key) DO UPDATE SET "
         "level=excluded.level, peak_level=excluded.peak_level, "
         "subject_kind=excluded.subject_kind, "
@@ -97,13 +109,16 @@ def upsert_card(
         "sound_count=excluded.sound_count, handled=excluded.handled, "
         "handled_at=excluded.handled_at, last_sound_at=excluded.last_sound_at, "
         "resound_count=excluded.resound_count, resolved=excluded.resolved, "
-        "closed=excluded.closed, zone_override_hit=excluded.zone_override_hit",
+        "closed=excluded.closed, zone_override_hit=excluded.zone_override_hit, "
+        "label=excluded.label, family=excluded.family, "
+        "media_handle=excluded.media_handle",
         (
             card.card_key, card.level, card.peak_level, subject_kind, place_class,
             camera, zone_name, zones_csv,
             card.created_at, card.updated_at, card.state_since_at, card.sound_count,
             int(card.handled), card.handled_at, card.last_sound_at, card.resound_count,
             int(card.resolved), int(card.closed), int(zone_override_hit),
+            label, family, media_handle,
         ),
     )
     conn.commit()
@@ -222,8 +237,8 @@ def get_card_context(conn: sqlite3.Connection, card_key: str) -> dict[str, str] 
     first created it (`docs/push-notifications.md` "Cross-camera
     deduplication")."""
     row = conn.execute(
-        "SELECT subject_kind, place_class, camera, zone_name FROM push_cards "
-        "WHERE card_key = ?",
+        "SELECT subject_kind, place_class, camera, zone_name, label, family "
+        "FROM push_cards WHERE card_key = ?",
         (card_key,),
     ).fetchone()
     return dict(row) if row is not None else None
@@ -375,15 +390,36 @@ def list_open_urgent_cards(conn: sqlite3.Connection) -> list[tuple[Card, dict[st
     rows = conn.execute(
         "SELECT * FROM push_cards WHERE level = 'urgent' AND closed = 0 AND resolved = 0"
     ).fetchall()
-    return [
-        (
-            _row_to_card(row),
-            {
-                "subject_kind": row["subject_kind"],
-                "place_class": row["place_class"],
-                "camera": row["camera"],
-                "zone_name": row["zone_name"],
-            },
-        )
-        for row in rows
-    ]
+    return [(_row_to_card(row), _row_to_ctx(row)) for row in rows]
+
+
+def _row_to_ctx(row: sqlite3.Row) -> dict[str, str]:
+    ctx = {
+        "subject_kind": row["subject_kind"],
+        "place_class": row["place_class"],
+        "camera": row["camera"],
+        "zone_name": row["zone_name"],
+    }
+    try:
+        ctx["label"] = row["label"]
+        ctx["family"] = row["family"]
+    except (IndexError, KeyError):
+        ctx["label"] = ""
+        ctx["family"] = ""
+    try:
+        ctx["media_handle"] = row["media_handle"]
+    except (IndexError, KeyError):
+        ctx["media_handle"] = ""
+    return ctx
+
+
+def list_open_cards(conn: sqlite3.Connection) -> list[tuple[Card, dict[str, str]]]:
+    """Every open (`closed = 0`, `resolved = 0`) card, any level -- the
+    candidate set for device-scoped Live Activity aggregation: one activity
+    per device covers every open story, not just the one currently
+    mutating. Modeled on `list_open_urgent_cards` without the level filter.
+    """
+    rows = conn.execute(
+        "SELECT * FROM push_cards WHERE closed = 0 AND resolved = 0"
+    ).fetchall()
+    return [(_row_to_card(row), _row_to_ctx(row)) for row in rows]
