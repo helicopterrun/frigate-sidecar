@@ -82,6 +82,12 @@ class SidecarSection(BaseModel):
     # sidecar never stores the password — the cookie is a signed expiry
     # token, so revocation is "wait for expiry or rotate the secret file".
     remember_ttl_s: float = 30 * 86400.0
+    # Auth-cache window granted to a request carrying a valid remember-me
+    # cookie, in place of auth_cache_ttl_s. Longer, because the device has
+    # proved a Frigate session and ticked "stay signed in" — but still
+    # bounded, so disabling the Frigate account cuts the holder off within
+    # this window rather than at remember_ttl_s.
+    remember_cache_ttl_s: float = 900.0
 
 
 class FaceCaptureSection(BaseModel):

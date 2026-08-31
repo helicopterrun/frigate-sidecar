@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from itertools import pairwise
 from pathlib import Path
 
 CSS_PATH = (
@@ -25,12 +26,19 @@ def _contrast(fg: str, bg: str) -> float:
         l1, l2 = l2, l1
     return (l1 + 0.05) / (l2 + 0.05)
 
-# Pairs: (text-token, background-token, min-ratio)
-_PAIRS = [
-    ("--muted-3", "--surface", 4.5),
-    ("--muted-3", "--surface-2", 4.5),
-    ("--text", "--surface", 4.5),
-    ("--muted", "--surface", 4.5),
+# Pairs: (token, background-token, min-ratio)
+#
+# --text/--muted/--muted-2 carry small text (every use is 9-13px, so none
+# qualify for the 3:1 large-text exemption) and must clear AA against every
+# surface they are painted on. --muted-3 is deliberately NOT a text token --
+# it is borders and decorative glyphs only, so it is held to the 3:1 non-text
+# threshold instead. See the ramp comment in triage.css.
+_TEXT_TOKENS = ("--text", "--muted", "--muted-2")
+_BACKGROUNDS = ("--surface", "--surface-2", "--panel")
+
+_PAIRS = [(t, bg, 4.5) for t in _TEXT_TOKENS for bg in _BACKGROUNDS] + [
+    ("--muted-3", "--surface", 3.0),
+    ("--muted-3", "--surface-2", 3.0),
 ]
 
 def _parse_themes(css: str) -> dict[str, dict[str, str]]:
@@ -65,3 +73,27 @@ def test_text_contrast_meets_aa() -> None:
                     f"{name}: {fg_name} ({fg}) on {bg_name} ({bg}) = {ratio:.2f}:1 < {min_ratio}"
                 )
     assert not errors, "WCAG AA contrast failures:\n" + "\n".join(errors)
+
+
+def test_neutral_ramp_is_monotonic() -> None:
+    """--muted must be lighter than --muted-2, which must be lighter than
+    --muted-3, in every theme.
+
+    The ramp inverted once already: raising --muted-3 to fix its contrast made
+    the nominally-dimmest step the brightest one, so "muted-3" no longer meant
+    anything. Ordering is what makes the token names honest.
+    """
+    themes = _parse_themes(CSS_PATH.read_text())
+    default_tokens = themes.get("default", {})
+    errors: list[str] = []
+    for name, tokens in themes.items():
+        merged = {**default_tokens, **tokens} if name != "default" else tokens
+        steps = [(t, merged.get(t)) for t in ("--muted", "--muted-2", "--muted-3")]
+        if any(v is None for _, v in steps):
+            continue
+        for (hi_name, hi), (lo_name, lo) in pairwise(steps):
+            if _luminance(hi) <= _luminance(lo):  # type: ignore[arg-type]
+                errors.append(
+                    f"{name}: {hi_name} ({hi}) is not lighter than {lo_name} ({lo})"
+                )
+    assert not errors, "Neutral ramp out of order:\n" + "\n".join(errors)

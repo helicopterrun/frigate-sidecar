@@ -111,7 +111,7 @@ of identified people, and writes that reach back into Frigate (labels, Frigate+
 submissions, face-library promotion), an open sidecar is a way around Frigate's
 own auth.
 
-Four deliberate exceptions:
+Three deliberate exceptions:
 
 - `/v1/capabilities`, `/healthz`, `/version` — reachability probes a client
   needs *before* it has a session (plus `/static` and `/login` itself).
@@ -120,15 +120,20 @@ Four deliberate exceptions:
   being opaque, unguessable, and short-lived.
 - the reverse-proxy catch-all — Frigate authenticates that traffic itself, and
   its 401 + `WWW-Authenticate` challenge must reach the client intact.
-- a valid remember-me cookie (the "stay signed in" box at `/login`) — a signed
-  expiry token minted only for a caller who had just proved a live Frigate
-  session. The window is hard, not sliding: `sidecar.remember_ttl_s` (default
-  30 days) from the moment the box is ticked, with no renewal on use. It is
-  checked *before* the Frigate session, so disabling the Frigate account does
-  not cut off a holder mid-window — the one kill switch is deleting
-  `.session_secret` (data dir) and restarting, which invalidates every
-  outstanding cookie at once. `HttpOnly`, `SameSite=Lax`; not `Secure`, since
-  plain-HTTP LAN deployments are the norm.
+
+The remember-me cookie (the "stay signed in" box at `/login`) is **not** an
+exception — it never admits a request on its own. It is a signed expiry token
+minted only for a caller who had just proved a live Frigate session, and its
+only effect is to lengthen how long a validated session is cached:
+`sidecar.remember_cache_ttl_s` (default 15 minutes) in place of
+`sidecar.auth_cache_ttl_s` (default 60 seconds). The Frigate session is still
+validated on every cache miss, so **disabling the Frigate account cuts a holder
+off within that window**, and an expired Frigate JWT sends them back to
+`/login`. The cookie's own lifetime is `sidecar.remember_ttl_s` (default 30
+days), hard rather than sliding, with no renewal on use; deleting
+`.session_secret` (data dir) and restarting invalidates every outstanding
+cookie at once. `HttpOnly`, `SameSite=Lax`; not `Secure`, since plain-HTTP LAN
+deployments are the norm.
 
 Set `sidecar.require_frigate_auth: false` only if your Frigate has auth
 disabled, in which case there is no session to check.
