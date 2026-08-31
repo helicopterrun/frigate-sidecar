@@ -35,9 +35,9 @@
     <table class="motion-table">
       <thead><tr>
         <th>camera</th><th>class</th>
-        <th>base mu/hr</th><th>tgt mu/hr</th><th>ratio</th>
-        <th>base yield/kmu</th><th>tgt yield/kmu</th>
-        <th>thr</th><th>suggestion</th>
+        <th>Base motion/hr</th><th>Target motion/hr</th><th>ratio</th>
+        <th>Base yield/1k</th><th>Target yield/1k</th>
+        <th>Threshold</th><th>suggestion</th>
       </tr></thead>
       <tbody>
       {% for r in rows %}
@@ -56,7 +56,7 @@
       </tbody>
     </table>
     {% else %}
-      <div class="empty">No qualifying rows for that window.</div>
+      <div class="empty">No motion data in this time range. The cameras may have had no motion events, or the threshold filter excluded all rows.</div>
     {% endif %}
   {% elif mode == 'single' %}
     <h2 class="section-h">
@@ -66,9 +66,9 @@
     <table class="motion-table">
       <thead><tr>
         <th>camera</th><th>class</th>
-        <th>mu/hr</th><th>events/hr</th><th>yield/kmu</th>
-        <th>obs det.fps</th><th>cfg det.fps</th>
-        <th>thr</th><th>contour</th><th>hrs</th>
+        <th>Motion/hr</th><th>Events/hr</th><th>Yield/1k</th>
+        <th>Obs FPS</th><th>Cfg FPS</th>
+        <th>Threshold</th><th>contour</th><th>hrs</th>
       </tr></thead>
       <tbody>
       {% for r in rows %}
@@ -88,7 +88,7 @@
       </tbody>
     </table>
     {% else %}
-      <div class="empty">No data for that window.</div>
+      <div class="empty">No motion data in this time range. The cameras may have had no motion events in this window.</div>
     {% endif %}
   {% else %}
     <div class="empty">Set a target range above or pick a preset.</div>

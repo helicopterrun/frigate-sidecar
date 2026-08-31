@@ -40,7 +40,7 @@
       </tbody>
     </table>
     {% else %}
-      <div class="empty">no zone hits in this window</div>
+      <div class="empty">No zone hits in the last {{ days }} days. Check that your cameras have zones configured in Frigate.</div>
     {% endif %}
 
     <h2 class="section-h">Possible mask candidates</h2>
@@ -61,7 +61,7 @@
       </tbody>
     </table>
     {% else %}
-      <div class="empty">none</div>
+      <div class="empty">No mask candidates found — false positives aren't clustering in a single spot.</div>
     {% endif %}
   {% endif %}
 </main>

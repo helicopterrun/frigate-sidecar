@@ -42,14 +42,24 @@
   }
 
   // Transient toast, replaces alert(): non-blocking, auto-dismisses.
+  // Optional `action` ({text, callback}) adds a clickable button, e.g. undo.
   var toastNode = null;
   var toastTimer = null;
-  function toast(msg, isError) {
+  function toast(msg, isError, action) {
     if (!toastNode) {
       toastNode = el("div", { class: "sc-toast", role: "status" });
       document.body.appendChild(toastNode);
     }
-    toastNode.textContent = msg;
+    toastNode.innerHTML = "";
+    toastNode.appendChild(el("span", { text: msg }));
+    if (action) {
+      toastNode.appendChild(el("button", { type: "button", text: action.text }, []));
+      toastNode.lastChild.addEventListener("click", function () {
+        clearTimeout(toastTimer);
+        toastNode.classList.remove("show");
+        action.callback();
+      });
+    }
     toastNode.classList.toggle("error", !!isError);
     toastNode.classList.add("show");
     clearTimeout(toastTimer);

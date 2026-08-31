@@ -400,7 +400,7 @@ def post_label(payload: LabelPayload, request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="invalid label")
     try:
         # `force=True` matches the UI's behavior: re-clicking a label updates.
-        recorder_record(
+        result = recorder_record(
             frigate_db=s.frigate.db_path,
             sidecar_db=s.sidecar.db_path,
             event_id=payload.event_id,
@@ -419,7 +419,7 @@ def post_label(payload: LabelPayload, request: Request) -> JSONResponse:
         plus_result = _maybe_submit_plus(
             request=request, event_id=payload.event_id, label=payload.label,
         )
-    return JSONResponse({"ok": True, "plus": plus_result})
+    return JSONResponse({"ok": True, "plus": plus_result, "before": result.get("before")})
 
 
 @router.post("/clear-label")

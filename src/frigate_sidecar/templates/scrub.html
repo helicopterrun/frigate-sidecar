@@ -6,9 +6,9 @@
 {% block body %}
 <main id="main-content">
   {% if not enabled %}
-    <div class="empty">scrub cache is disabled (<code>scrub.enabled: false</code>)</div>
+    <div class="empty">scrub cache is disabled (<code>scrub.enabled: false</code>). Set <code>scrub.enabled: true</code> in <code>sidecar.yml</code> and restart to enable.</div>
   {% elif not cameras %}
-    <div class="empty">no generated cameras yet — the generator may still be backfilling</div>
+    <div class="empty">no generated cameras yet — the generator may still be backfilling. This typically takes a few minutes after first start.</div>
   {% else %}
   {# Instrument layout: the frame and what is in it on the left, the reel
      standing beside it. The reel is vertical on every screen -- it was already

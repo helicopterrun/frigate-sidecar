@@ -36,10 +36,10 @@
   <table class="motion-table">
     <thead><tr>
       <th>camera</th><th>label</th>
-      <th>n</th><th>n_tp</th><th>n_fp</th>
-      <th>median score</th>
+      <th>Events</th><th>Real</th><th>False pos</th>
+      <th>Median</th>
       <th>p10 top</th><th>p25 top</th><th>p50 top</th><th>p75 top</th>
-      <th>suggested min_score</th><th>suggested threshold</th>
+      <th class="answer-col">Suggested min</th><th class="answer-col">Suggested threshold</th>
       <th>confidence</th>
     </tr></thead>
     <tbody>
@@ -55,8 +55,8 @@
         <td>{{ r.p25_top if r.p25_top is not none else '—' }}</td>
         <td>{{ r.p50_top if r.p50_top is not none else '—' }}</td>
         <td>{{ r.p75_top if r.p75_top is not none else '—' }}</td>
-        <td>{{ r.suggested_min_score if r.suggested_min_score is not none else '—' }}</td>
-        <td>{{ r.suggested_threshold if r.suggested_threshold is not none else '—' }}</td>
+        <td class="answer-col">{{ r.suggested_min_score if r.suggested_min_score is not none else '—' }}</td>
+        <td class="answer-col">{{ r.suggested_threshold if r.suggested_threshold is not none else '—' }}</td>
         <td><span class="cell-class {{ r.css }}">{{ r.confidence }}</span></td>
       </tr>
     {% endfor %}
@@ -84,7 +84,7 @@
   {% endif %}
 
   {% else %}
-    <div class="empty">No events in the last {{ filters.days }} days for these filters.</div>
+    <div class="empty">No events in the last {{ filters.days }} days for these filters. Try widening the time window or clearing the camera/label filter.</div>
   {% endif %}
 
   <p class="help footnote">

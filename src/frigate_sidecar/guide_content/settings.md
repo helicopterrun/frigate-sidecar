@@ -50,6 +50,9 @@ the sidecar's own knobs in one place.
   a camera is replaced or its streams reconfigured.
 - **Faces** — a read-only view of the face pipeline configuration.
 - **Appearance** — the theme picker (five palettes shared with the app).
+  All five themes are intentionally kept and CI-guarded — `test_contrast.py`
+  asserts WCAG AA contrast ratios for every theme's text-on-surface pairings,
+  so adding or editing a theme can't silently break readability.
 - **Help** — a link to this guide; on phones this is the guide's front door.
 - **About** — version and debug links.
 

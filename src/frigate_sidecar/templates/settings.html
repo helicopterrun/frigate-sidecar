@@ -80,7 +80,7 @@
     </tbody>
   </table>
   {% else %}
-    <div class="empty">no cameras found in the Frigate config</div>
+    <div class="empty">No cameras found in the Frigate config. Check that <code>frigate.config_path</code> in <code>sidecar.yml</code> points to Frigate's config file.</div>
   {% endif %}
 
   {# ---- Event clock alignment ---- #}
@@ -146,17 +146,9 @@
 
   <h4 class="sub-title">How notifications are decided</h4>
   <p class="help page-intro">
-    Every detection is scored on the <b>attention ladder</b>: who was seen
-    (unknown person, known person, animal, vehicle/thing) crossed with the
-    <b>place class</b> of the zone it happened in. The result is one of four
-    levels — <b>Log</b> (recorded, no alert), <b>Glance</b> (silent
-    notification), <b>Notify</b> (sound), <b>Alarm</b> (critical, breaks
-    through Focus). Context nudges the level up (nobody home, night,
-    lingering, approaching the secure area) or down (known face, low
-    confidence, leaving). Per-zone overrides set in
-    <a href="#zones" class="page-link">Zones &amp; routing</a> win over the
-    table. Full detail in the
-    <a href="/guide/push-notifications" class="page-link">guide</a>.
+    Every detection is scored on the attention ladder — who was seen crossed
+    with the place class of the zone. Full explanation in the
+    <a href="/guide/push-notifications#the-attention-ladder" class="page-link">push notifications guide</a>.
   </p>
   <table class="motion-table ladder-table">
     <thead><tr><th></th>{% for p in ladder.places %}<th>{{ p }}</th>{% endfor %}</tr></thead>

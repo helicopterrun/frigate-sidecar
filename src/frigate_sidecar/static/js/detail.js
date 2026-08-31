@@ -62,8 +62,25 @@ async function applyLabel(label) {
     // Brief flash before navigating away.
     setPlusStatus('sent', 'Plus: sent (' + (plus.plus_id || '') + ')');
   }
-  if (nextUrl) { window.location = nextUrl; }
-  else { window.location.reload(); }
+  if (!nextUrl) { window.location.reload(); return; }
+
+  const before = result.before;
+  let advanceTimer = setTimeout(() => { window.location = nextUrl; }, 3000);
+  SC.toast('Marked ' + label, false, {
+    text: 'Undo',
+    callback: async () => {
+      clearTimeout(advanceTimer);
+      const undoBody = before === null || before === undefined
+        ? {event_id: eventId}
+        : {event_id: eventId, label: before, note, session};
+      await fetch(before === null || before === undefined ? '/clear-label' : '/label', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(undoBody)
+      });
+      window.location.reload();
+    }
+  });
 }
 
 async function clearLabel() {

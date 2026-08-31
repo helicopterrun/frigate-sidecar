@@ -14,13 +14,28 @@ and example notifications rendered by the real pipeline).
 
 ## The attention ladder
 
-Alerts aren't binary. Each situation earns a rung on a ladder — from
-"logged, silent" up through banners, sounds, and time-sensitive alerts —
-based on what was seen, where (zone routing policy), and when (quiet hours).
-An approaching person can *escalate* rung by rung, and a situation that
-fizzles resolves quietly instead of leaving a stale alarm. You configure the
-ladder in the Elsinore app (Settings → Alerts) and the app's choices sync to
-the sidecar.
+Alerts aren't binary. Every detection is scored on a ladder with four rungs:
+
+- **Log** — recorded, no alert.
+- **Glance** — a silent notification.
+- **Notify** — a notification with sound.
+- **Alarm** — critical, breaks through Focus.
+
+The rung comes from a matrix: **who was seen** (unknown person, known
+person, animal, vehicle/thing) crossed with the **place class** of the zone
+it happened in — a package zone and a secure-area zone earn very different
+baseline rungs for the same subject.
+
+Context nudges the rung up or down from there. Nudges *up*: nobody's home,
+it's nighttime, the subject is lingering, or they're approaching the secure
+area. Nudges *down*: a known face, low detection confidence, or the subject
+is leaving. An approaching person can escalate rung by rung, and a situation
+that fizzles resolves quietly instead of leaving a stale alarm.
+
+Per-zone overrides set in Zones & routing win over the matrix outright. You
+configure the ladder in the Elsinore app (Settings → Alerts) and the app's
+choices sync to the sidecar. See your live matrix in
+[Settings → Push](/settings#push).
 
 ## Configuration
 
