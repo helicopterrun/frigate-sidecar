@@ -2,8 +2,9 @@
 {% set active_page = 'zone_hits' %}
 {% block title %}Zone hits · frigate-sidecar{% endblock %}
 
+{% block page_heading %}<h1 class="sr-only">Zone hits</h1>{% endblock %}
 {% block body %}
-<main>
+<main id="main-content">
   <form class="filters" method="get" action="/zone-hits">
     <label>camera
       <select name="camera">

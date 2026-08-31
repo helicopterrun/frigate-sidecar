@@ -10,17 +10,18 @@
 
 {% block body_attrs %} data-event-id="{{ event.id }}" data-prev-url="{{ prev_url }}" data-next-url="{{ next_url }}"{% endblock %}
 
+{% block page_heading %}<h1 class="sr-only">Event detail</h1>{% endblock %}
 {% block body %}
-<main>
+<main id="main-content">
   <div class="nav detail-nav">
     <a href="{{ list_url }}">← back to list</a>
     {% if prev_id %}
-      <a href="{{ prev_url }}">← prev (k)</a>
+      <a href="{{ prev_url }}">← prev <span class="kbd-hint">(k)</span></a>
     {% else %}
       <a class="disabled">← prev</a>
     {% endif %}
     {% if next_id %}
-      <a href="{{ next_url }}">next (j) →</a>
+      <a href="{{ next_url }}">next <span class="kbd-hint">(j)</span> →</a>
     {% else %}
       <a class="disabled">next →</a>
     {% endif %}
@@ -36,8 +37,8 @@
         {% if snapshot_url %}<button class="active" data-tab="snap">snapshot</button>{% endif %}
         {% if clip_url %}<button{% if not snapshot_url %} class="active"{% endif %} data-tab="clip">clip</button>{% endif %}
         {% if zone_polygons %}
-          <label class="zone-toggle"><input type="checkbox" id="zones-on" checked> zones (z)</label>
-          <label class="zone-toggle"><input type="checkbox" id="all-zones-on"> all zones (a)</label>
+          <label class="zone-toggle"><input type="checkbox" id="zones-on" checked> zones <span class="kbd-hint">(z)</span></label>
+          <label class="zone-toggle"><input type="checkbox" id="all-zones-on"> all zones <span class="kbd-hint">(a)</span></label>
         {% endif %}
       </div>
 
@@ -101,12 +102,12 @@
           {% endif %}
         </h2>
         <div class="label-buttons">
-          <button class="btn-tp {% if event.triage_label == 'tp' %}active{% endif %}" data-label="tp">Real (t)</button>
-          <button class="btn-fp {% if event.triage_label == 'fp' %}active{% endif %}" data-label="fp">False alarm (f)</button>
-          <button class="btn-skip {% if event.triage_label == 'skip' %}active{% endif %}" data-label="skip">Skip (s)</button>
+          <button class="btn-tp {% if event.triage_label == 'tp' %}active{% endif %}" data-label="tp">Real <span class="kbd-hint">(t)</span></button>
+          <button class="btn-fp {% if event.triage_label == 'fp' %}active{% endif %}" data-label="fp">False alarm <span class="kbd-hint">(f)</span></button>
+          <button class="btn-skip {% if event.triage_label == 'skip' %}active{% endif %}" data-label="skip">Skip <span class="kbd-hint">(s)</span></button>
         </div>
         <div class="panel-gap">
-          <button class="btn-clear btn-clear-full" data-clear>clear (c)</button>
+          <button class="btn-clear btn-clear-full" data-clear>clear <span class="kbd-hint">(c)</span></button>
         </div>
         {% if plus_enabled %}
         <div class="plus-toggle panel-gap">

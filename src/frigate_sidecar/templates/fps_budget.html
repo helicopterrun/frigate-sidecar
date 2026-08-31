@@ -2,8 +2,9 @@
 {% set active_page = 'fps_budget' %}
 {% block title %}FPS Budget · frigate-sidecar{% endblock %}
 
+{% block page_heading %}<h1 class="sr-only">FPS budget</h1>{% endblock %}
 {% block body %}
-<main>
+<main id="main-content">
   {% if error %}
     <div class="empty error">{{ error }}</div>
   {% else %}

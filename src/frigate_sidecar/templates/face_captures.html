@@ -4,8 +4,9 @@
 {% set summary = _n ~ ' visit' ~ ('s' if _n != 1 else '') %}
 {% block title %}Face captures · frigate-sidecar{% endblock %}
 
+{% block page_heading %}<h1 class="sr-only">Face captures</h1>{% endblock %}
 {% block body %}
-<main>
+<main id="main-content">
   <div class="faces-bar">
     <button type="button" id="rescan-captures">Run capture now</button>
     <span class="mode">
@@ -26,7 +27,6 @@
     {% else %}
     <span class="mode">last run: <b>never</b></span>
     {% endif %}
-    <a href="/faces" class="page-link">Face crops →</a>
   </div>
 
   {% if not visits %}

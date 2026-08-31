@@ -16,7 +16,6 @@ Optional features are Python "extras" — install only what you use:
 |---|---|
 | `http2` | faster proxying |
 | `annotation` | annotation-offset analysis |
-| `faces` | face crop curation ([Faces](/faces)) |
 | `enrich` | identity clustering ([Identities](/enrich/clusters)) |
 
 ## Upgrading

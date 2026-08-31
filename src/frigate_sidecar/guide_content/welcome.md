@@ -23,7 +23,7 @@ Right now this sidecar has been up **{{stat:uptime}}** and Frigate has logged
 | Watch | [Status](/) with live camera views |
 | Review | [Scrub](/scrub), [Triage](/triage) |
 | Space | [Map](/map) with camera placement and calibration |
-| People | [Faces](/faces), [Face captures](/faces/captures), [Identities](/enrich/clusters) |
+| People | [Face captures](/faces/captures), [Identities](/enrich/clusters) |
 | Tuning | [Scores](/score-histogram), [Motion](/motion), [FPS budget](/fps-budget), [Zone hits](/zone-hits), [Placement](/placement) |
 | Phone | [Settings](/settings) for push devices and zone routing, [Replay](/replay) for testing alerts |
 

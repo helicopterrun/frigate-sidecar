@@ -2,8 +2,9 @@
 {% set active_page = 'status' %}
 {% block title %}{{ camera }} · live · frigate-sidecar{% endblock %}
 
+{% block page_heading %}<h1 class="sr-only">Live view</h1>{% endblock %}
 {% block body %}
-<main>
+<main id="main-content">
   <h2 class="section-h" style="margin-top:0">Live — {{ camera }}</h2>
   <div class="live-cam-switch">
     {% for c in cameras %}

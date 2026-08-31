@@ -177,7 +177,7 @@ def test_settings_page_unifies_surfaces(client: TestClient) -> None:
     assert r.status_code == 200
     # One page, all the sections.
     for anchor in ("Zones &amp; routing", "Camera neighbors", "Push &amp; devices",
-                   "Faces", "Data", "About"):
+                   "Data", "About"):
         assert anchor in r.text, anchor
     # Zones editor ids so zones.js drives the section unchanged.
     for element_id in ("zones-list", "neighbors-list", "save-btn",

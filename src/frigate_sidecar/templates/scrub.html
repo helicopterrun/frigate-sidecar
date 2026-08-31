@@ -2,8 +2,9 @@
 {% set active_page = 'scrub' %}
 {% block title %}Scrub · frigate-sidecar{% endblock %}
 
+{% block page_heading %}<h1 class="sr-only">Scrub</h1>{% endblock %}
 {% block body %}
-<main>
+<main id="main-content">
   {% if not enabled %}
     <div class="empty">scrub cache is disabled (<code>scrub.enabled: false</code>)</div>
   {% elif not cameras %}

@@ -2,14 +2,14 @@
 {% set active_page = 'settings' %}
 {% block title %}Settings · frigate-sidecar{% endblock %}
 
+{% block page_heading %}<h1 class="sr-only">Settings</h1>{% endblock %}
 {% block body %}
-<main>
+<main id="main-content">
   <nav class="settings-nav" aria-label="Settings sections">
     <a href="#zones" class="page-link">Zones</a>
     <a href="#cameras" class="page-link">Cameras</a>
     <a href="#alignment" class="page-link">Alignment</a>
     <a href="#push" class="page-link">Push</a>
-    <a href="#faces" class="page-link">Faces</a>
     <a href="#services" class="page-link">Services</a>
     <a href="#data" class="page-link">Data</a>
     <a href="#appearance" class="page-link">Appearance</a>

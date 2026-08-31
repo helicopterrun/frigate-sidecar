@@ -2,8 +2,9 @@
 {% set active_page = 'motion' %}
 {% block title %}Motion · frigate-sidecar{% endblock %}
 
+{% block page_heading %}<h1 class="sr-only">Motion</h1>{% endblock %}
 {% block body %}
-<main>
+<main id="main-content">
   <form class="filters motion-form" method="get" action="/motion">
     <label>baseline range (blank = single-window view)
       <input type="text" name="baseline" value="{{ baseline }}"

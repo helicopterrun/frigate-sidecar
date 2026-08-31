@@ -3,8 +3,9 @@
 {% set summary = events|length ~ ' matching event' ~ ('s' if events|length != 1 else '') %}
 {% block title %}Triage · frigate-sidecar{% endblock %}
 
+{% block page_heading %}<h1 class="sr-only">Triage</h1>{% endblock %}
 {% block body %}
-<main>
+<main id="main-content">
   {% set untriaged = events | selectattr('triage_label', 'none') | list %}
   <div class="triage-intro">
     <p class="page-intro">Label detections as <b>real</b> or a

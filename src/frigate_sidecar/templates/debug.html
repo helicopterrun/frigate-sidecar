@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% set active_page = 'debug' %}
 {% block title %}debug — frigate-sidecar{% endblock %}
+{% block page_heading %}<h1 class="sr-only">Debug</h1>{% endblock %}
 {% block body %}
-<main>
+<main id="main-content">
   <div class="stat-row">
     <div class="stat-card">
       <div class="stat-label">Sidecar version</div>

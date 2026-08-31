@@ -15,27 +15,27 @@
   <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
 </svg>
 <header>
-  <h1><a href="/">frigate-sidecar</a></h1>
-  <nav class="pages">
-    <a href="/" class="page-link{% if _active == 'status' %} active{% endif %}">Status</a>
-    <a href="/cameras" class="page-link{% if _active == 'cameras' %} active{% endif %}">Cameras</a>
-    <a href="/scrub" class="page-link{% if _active == 'scrub' %} active{% endif %}">Scrub</a>
-    <a href="/triage" class="page-link{% if _active == 'triage' %} active{% endif %}">Triage</a>
-    <a href="/map" class="page-link{% if _active == 'map' %} active{% endif %}">Map</a>
+  <div class="brand"><a href="/">frigate-sidecar</a></div>
+  <nav class="pages" aria-label="Main">
+    <a href="/" class="page-link{% if _active == 'status' %} active{% endif %}"{% if _active == 'status' %} aria-current="page"{% endif %}>Status</a>
+    <a href="/cameras" class="page-link{% if _active == 'cameras' %} active{% endif %}"{% if _active == 'cameras' %} aria-current="page"{% endif %}>Cameras</a>
+    <a href="/scrub" class="page-link{% if _active == 'scrub' %} active{% endif %}"{% if _active == 'scrub' %} aria-current="page"{% endif %}>Scrub</a>
+    <a href="/triage" class="page-link{% if _active == 'triage' %} active{% endif %}"{% if _active == 'triage' %} aria-current="page"{% endif %}>Triage</a>
+    <a href="/map" class="page-link{% if _active == 'map' %} active{% endif %}"{% if _active == 'map' %} aria-current="page"{% endif %}>Map</a>
     <details class="nav-group">
-      <summary class="page-link{% if _active in _analysis_pages %} active{% endif %}">Analysis</summary>
+      <summary class="page-link{% if _active in _analysis_pages %} active{% endif %}"{% if _active in _analysis_pages %} aria-current="page"{% endif %}>Analysis</summary>
       <div class="nav-drop">
-        <a href="/motion" class="page-link{% if _active == 'motion' %} active{% endif %}">Motion</a>
-        <a href="/faces/captures" class="page-link{% if _active == 'face_captures' %} active{% endif %}">Face captures</a>
-        <a href="/enrich/clusters" class="page-link{% if _active == 'enrich' %} active{% endif %}">Identities</a>
-        <a href="/score-histogram" class="page-link{% if _active == 'score_histogram' %} active{% endif %}">Scores</a>
-        <a href="/fps-budget" class="page-link{% if _active == 'fps_budget' %} active{% endif %}">FPS budget</a>
-        <a href="/placement" class="page-link{% if _active == 'placement' %} active{% endif %}">Placement</a>
-        <a href="/zone-hits" class="page-link{% if _active == 'zone_hits' %} active{% endif %}">Zone hits</a>
-        <a href="/replay" class="page-link{% if _active == 'replay' %} active{% endif %}">Replay</a>
+        <a href="/motion" class="page-link{% if _active == 'motion' %} active{% endif %}"{% if _active == 'motion' %} aria-current="page"{% endif %}>Motion</a>
+        <a href="/faces/captures" class="page-link{% if _active == 'face_captures' %} active{% endif %}"{% if _active == 'face_captures' %} aria-current="page"{% endif %}>Face captures</a>
+        <a href="/enrich/clusters" class="page-link{% if _active == 'enrich' %} active{% endif %}"{% if _active == 'enrich' %} aria-current="page"{% endif %}>Identities</a>
+        <a href="/score-histogram" class="page-link{% if _active == 'score_histogram' %} active{% endif %}"{% if _active == 'score_histogram' %} aria-current="page"{% endif %}>Scores</a>
+        <a href="/fps-budget" class="page-link{% if _active == 'fps_budget' %} active{% endif %}"{% if _active == 'fps_budget' %} aria-current="page"{% endif %}>FPS budget</a>
+        <a href="/placement" class="page-link{% if _active == 'placement' %} active{% endif %}"{% if _active == 'placement' %} aria-current="page"{% endif %}>Placement</a>
+        <a href="/zone-hits" class="page-link{% if _active == 'zone_hits' %} active{% endif %}"{% if _active == 'zone_hits' %} aria-current="page"{% endif %}>Zone hits</a>
+        <a href="/replay" class="page-link{% if _active == 'replay' %} active{% endif %}"{% if _active == 'replay' %} aria-current="page"{% endif %}>Replay</a>
       </div>
     </details>
-    <a href="/settings" class="page-link{% if _active == 'settings' %} active{% endif %}">Settings</a>
+    <a href="/settings" class="page-link{% if _active == 'settings' %} active{% endif %}"{% if _active == 'settings' %} aria-current="page"{% endif %}>Settings</a>
   </nav>
   <span class="stats">{{ summary or '' }}
     {% if counts and (counts.get('tp') or counts.get('fp') or counts.get('skip')) %}
@@ -52,9 +52,9 @@
 </header>
 {# Phone navigation: fixed bottom tab bar, like the app's. Desktop hides it. #}
 <nav class="tabbar" aria-label="Primary">
-  <a href="/" class="tab{% if _active in ('status', 'cameras') %} active{% endif %}"><svg><use href="#i-status"/></svg><span>Status</span></a>
-  <a href="/scrub" class="tab{% if _active == 'scrub' %} active{% endif %}"><svg><use href="#i-scrub"/></svg><span>Scrub</span></a>
-  <a href="/triage" class="tab{% if _active == 'triage' %} active{% endif %}"><svg><use href="#i-triage"/></svg><span>Triage</span></a>
-  <a href="/map" class="tab{% if _active == 'map' %} active{% endif %}"><svg><use href="#i-map"/></svg><span>Map</span></a>
-  <a href="/settings" class="tab{% if _active == 'settings' %} active{% endif %}"><svg><use href="#i-settings"/></svg><span>Settings</span></a>
+  <a href="/" class="tab{% if _active in ('status', 'cameras') %} active{% endif %}"{% if _active in ('status', 'cameras') %} aria-current="page"{% endif %}><svg><use href="#i-status"/></svg><span>Status</span></a>
+  <a href="/scrub" class="tab{% if _active == 'scrub' %} active{% endif %}"{% if _active == 'scrub' %} aria-current="page"{% endif %}><svg><use href="#i-scrub"/></svg><span>Scrub</span></a>
+  <a href="/triage" class="tab{% if _active == 'triage' %} active{% endif %}"{% if _active == 'triage' %} aria-current="page"{% endif %}><svg><use href="#i-triage"/></svg><span>Triage</span></a>
+  <a href="/map" class="tab{% if _active == 'map' %} active{% endif %}"{% if _active == 'map' %} aria-current="page"{% endif %}><svg><use href="#i-map"/></svg><span>Map</span></a>
+  <a href="/settings" class="tab{% if _active == 'settings' %} active{% endif %}"{% if _active == 'settings' %} aria-current="page"{% endif %}><svg><use href="#i-settings"/></svg><span>Settings</span></a>
 </nav>

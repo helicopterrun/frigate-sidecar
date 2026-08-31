@@ -2,8 +2,9 @@
 {% set active_page = 'cameras' %}
 {% block title %}Cameras · frigate-sidecar{% endblock %}
 
+{% block page_heading %}<h1 class="sr-only">Cameras</h1>{% endblock %}
 {% block body %}
-<main>
+<main id="main-content">
   <h2 class="section-h">Cameras <span class="help">— tap a camera for its live stream</span></h2>
   <div class="snap-grid">
     {% for cam in cameras %}

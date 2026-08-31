@@ -2,8 +2,9 @@
 {% set active_page = 'replay' %}
 {% block title %}Push replay · frigate-sidecar{% endblock %}
 
+{% block page_heading %}<h1 class="sr-only">Replay</h1>{% endblock %}
 {% block body %}
-<main>
+<main id="main-content">
   <p class="help page-intro warn-note">
     This publishes real events to all registered devices (unless dry-run is on).
   </p>
