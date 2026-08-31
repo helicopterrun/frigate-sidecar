@@ -52,7 +52,7 @@
   </span>
   <form class="search-form" role="search" action="/triage" method="get">
     <input type="search" name="q" class="search-input" placeholder="Search events…" autocomplete="off" aria-label="Search events">
-    <div class="search-drop" id="search-drop"></div>
+    <div class="search-drop" hidden></div>
   </form>
   <span class="header-right">
     <a href="/replay" class="page-link util{% if _active == 'replay' %} active{% endif %}">Replay</a>
@@ -70,6 +70,11 @@
 </nav>
 <div class="more-backdrop" id="more-backdrop"></div>
 <nav class="more-sheet" id="more-sheet" aria-label="All pages">
+  <form class="search-form" role="search" action="/triage" method="get">
+    <input type="search" name="q" class="search-input" placeholder="Search events…"
+           autocomplete="off" aria-label="Search events">
+    <div class="search-drop" hidden></div>
+  </form>
   <div class="more-group">
     <div class="more-heading">Watch</div>
     <a href="/" class="page-link">Status</a>

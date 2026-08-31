@@ -146,11 +146,17 @@ def _remember(app: FastAPI, key: str, expiry: float, *, max_entries: int) -> Non
     cache[key] = expiry
 
 
-async def validate_frigate_session(app: FastAPI, cookie: str) -> None:
+async def validate_frigate_session(
+    app: FastAPI, cookie: str, *, ttl_s: float | None = None
+) -> None:
     """Raise HTTPException unless `cookie` is a live Frigate session.
 
     Validated against `frigate.proxy_base_url` -- the authenticated origin --
     because that is the one that can actually reject a bad cookie.
+
+    `ttl_s` overrides how long a successful check is cached; callers holding a
+    valid remember-me cookie pass the longer `remember_cache_ttl_s`. Defaults
+    to `sidecar.auth_cache_ttl_s`.
     """
     from frigate_sidecar.frigate_api import get_async_client
 
@@ -181,7 +187,7 @@ async def validate_frigate_session(app: FastAPI, cookie: str) -> None:
     _remember(
         app,
         key,
-        now + settings.sidecar.auth_cache_ttl_s,
+        now + (settings.sidecar.auth_cache_ttl_s if ttl_s is None else ttl_s),
         max_entries=settings.sidecar.auth_cache_max_entries,
     )
 
@@ -234,23 +240,23 @@ class FrigateAuthMiddleware:
                 cookie = value.decode("latin-1")
                 break
 
-        # A valid remember-me cookie ("stay signed in" at /login) speeds up
-        # auth by skipping the Frigate probe when the session is cached.
-        # We still validate the Frigate session so that a stale Frigate JWT
-        # triggers re-login — without it, proxied content (/api/* images,
+        # The Frigate session is always validated, so a stale Frigate JWT
+        # triggers re-login — without that, proxied content (/api/* images,
         # live streams) would silently 401 while sidecar pages kept working.
+        # A valid remember-me cookie ("stay signed in" at /login) does not
+        # bypass that check; it buys a longer cache window, so a device that
+        # ticked the box re-probes upstream every remember_cache_ttl_s instead
+        # of every auth_cache_ttl_s. Chosen before the call rather than in a
+        # branch around it, so an auth failure costs exactly one probe.
         remember = _cookie_value(cookie, REMEMBER_COOKIE)
-        if remember and _remember_token_valid(app, remember):
-            try:
-                await validate_frigate_session(app, cookie)
-            except HTTPException:
-                pass  # fall through to normal auth failure handling
-            else:
-                await self.app(scope, receive, send)
-                return
+        ttl_s = (
+            settings.sidecar.remember_cache_ttl_s
+            if remember and _remember_token_valid(app, remember)
+            else settings.sidecar.auth_cache_ttl_s
+        )
 
         try:
-            await validate_frigate_session(app, cookie)
+            await validate_frigate_session(app, cookie, ttl_s=ttl_s)
         except HTTPException as exc:
             if scope["type"] == "websocket":
                 # Reject before the handshake completes; 1008 is "policy

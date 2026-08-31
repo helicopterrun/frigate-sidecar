@@ -16,6 +16,7 @@ sidecar marker rather than concluding from the status alone.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -322,3 +323,64 @@ def test_remember_endpoint_itself_is_gated(
     client = _build(frigate_db_path, sidecar_db_path, tmp_path, _denied_handler(upstream_calls))
     r = client.post("/login/remember")
     assert r.status_code == 401
+
+
+def test_auth_failure_probes_upstream_exactly_once(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+) -> None:
+    """A rejected request must cost one upstream probe, not two.
+
+    The remember-me path used to validate, swallow the HTTPException, and fall
+    through to a second identical validate. Failures are never cached, so that
+    was two round-trips to Frigate for every unauthenticated request carrying a
+    remember cookie.
+    """
+    mint_calls: list[httpx.Request] = []
+    client = _build(frigate_db_path, sidecar_db_path, tmp_path, _ok_handler(mint_calls))
+    token = client.post(
+        "/login/remember", headers={"cookie": "frigate_token=live"}
+    ).cookies.get(auth.REMEMBER_COOKIE)
+    assert token
+
+    denied: list[httpx.Request] = []
+    client2 = _build(frigate_db_path, sidecar_db_path, tmp_path, _denied_handler(denied))
+    client2.get(
+        "/",
+        headers={"cookie": f"{auth.REMEMBER_COOKIE}={token}; frigate_token=stale"},
+        follow_redirects=False,
+    )
+    assert len(denied) == 1, f"expected 1 upstream probe, got {len(denied)}"
+
+
+def test_remember_cookie_grants_the_longer_auth_cache_window(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+) -> None:
+    """A valid remember cookie caches the validated session for
+    remember_cache_ttl_s instead of the much shorter auth_cache_ttl_s."""
+    calls: list[httpx.Request] = []
+    client = _build(
+        frigate_db_path, sidecar_db_path, tmp_path, _ok_handler(calls),
+        auth_cache_ttl_s=1.0, remember_cache_ttl_s=3600.0,
+    )
+    token = client.post(
+        "/login/remember", headers={"cookie": "frigate_token=live"}
+    ).cookies.get(auth.REMEMBER_COOKIE)
+    assert token
+
+    app = client.app
+    app.state.auth_cache = {}  # drop the entry the mint request just wrote
+    before = time.time()
+    client.get(
+        "/",
+        headers={"cookie": f"{auth.REMEMBER_COOKIE}={token}; frigate_token=live"},
+    )
+
+    expiry = next(iter(app.state.auth_cache.values()))
+    assert expiry - before > 60, "remember cookie did not extend the cache window"
+
+    # Without the remember cookie the same session gets the short window.
+    app.state.auth_cache = {}
+    before2 = time.time()
+    client.get("/", headers={"cookie": "frigate_token=live"})
+    expiry2 = next(iter(app.state.auth_cache.values()))
+    assert expiry2 - before2 <= 2, "plain session should use auth_cache_ttl_s"

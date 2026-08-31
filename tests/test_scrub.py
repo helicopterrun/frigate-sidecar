@@ -57,7 +57,7 @@ CREATE TABLE event (
 def _skip_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Bypass the central Frigate-session gate (frigate_sidecar.auth)."""
 
-    async def _noop(app: object, cookie: str) -> None:
+    async def _noop(app: object, cookie: str, *, ttl_s: float | None = None) -> None:
         return None
 
     monkeypatch.setattr(auth, "validate_frigate_session", _noop)
