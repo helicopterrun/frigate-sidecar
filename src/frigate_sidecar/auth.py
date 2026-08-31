@@ -234,12 +234,20 @@ class FrigateAuthMiddleware:
                 cookie = value.decode("latin-1")
                 break
 
-        # A valid remember-me cookie ("stay signed in" at /login) admits the
-        # request even after Frigate's own JWT has expired.
+        # A valid remember-me cookie ("stay signed in" at /login) speeds up
+        # auth by skipping the Frigate probe when the session is cached.
+        # We still validate the Frigate session so that a stale Frigate JWT
+        # triggers re-login — without it, proxied content (/api/* images,
+        # live streams) would silently 401 while sidecar pages kept working.
         remember = _cookie_value(cookie, REMEMBER_COOKIE)
         if remember and _remember_token_valid(app, remember):
-            await self.app(scope, receive, send)
-            return
+            try:
+                await validate_frigate_session(app, cookie)
+            except HTTPException:
+                pass  # fall through to normal auth failure handling
+            else:
+                await self.app(scope, receive, send)
+                return
 
         try:
             await validate_frigate_session(app, cookie)

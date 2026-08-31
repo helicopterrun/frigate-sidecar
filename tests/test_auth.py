@@ -258,25 +258,45 @@ def test_login_page_is_exempt_and_renders(
     assert not upstream_calls
 
 
-def test_remember_cookie_survives_frigate_session_expiry(
+def test_remember_cookie_with_valid_frigate_session(
     frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
     upstream_calls: list[httpx.Request],
 ) -> None:
-    # Mint with a live Frigate session…
     client = _build(frigate_db_path, sidecar_db_path, tmp_path, _ok_handler(upstream_calls))
     r = client.post("/login/remember", headers={"cookie": "frigate_token=live"})
     assert r.status_code == 204
     token = r.cookies.get(auth.REMEMBER_COOKIE)
     assert token
 
-    # …then a fresh app (same data dir → same secret) with a *denying* Frigate:
-    # the remember cookie alone must admit the request without an upstream call.
+    cookie = f"{auth.REMEMBER_COOKIE}={token}; frigate_token=live"
+    r2 = client.get(
+        "/", headers={"cookie": cookie, "accept": "text/html"},
+    )
+    assert r2.status_code == 200
+
+
+def test_remember_cookie_redirects_when_frigate_session_expired(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+    upstream_calls: list[httpx.Request],
+) -> None:
+    """When the Frigate JWT expires but the remember cookie is still valid,
+    redirect to /login so proxied content (/api/* images) doesn't silently 401.
+    """
+    client = _build(frigate_db_path, sidecar_db_path, tmp_path, _ok_handler(upstream_calls))
+    r = client.post("/login/remember", headers={"cookie": "frigate_token=live"})
+    assert r.status_code == 204
+    token = r.cookies.get(auth.REMEMBER_COOKIE)
+    assert token
+
     calls2: list[httpx.Request] = []
     client2 = _build(frigate_db_path, sidecar_db_path, tmp_path, _denied_handler(calls2))
     r2 = client2.get(
-        "/", headers={"cookie": f"{auth.REMEMBER_COOKIE}={token}", "accept": "text/html"},
+        "/",
+        headers={"cookie": f"{auth.REMEMBER_COOKIE}={token}", "accept": "text/html"},
+        follow_redirects=False,
     )
-    assert r2.status_code == 200
+    assert r2.status_code == 302
+    assert r2.headers["location"].startswith("/login")
 
 
 def test_remember_cookie_requires_valid_signature(
