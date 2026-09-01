@@ -15,4 +15,13 @@
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && sheet.classList.contains('open')) toggle();
   });
+
+  var searchBtn = document.getElementById('search-btn');
+  if (searchBtn) {
+    searchBtn.addEventListener('click', function () {
+      if (!sheet.classList.contains('open')) toggle();
+      var input = sheet.querySelector('.search-input');
+      if (input) input.focus();
+    });
+  }
 })();

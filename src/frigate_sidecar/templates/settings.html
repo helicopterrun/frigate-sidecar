@@ -26,7 +26,7 @@
     field sets how a zone reads in notifications ("Person in {name}") — it
     wins over Frigate's <code>friendly_name</code>.
   </p>
-  <div id="zones-list" class="stat-row skeleton">
+  <div id="zones-list" class="stat-row zones-grid skeleton">
     {# Skeletons: cleared when zones.js renders the real rows. #}
     <div class="skeleton-row" style="flex:1 1 300px"></div>
     <div class="skeleton-row" style="flex:1 1 300px"></div>
@@ -258,7 +258,7 @@
   </ul>
   <details class="advanced">
     <summary>Capabilities (what the app sees)</summary>
-    <div class="panel"><pre class="debug-json">{{ capabilities_json }}</pre></div>
+    <div class="panel">{% include "_capabilities.html" %}</div>
   </details>
 </main>
 {% endblock %}

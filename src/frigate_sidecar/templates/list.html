@@ -19,7 +19,8 @@
       {% if untriaged %}
       <a class="btn-primary triage-start"
          href="/event/{{ untriaged[0].id }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
-        Start review ({{ untriaged|length }}) &rarr;</a>
+        Start review ({{ untriaged|length }}) &rarr;
+        <small>Review one at a time</small></a>
       {% endif %}
     </div>
   </div>

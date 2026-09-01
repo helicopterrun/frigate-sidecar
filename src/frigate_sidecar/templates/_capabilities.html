@@ -1,0 +1,6 @@
+{% for key, value in cap_sections %}
+<details class="cap-section">
+  <summary>{{ key }}</summary>
+  <pre class="debug-json">{{ value }}</pre>
+</details>
+{% endfor %}

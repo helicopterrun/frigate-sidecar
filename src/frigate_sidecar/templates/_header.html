@@ -14,6 +14,7 @@
   <symbol id="i-map" viewBox="0 0 24 24"><path d="M3.5 5.5 9 4l6 2 5.5-1.5v14L15 20l-6-2-5.5 1.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="1.2" fill="none"/></symbol>
   <symbol id="i-zones" viewBox="0 0 24 24"><path d="M4 5.5 9.5 4l5 1.5L20 4v14.5L14.5 20l-5-1.5L4 20z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M9.5 4v14.5M14.5 5.5V20" stroke="currentColor" stroke-width="1.2" fill="none"/></symbol>
   <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M15 15l5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
   <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="19" r="1.8" fill="currentColor"/></symbol>
 </svg>
 <header>
@@ -66,6 +67,7 @@
   <a href="/scrub" class="tab{% if _active == 'scrub' %} active{% endif %}"{% if _active == 'scrub' %} aria-current="page"{% endif %}><svg><use href="#i-scrub"/></svg><span>Scrub</span></a>
   <a href="/triage" class="tab{% if _active == 'triage' %} active{% endif %}"{% if _active == 'triage' %} aria-current="page"{% endif %}><svg><use href="#i-triage"/></svg><span>Triage</span></a>
   <a href="/map" class="tab{% if _active == 'map' %} active{% endif %}"{% if _active == 'map' %} aria-current="page"{% endif %}><svg><use href="#i-map"/></svg><span>Map</span></a>
+  <button type="button" class="tab" id="search-btn" aria-label="Search events"><svg><use href="#i-search"/></svg><span>Search</span></button>
   <button type="button" class="tab" id="more-btn" aria-label="More pages" aria-expanded="false"><svg><use href="#i-more"/></svg><span>More</span></button>
 </nav>
 <div class="more-backdrop" id="more-backdrop"></div>

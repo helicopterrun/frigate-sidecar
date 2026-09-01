@@ -28,6 +28,9 @@ async def debug_index(request: Request) -> Any:
         {
             "version": __version__,
             "capabilities_json": json.dumps(caps, indent=2),
+            "cap_sections": [
+                (k, json.dumps(v, indent=2, sort_keys=True)) for k, v in sorted(caps.items())
+            ],
             "counts": {},
         },
     )

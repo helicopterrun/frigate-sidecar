@@ -37,7 +37,7 @@
 
 
   function renderZone(zone) {
-    var card = el("div", { class: "stat-card", style: "min-width:280px" });
+    var card = el("div", { class: "stat-card" });
     var title = el("div", { class: "stat-label" });
     var configured = (doc.zone_names || {})[zone.zone] || "";
     title.appendChild(el("strong", { text: configured || zone.friendly_name || zone.zone }));

@@ -180,6 +180,9 @@ async def settings_view(request: Request) -> Any:
             "notif_examples": _notification_examples(),
             "version": __version__,
             "capabilities_json": json.dumps(caps, indent=2, sort_keys=True),
+            "cap_sections": [
+                (k, json.dumps(v, indent=2, sort_keys=True)) for k, v in sorted(caps.items())
+            ],
             "counts": {},
         },
     )

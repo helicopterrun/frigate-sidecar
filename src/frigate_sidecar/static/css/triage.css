@@ -39,7 +39,7 @@
   --lane-person: #66B9EE;
   --lane-vehicle: #B594E8;
   --lane-animal: #69C48B;
-  --lane-package: #E3B341;
+  --lane-package: #D4854A;
   --radius-lg: 12px;
   --radius-md: 8px;
   --radius-sm: 4px;
@@ -226,6 +226,9 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .motion-table th { text-align: left; padding: 8px 10px; background: var(--surface); color: var(--muted); border-bottom: 1px solid var(--stroke); font-weight: 600; font-family: var(--font-mono); }
 .motion-table td { padding: 8px 10px; border-bottom: 1px solid var(--stroke-soft); font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
 .motion-table tr:hover td { background: var(--surface); }
+.motion-table tr:nth-child(even) td { background: var(--surface-2); }
+.motion-table tr:nth-child(even):hover td { background: var(--surface); }
+.motion-table thead th { position: sticky; top: 0; z-index: 1; }
 .cell-class { display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; text-transform: lowercase; }
 .cell-class.muted { background: var(--surface-2); color: var(--muted); }
 .cell-class.ok    { background: var(--ok-bg); color: var(--ok-text); }
@@ -239,14 +242,16 @@ code { background: var(--panel); padding: 2px 6px; border-radius: 3px; font-fami
 
 /* FPS-budget + score-histogram pages */
 .stat-row { display: flex; gap: 10px; margin: 8px 0 20px; flex-wrap: wrap; }
-.stat-card { background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); padding: 10px 14px; min-width: 120px; flex: 1; }
+.stat-card { background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); padding: 10px 14px; min-width: 120px; max-width: 200px; flex: 1; }
 .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 4px; font-family: var(--font-mono); }
 .stat-value { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
 .stat-value.cell-class { display: inline-block; padding: 2px 10px; }
+.stat-row.zones-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
 @media (max-width: 720px) {
   /* Phones: a tight 3-up grid instead of two fat cards per row — the whole
      health band should fit in one glance. */
   .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 6px 0 16px; }
+  .stat-row.zones-grid { grid-template-columns: 1fr; }
   .stat-card { padding: 8px 10px; min-width: 0; }
   .stat-label { font-size: 10px; letter-spacing: 0.3px; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .stat-value { font-size: 15px; }
@@ -308,6 +313,7 @@ details.advanced summary:hover { color: var(--text); }
 .triage-intro .page-intro { margin: 0 0 8px; }
 .triage-progress { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .triage-start { margin-left: auto; text-decoration: none; }
+.triage-start small { display: block; font-size: 11px; opacity: .75; font-weight: 400; }
 /* Filters live behind a disclosure; desktop pins it open (summary hidden,
    `open` set server-side), phones collapse it via list.js. */
 .filters-wrap > summary { display: none; list-style: none; cursor: pointer; user-select: none; width: max-content; margin-bottom: 8px; border: 1px solid var(--stroke); }
@@ -442,7 +448,7 @@ a { color: var(--accent); }
   .kbd-hint { display: none; }
 
   /* List view: card grid already auto-fills; just tighten the per-tile size. */
-  .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
   .card .meta { font-size: 11px; padding: 6px 8px; }
 
   /* Filters wrap into a more readable column-ish layout. */
@@ -467,7 +473,8 @@ a { color: var(--accent); }
 
 .sv-reelcol { display: flex; gap: var(--space-2); min-width: 0; }
 .sv-reel-shell { flex: 1; min-width: 0; background: var(--deep); border: 1px solid var(--stroke); border-radius: var(--radius-md); overflow: hidden; }
-.sv-reel { display: block; width: 100%; height: max(360px, calc(100dvh - 300px)); touch-action: none; cursor: ns-resize; }
+.sv-reel { display: block; width: 100%; height: max(360px, calc(100dvh - 300px)); touch-action: none; cursor: grab; }
+.sv-reel:active { cursor: grabbing; }
 
 /* The rung ladder: one notch per sprite tier the cache generates. */
 .sv-rungs { display: flex; flex-direction: column; gap: 3px; justify-content: center; }
@@ -712,6 +719,9 @@ a { color: var(--accent); }
 
 /* ----- Debug page ----- */
 .debug-json { margin: 0; font-size: 12px; overflow-x: auto; }
+.cap-section { margin-top: 8px; }
+.cap-section summary { cursor: pointer; font-size: 12px; color: var(--muted); padding: 4px 0; font-family: var(--font-mono); }
+.cap-section summary:hover { color: var(--text); }
 
 /* ----- Replay page ----- */
 .replay-advanced { margin: 0.5em 0 1em; }
@@ -772,7 +782,7 @@ body.map-full-open { overflow: hidden; }
 .hw-storage { display: flex; flex-direction: column; gap: 6px; margin: 0 0 20px; }
 .hw-mount { display: flex; align-items: center; gap: 10px; font-size: 12px; }
 .hw-mount-name { width: 90px; color: var(--muted); text-align: right; }
-.hw-bar { flex: 1; height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.hw-bar { flex: 1; height: 14px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
 .hw-bar-fill { display: block; height: 100%; border-radius: 4px; }
 .hw-bar-fill.ok { background: var(--ok); }
 .hw-bar-fill.warn { background: var(--warn); }
@@ -800,7 +810,7 @@ body.map-full-open { overflow: hidden; }
 }
 .section-h .section-link { color: var(--text); text-decoration: none; }
 .section-h .section-link:hover { color: var(--accent); }
-.event-strip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 8px; }
+.event-strip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 8px; mask-image: linear-gradient(to right, black calc(100% - 40px), transparent); -webkit-mask-image: linear-gradient(to right, black calc(100% - 40px), transparent); }
 .event-card { flex: 0 0 auto; display: flex; flex-direction: column; width: 150px; border: 1px solid var(--stroke); border-radius: var(--radius-md); overflow: hidden; background: var(--surface); text-decoration: none; }
 .event-card img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; background: var(--panel); }
 .event-card:hover { border-color: var(--accent); }
@@ -986,7 +996,10 @@ body.map-full-open .me-toolbar {
 .capture-card { margin: 0; flex: 0 0 auto; max-width: 320px; }
 .capture-card img { display: block; width: 100%; height: auto; border-radius: 4px; }
 .capture-card figcaption { font-size: .78rem; opacity: .85; padding-top: .25rem; }
-.capture-card figcaption .actions { display: inline-flex; gap: .25rem; margin-left: .4rem; }
+.capture-card figcaption .actions { display: inline-flex; gap: .75rem; margin-left: .4rem; }
+.capture-card .actions button { padding: 8px 14px; font-size: 13px; min-height: 44px; border-radius: var(--radius-sm); cursor: pointer; border: 0; font-family: var(--font-mono); }
+.capture-card .actions .keep { background: var(--ok-bg); color: var(--ok-text); }
+.capture-card .actions .discard { background: var(--danger-bg); color: var(--danger-text); }
 
 /* --- Identity clusters (/enrich/clusters) --- */
 .id-cluster header { flex-wrap: wrap; row-gap: 6px; }

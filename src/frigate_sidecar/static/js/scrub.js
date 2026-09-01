@@ -70,7 +70,7 @@
   var LOAD_COOLDOWN_MS = 3000;    // floor between refreshes that are not strictly needed
 
   var state = {
-    camera: camSel.value,
+    camera: (function () { var c = camSel.querySelector(".vis-chip.on"); return c ? c.dataset.cam : ""; })(),
     rung: 2,
     cursor: null,
     lanes: {},
@@ -747,8 +747,12 @@
     });
   });
 
-  camSel.addEventListener("change", function () {
-    state.camera = camSel.value;
+  camSel.addEventListener("click", function (e) {
+    var chip = e.target.closest(".vis-chip");
+    if (!chip || chip.classList.contains("on")) return;
+    var chips = camSel.querySelectorAll(".vis-chip");
+    for (var i = 0; i < chips.length; i++) chips[i].classList.toggle("on", chips[i] === chip);
+    state.camera = chip.dataset.cam;
     state.selected = null;
     state.reel = null;
     state.sheets = [];
