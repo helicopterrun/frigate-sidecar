@@ -22,6 +22,23 @@ import {
 const NS = "http://www.w3.org/2000/svg";
 export const REACH = 0.25; // wedge radius in unit coords (interaction pie)
 
+// Colors, resolved lazily via ElsinoreTokens.cssVar() (tokens.js may not have
+// run / the stylesheet may not have painted yet at import time) with the
+// current triage.css value baked in as a fallback.
+function cssVar(name, fallback) {
+  const t = window.ElsinoreTokens;
+  return (t && t.cssVar(name)) || fallback;
+}
+const PALETTE = {
+  surface: () => cssVar("--surface", "#1C1D24"),
+  muted: () => cssVar("--muted", "#9AA3AB"),
+  deep: () => cssVar("--deep", "#0B0C10"),
+  ok: () => cssVar("--ok", "#4caf82"),
+  warn: () => cssVar("--warn", "#e3b341"),
+  accent2: () => cssVar("--accent-2", "#ffb454"),
+  text: () => cssVar("--text", "#E8EAED"),
+};
+
 function make(tag, attrs, parent) {
   const n = document.createElementNS(NS, tag);
   for (const k in attrs) n.setAttribute(k, attrs[k]);
@@ -104,12 +121,12 @@ export class Renderer {
     for (const p of this._toolPins || []) {
       make("circle", {
         cx: p.x, cy: p.y, r: sz(0.012),
-        fill: p.pending ? "var(--warn, #e3b341)" : "var(--ok, #4caf82)",
-        stroke: "var(--deep, #0B0C10)", "stroke-width": sz(0.003),
+        fill: p.pending ? PALETTE.warn() : PALETTE.ok(),
+        stroke: PALETTE.deep(), "stroke-width": sz(0.003),
       }, this._pinsG);
       const t = make("text", {
         x: p.x, y: p.y + sz(0.008), "text-anchor": "middle",
-        "font-size": sz(0.02), fill: "var(--deep, #0B0C10)",
+        "font-size": sz(0.02), fill: PALETTE.deep(),
         "font-weight": "700",
       }, this._pinsG);
       t.textContent = String(p.label);
@@ -129,7 +146,7 @@ export class Renderer {
       make("line", {
         x1: g.axis === "x" ? g.at : 0, y1: g.axis === "x" ? 0 : g.at,
         x2: g.axis === "x" ? g.at : 1, y2: g.axis === "x" ? 1 : g.at,
-        stroke: "var(--ok, #4caf82)", "stroke-opacity": "0.9",
+        stroke: PALETTE.ok(), "stroke-opacity": "0.9",
         "stroke-width": sz(0.0025),
         "stroke-dasharray": `${sz(0.01)} ${sz(0.006)}`,
       }, this._guidesG);
@@ -255,7 +272,7 @@ export class Renderer {
     for (let x = 0; x <= 1 + 1e-9; x += stepX) {
       make("line", {
         x1: x, y1: 0, x2: x, y2: 1,
-        stroke: "var(--muted, #9AA3AB)", "stroke-opacity": "0.25",
+        stroke: PALETTE.muted(), "stroke-opacity": "0.25",
         "stroke-width": w,
       }, this.gGrid);
     }
@@ -264,7 +281,7 @@ export class Renderer {
     for (let y = 0; y <= 1 + 1e-9; y += stepY) {
       make("line", {
         x1: 0, y1: y, x2: 1, y2: y,
-        stroke: "var(--muted, #9AA3AB)", "stroke-opacity": "0.25",
+        stroke: PALETTE.muted(), "stroke-opacity": "0.25",
         "stroke-width": w,
       }, this.gGrid);
     }
@@ -284,15 +301,15 @@ export class Renderer {
     if (!this.secureNodes) {
       const g = make("g", {}, this.gSecure);
       const rect = make("rect", {
-        fill: "var(--ok, #4caf82)", "fill-opacity": "0.07",
-        stroke: "var(--ok, #4caf82)", "stroke-opacity": "0.85",
+        fill: PALETTE.ok(), "fill-opacity": "0.07",
+        stroke: PALETTE.ok(), "stroke-opacity": "0.85",
         "data-hit": "secure-rect",
       }, g);
       rect.style.cursor = "pointer";
       const handles = [];
       for (let i = 0; i < 8; i++) {
         const h = make("rect", {
-          fill: "var(--ok, #4caf82)", stroke: "var(--deep, #0B0C10)",
+          fill: PALETTE.ok(), stroke: PALETTE.deep(),
           "data-hit": "secure-handle", "data-handle": String(i),
         }, g);
         h.style.display = "none";
@@ -345,14 +362,14 @@ export class Renderer {
     const g = make("g", { "data-cam": name }, this.gCameras);
     // Wedge fill: also the click-to-select surface.
     const wedge = make("path", {
-      fill: "var(--accent, #ffb454)", stroke: "none", "data-hit": "wedge",
+      fill: PALETTE.accent2(), stroke: "none", "data-hit": "wedge",
     }, g);
     wedge.style.pointerEvents = "fill";
     // FOV edges: visible dashed line + invisible fat grab line per side.
     const edges = [], grabs = [];
     for (let i = 0; i < 2; i++) {
       edges.push(make("line", {
-        stroke: "var(--accent, #ffb454)", "stroke-opacity": "0.6",
+        stroke: PALETTE.accent2(), "stroke-opacity": "0.6",
       }, g));
       const grab = make("line", {
         stroke: "transparent", "data-hit": "fov-edge", "data-edge": String(i),
@@ -362,28 +379,28 @@ export class Renderer {
     }
     // Aim handle: a knob on the wedge's mid-arc — drag to swing azimuth.
     const aimStem = make("line", {
-      stroke: "var(--accent, #ffb454)", "stroke-opacity": "0.5",
+      stroke: PALETTE.accent2(), "stroke-opacity": "0.5",
     }, g);
     const aim = make("circle", {
-      fill: "var(--accent, #ffb454)", stroke: "var(--deep, #0B0C10)",
+      fill: PALETTE.accent2(), stroke: PALETTE.deep(),
       "data-hit": "aim",
     }, g);
     aim.style.cursor = "grab";
     // Selection ring under the body.
     const ring = make("circle", {
-      fill: "none", stroke: "var(--accent, #ffb454)", "stroke-opacity": "0.8",
+      fill: "none", stroke: PALETTE.accent2(), "stroke-opacity": "0.8",
     }, g);
     // Camera body + fat move-hit circle.
     const body = make("circle", {
-      stroke: "var(--surface, #1C1D24)",
+      stroke: PALETTE.surface(),
     }, g);
     const hit = make("circle", { fill: "transparent", "data-hit": "body" }, g);
     hit.style.cursor = "move";
     hit.style.touchAction = "none";
     // Label with halo (paint-order) + lock glyph.
     const label = make("text", {
-      fill: "var(--text, #E8EAED)", "text-anchor": "middle",
-      "paint-order": "stroke", stroke: "var(--deep, #0B0C10)",
+      fill: PALETTE.text(), "text-anchor": "middle",
+      "paint-order": "stroke", stroke: PALETTE.deep(),
       "stroke-opacity": "0.85",
     }, g);
     label.style.pointerEvents = "none";
@@ -481,7 +498,7 @@ export class Renderer {
     n.body.setAttribute("r", sz(selected ? 0.013 : 0.010));
     n.body.setAttribute("stroke-width", sz(0.0035));
     n.body.setAttribute("fill", selected
-      ? "var(--accent, #ffb454)" : "var(--muted, #9AA3AB)");
+      ? PALETTE.accent2() : PALETTE.muted());
     n.hit.setAttribute("cx", geo.x); n.hit.setAttribute("cy", geo.y);
     n.hit.setAttribute("r", sz(0.03));
     n.hit.style.cursor = geo.locked ? "default" : "move";

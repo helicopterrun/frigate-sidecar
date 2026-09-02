@@ -1,46 +1,44 @@
 /* ============================================================ tokens
    Design tokens mirror the Elsinore iOS app's theme system
-   (Elsinore/ThemePalette.swift, 2026-08-03 design review): five dark
-   palettes sharing one set of semantic roles. Chrome colors (panel/
-   surface/stroke/text/accent) are themed; status colors (TP/FP/lane
-   colors) are deliberately shared across themes so they stay learnable.
-   Theme is picked via data-theme on <html> (static/js/theme.js). */
+   (Elsinore/FrigateKit/ElsinoreBrandTokens.swift): a single theme, no
+   picker. Chrome colors (panel/surface/stroke/text/accent) and status
+   colors (TP/FP/lane colors) all come from the same fixed set of roles. */
 :root {
   color-scheme: dark;
-  /* Elsinore -- the default palette (graphite + amber), matching the app's
-     default since 2026-08-15. */
-  --panel: #121318;          /* page background */
-  --surface: #1C1D24;        /* cards, header, tables */
-  --surface-2: #262831;      /* hover states, secondary panels */
-  --stroke: #30323B;         /* borders */
-  --stroke-soft: #23252D;    /* soft row separators */
+  /* Elsinore -- the app's single palette (graphite + amber). */
+  --panel: #111216;          /* page background */
+  --surface: #1B1C21;        /* cards, header, tables */
+  --surface-2: #24262C;      /* hover states, secondary panels */
+  --stroke: #303238;         /* borders */
+  --stroke-soft: #232429;    /* soft row separators */
   --deep: #0B0C10;           /* media wells, map background */
-  --text: #D1D5DB;
+  --text: #ECE9E3;
   /* Neutral text ramp: --muted then --muted-2, both >= 4.5:1 against
      surface, surface-2 and panel (WCAG AA for small text -- every use of
      these is 9-13px). --muted-3 is NOT a text token: it is the dimmest
      step and only clears the 3:1 non-text threshold, so it is for borders
      and decorative glyphs only (.sv-chip border, .guide-crumbs separator).
      tests/test_contrast.py enforces all three. */
-  --muted: #9AA3AB;
-  --muted-2: #8A9199;
-  --muted-3: #6A7683;
-  --accent: #E8A33D;         /* controlTint */
-  --accent-2: #F1B24D;       /* reelAccent (hover/secondary accent) */
+  --muted: #96979D;
+  --muted-2: #8B8E95;
+  --muted-3: #6E7580;
+  --accent: #E2AA52;         /* brandAmber / controlTint */
+  --accent-2: #ECB758;       /* readoutAmber / reelAccent (hover/secondary accent) */
+  --parchment: #EBCF9D;      /* parchment -- highlight only, never body text */
+  --ember: #C35B2E;          /* ember -- secondary warm, never a substitute for alarm/danger */
   --btn-neutral: #31333E;
   --btn-neutral-hover: #3C3F4C;
-  /* Shared semantic roles (identical in every app theme). */
+  /* Shared semantic roles. */
   --live: #FF5D57;
+  --live-now: #4CAF7A;
   --gap-c: #765B4C;
-  /* Reel: the tide (motion) and the row rules. Per-theme below, because the
-     app tunes both against each theme's own ground. */
   --tide: #5F7185;
   --gridline: #5D6570;
   --lane-person: #66B9EE;
   --lane-vehicle: #B594E8;
   --lane-animal: #69C48B;
-  --lane-package: #D4854A;
-  --radius-lg: 12px;
+  --lane-package: #E3B341;
+  --radius-lg: 10px;
   --radius-md: 8px;
   --radius-sm: 4px;
   /* Spacing scale — the app's 12pt unit with half/quarter steps. */
@@ -60,8 +58,9 @@
   --dur-fast: 120ms;
   --dur: 200ms;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --on-accent: #fff;
-  /* Status colors (shared across themes, like the lane colors). */
+  --on-accent: #111216;      /* panel -- primary button text is panel-colored */
+  --danger-solid: #FF453A;   /* alarm red, flat fill for .btn-danger */
+  /* Status colors. */
   --ok: #4ADE80;      --ok-bg: #166534;     --ok-text: #BBF7D0;
   --mixed-bg: #5B21B6; --mixed-text: #DDD6FE;
   --warn: #E3B341;    --warn-bg: #78350F;   --warn-text: #FDE68A;
@@ -69,41 +68,6 @@
   --info: #93C5FD;    --info-bg: #1E40AF;   --info-text: #BFDBFE;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-}
-:root[data-theme="kronborg-signal"] {
-  /* The icon-matched navy + orange, formerly the default. */
-  --panel: #031C38; --surface: #0A2845; --surface-2: #123653;
-  --stroke: #1A3D59; --stroke-soft: #12314A; --deep: #02141F;
-  --text: #C8D2DA; --muted: #91A2AF; --muted-2: #8E9FAF; --muted-3: #5E84AB;
-  --accent: #FF5A1F; --accent-2: #FF6B2C;
-  --btn-neutral: #23486B; --btn-neutral-hover: #2E567C;
-  --tide: #31566B; --gridline: #3B536C;
-}
-:root[data-theme="moss-terracotta"] {
-  --panel: #1D2920; --surface: #27362A; --surface-2: #324535;
-  --stroke: #3A4A3C; --stroke-soft: #2D3B2F; --deep: #131B15;
-  --text: #D6D8CF; --muted: #BAC1BA; --muted-2: #A7B0A7; --muted-3: #7D966E;
-  --accent: #D87352; --accent-2: #E17F5E;
-  --btn-neutral: #3B4E3E; --btn-neutral-hover: #475D4A;
-  /* Locked to the app's 2026-08-05 Theme Lab export: the reel was tuned
-     against the shared neutral gridline, not a moss-tinted one. */
-  --tide: #54634F; --gridline: #5D6570;
-}
-:root[data-theme="oresund-harbor"] {
-  --panel: #0A263E; --surface: #11324D; --surface-2: #193F5D;
-  --stroke: #234760; --stroke-soft: #183851; --deep: #061A2B;
-  --text: #C9D9E2; --muted: #AEBBC6; --muted-2: #99AAB7; --muted-3: #618FB6;
-  --accent: #68A9CA; --accent-2: #78B8D6;
-  --btn-neutral: #24506E; --btn-neutral-hover: #2E5F80;
-  --tide: #36556A; --gridline: #3E586C;
-}
-:root[data-theme="midnight-fjord"] {
-  --panel: #071826; --surface: #0C2335; --surface-2: #123149;
-  --stroke: #19394F; --stroke-soft: #102B3F; --deep: #041019;
-  --text: #C2D0D8; --muted: #8D9EAA; --muted-2: #879AA6; --muted-3: #5D7F9B;
-  --accent: #39AAA7; --accent-2: #4DBDB9;
-  --btn-neutral: #1E4258; --btn-neutral-hover: #275069;
-  --tide: #2E5061; --gridline: #3C5668;
 }
 
 /* ============================================================ base */
@@ -137,10 +101,6 @@ header .brand a { color: inherit; text-decoration: none; }
 header .pages { display: flex; gap: 4px; align-items: center; }
 header .header-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 header .page-link.util { color: var(--muted-2); }
-.theme-picker { background: var(--panel); color: var(--muted); border: 1px solid var(--stroke); border-radius: var(--radius-sm); padding: 3px 6px; font-size: 11px; }
-/* Settings › Appearance row. */
-.theme-row { font-size: 12px; color: var(--muted); display: inline-flex; flex-direction: column; gap: 4px; }
-.theme-row .theme-picker { font-size: 13px; padding: 6px 8px; }
 /* Analysis dropdown: <details> so it needs no JS. */
 .nav-group { position: relative; }
 .nav-group summary { list-style: none; cursor: pointer; user-select: none; }
@@ -554,10 +514,10 @@ a { color: var(--accent); }
 }
 .btn:hover, .btn-primary:hover, .filters button:hover, .faces-bar button:hover { background: var(--accent-2); }
 .btn:disabled, .btn-primary:disabled { opacity: 0.6; cursor: default; }
-.btn-neutral, .filters button.secondary, .presets .preset { background: var(--btn-neutral); color: var(--text); }
-.btn-neutral:hover, .filters button.secondary:hover, .presets .preset:hover { background: var(--btn-neutral-hover); }
-.btn-danger { background: var(--danger-bg); color: var(--danger-text); }
-.btn-danger:hover { filter: brightness(1.2); }
+.btn-neutral, .filters button.secondary, .presets .preset { background: var(--surface); color: var(--text); border: 1px solid var(--stroke); }
+.btn-neutral:hover, .filters button.secondary:hover, .presets .preset:hover { background: var(--surface-2); }
+.btn-danger { background: var(--danger-solid); color: #fff; }
+.btn-danger:hover { filter: brightness(1.1); }
 
 /* ----- Faces curation page ----- */
 .faces-bar { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }

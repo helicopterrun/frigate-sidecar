@@ -6,6 +6,36 @@
 (function () {
   "use strict";
 
+  // Colors used by the hand-built SVG charts below. Resolved lazily via
+  // ElsinoreTokens.cssVar() (tokens.js / the stylesheet may not have run yet
+  // at import time) with the current triage.css value as a fallback.
+  // Zone-fill / chrome colors below have no matching token and stay literal.
+  function cssVar(name, fallback) {
+    var t = window.ElsinoreTokens;
+    return (t && t.cssVar(name)) || fallback;
+  }
+  var PALETTE = {
+    ok: function () { return cssVar("--ok", "#4ade80"); },
+    danger: function () { return cssVar("--danger", "#f87171"); },
+    warn: function () { return cssVar("--warn", "#fbbf24"); },
+    info: function () { return cssVar("--info", "#3b82f6"); },
+    laneVehicle: function () { return cssVar("--lane-vehicle", "#a78bfa"); },
+    laneVehicleLight: function () { return cssVar("--lane-vehicle", "#c4b5fd"); },
+    deep: function () { return cssVar("--deep", "#0f1115"); },
+    surface: function () { return cssVar("--surface", "#1a1d26"); },
+    // zone-fill / chrome — no token equivalent, kept as plain literals
+    idMarker: "#5b21b6",
+    gridLine: "#2a2f3a",
+    axisLabel: "#6b7280",
+    targetLine: "#14532d",
+    halfTargetLine: "#78350f",
+    white: "#fff",
+    ground: "#4b5563",
+    blindZone: "#7f1d1d",
+    distLine: "#e6e6e6",
+    chromeLabel: "#8a92a6",
+  };
+
   var P = JSON.parse(document.getElementById("plan-presets").textContent);
   var byId = {};
   P.lenses.forEach(function (l) { byId["lens:" + l.id] = l; });
@@ -175,42 +205,43 @@
     var ymax = Math.max(o.target_px * 2.5, objWidthPx(o.width_ft, detW, hfov, Math.max(state.dist, 1)) * 1.1, 10);
     var sx = function (d) { return x0 + (d / xmax) * (x1 - x0); };
     var sy = function (p) { return y0 - (Math.min(p, ymax) / ymax) * (y0 - y1); };
-    var parts = ['<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#0f1115"/>'];
-    parts.push(line(x0, y0, x1, y0, "#2a2f3a"), line(x0, y0, x0, y1, "#2a2f3a"));
+    var parts = ['<rect x="0" y="0" width="' + W + '" height="' + H + '" fill=PALETTE.deep()/>'];
+    parts.push(line(x0, y0, x1, y0, PALETTE.gridLine), line(x0, y0, x0, y1, PALETTE.gridLine));
     for (var gx = 0; gx <= xmax; gx += niceStep(xmax)) {
-      parts.push(line(sx(gx), y0, sx(gx), y1, "#1a1d26"), txt(sx(gx), y0 + 14, gx.toFixed(0), "#6b7280", "middle"));
+      parts.push(line(sx(gx), y0, sx(gx), y1, PALETTE.surface()), txt(sx(gx), y0 + 14, gx.toFixed(0), PALETTE.axisLabel, "middle"));
     }
     // DORI identify/recognise crossovers
     [["identification", "ID"], ["recognition", "Rec"]].forEach(function (pair) {
       var d = doriDistFt(detW, hfov, P.dori[pair[0]]);
       if (d > 0 && d <= xmax) {
-        parts.push(line(sx(d), y0, sx(d), y1, "#5b21b6", "2 3"));
-        parts.push(txt(sx(d), y1 + 9, pair[1], "#a78bfa", "middle"));
+        parts.push(line(sx(d), y0, sx(d), y1, PALETTE.idMarker, "2 3"));
+        parts.push(txt(sx(d), y1 + 9, pair[1], PALETTE.laneVehicle(), "middle"));
       }
     });
-    parts.push(line(x0, sy(o.target_px), x1, sy(o.target_px), "#14532d", "4 3"));
-    parts.push(txt(x1, sy(o.target_px) - 4, "target " + o.target_px + "px", "#4ade80", "end"));
-    parts.push(line(x0, sy(o.target_px / 2), x1, sy(o.target_px / 2), "#78350f", "4 3"));
-    parts.push(txt(x1, sy(o.target_px / 2) - 4, "½ target", "#fbbf24", "end"));
+    parts.push(line(x0, sy(o.target_px), x1, sy(o.target_px), PALETTE.targetLine, "4 3"));
+    parts.push(txt(x1, sy(o.target_px) - 4, "target " + o.target_px + "px", PALETTE.ok(), "end"));
+    parts.push(line(x0, sy(o.target_px / 2), x1, sy(o.target_px / 2), PALETTE.halfTargetLine, "4 3"));
+    parts.push(txt(x1, sy(o.target_px / 2) - 4, "½ target", PALETTE.warn(), "end"));
     var pts = [];
     for (var i = 0; i <= 120; i++) {
       var d = xmax * i / 120;
       if (d < 0.5) continue;
       pts.push(sx(d).toFixed(1) + "," + sy(objWidthPx(o.width_ft, detW, hfov, d)).toFixed(1));
     }
-    parts.push('<polyline points="' + pts.join(" ") + '" fill="none" stroke="#3b82f6" stroke-width="2"/>');
-    if (good <= xmax) parts.push(dot(sx(good), sy(o.target_px), "#4ade80"));
-    if (marg <= xmax) parts.push(dot(sx(marg), sy(o.target_px / 2), "#fbbf24"));
-    parts.push(line(sx(state.dist), y0, sx(state.dist), y1, "#e6e6e6", "2 3"));
-    parts.push(txt(sx(state.dist), y1 + 10, state.dist + "ft", "#e6e6e6", "middle"));
-    parts.push(txt(14, (y0 + y1) / 2, "px wide", "#6b7280", "middle", "rotate(-90 14 " + ((y0 + y1) / 2) + ")"));
-    parts.push(txt((x0 + x1) / 2, H - 4, "distance (ft)", "#6b7280", "middle"));
+    parts.push('<polyline points="' + pts.join(" ") + '" fill="none" stroke=PALETTE.info() stroke-width="2"/>');
+    if (good <= xmax) parts.push(dot(sx(good), sy(o.target_px), PALETTE.ok()));
+    if (marg <= xmax) parts.push(dot(sx(marg), sy(o.target_px / 2), PALETTE.warn()));
+    parts.push(line(sx(state.dist), y0, sx(state.dist), y1, PALETTE.distLine, "2 3"));
+    parts.push(txt(sx(state.dist), y1 + 10, state.dist + "ft", PALETTE.distLine, "middle"));
+    parts.push(txt(14, (y0 + y1) / 2, "px wide", PALETTE.axisLabel, "middle", "rotate(-90 14 " + ((y0 + y1) / 2) + ")"));
+    parts.push(txt((x0 + x1) / 2, H - 4, "distance (ft)", PALETTE.axisLabel, "middle"));
     $("plan-chart").innerHTML = parts.join("");
 
     var dId = doriDistFt(detW, hfov, P.dori.identification);
     var dRec = doriDistFt(detW, hfov, P.dori.recognition);
-    $("dori-legend").innerHTML = "DORI (Frigate's face-rec guide): identify ≤ <b style='color:#a78bfa'>" +
-      dId.toFixed(0) + " ft</b>, recognise ≤ <b style='color:#a78bfa'>" + dRec.toFixed(0) + " ft</b>.";
+    $("dori-legend").innerHTML = "DORI (Frigate's face-rec guide): identify ≤ <b style='color:" +
+      PALETTE.laneVehicle() + "'>" + dId.toFixed(0) + " ft</b>, recognise ≤ <b style='color:" +
+      PALETTE.laneVehicle() + "'>" + dRec.toFixed(0) + " ft</b>.";
   }
 
   // ---- top-down FOV wedge ----
@@ -228,23 +259,23 @@
         (width || 1) + '"' + (dash ? ' stroke-dasharray="' + dash + '"' : "") + "/>";
     }
     var half = hfov / 2, lEdge = edge(-half, RMAX), rEdge = edge(half, RMAX), large = hfov > 180 ? 1 : 0;
-    var parts = ['<rect x="0" y="0" width="360" height="360" fill="#0f1115"/>'];
+    var parts = ['<rect x="0" y="0" width="360" height="360" fill=PALETTE.deep()/>'];
     parts.push('<path d="M ' + CX + ' ' + CY + ' L ' + f(lEdge.x) + ' ' + f(lEdge.y) + ' A ' + RMAX +
       ' ' + RMAX + ' 0 ' + large + ' 1 ' + f(rEdge.x) + ' ' + f(rEdge.y) +
-      ' Z" fill="#3b82f6" fill-opacity="0.16" stroke="#3b82f6" stroke-opacity="0.5" stroke-width="1"/>');
+      ' Z" fill=PALETTE.info() fill-opacity="0.16" stroke=PALETTE.info() stroke-opacity="0.5" stroke-width="1"/>');
     for (var rft = step; rft <= scaleFt + 0.01; rft += step) {
-      parts.push(arc(-half, half, rpx(rft), "#2a2f3a", null, 1));
-      parts.push(txt(CX - 5, CY - rpx(rft) + 3, rft + " ft", "#6b7280", "end"));
+      parts.push(arc(-half, half, rpx(rft), PALETTE.gridLine, null, 1));
+      parts.push(txt(CX - 5, CY - rpx(rft) + 3, rft + " ft", PALETTE.axisLabel, "end"));
     }
     if (rpx(marg) <= RMAX) {
-      parts.push(arc(-half, half, rpx(marg), "#fbbf24", "4 3", 1.6));
-      parts.push(txt(CX + 6, CY - rpx(marg) + 3, "marg " + marg.toFixed(0) + " ft", "#fbbf24", "start"));
+      parts.push(arc(-half, half, rpx(marg), PALETTE.warn(), "4 3", 1.6));
+      parts.push(txt(CX + 6, CY - rpx(marg) + 3, "marg " + marg.toFixed(0) + " ft", PALETTE.warn(), "start"));
     }
-    parts.push(arc(-half, half, rpx(good), "#4ade80", null, 2));
-    parts.push(txt(CX + 6, CY - rpx(good) + 3, "good " + good.toFixed(0) + " ft", "#4ade80", "start"));
-    if (rpx(state.dist) <= RMAX) parts.push(dot(CX, CY - rpx(state.dist), "#e6e6e6"));
-    parts.push('<circle cx="' + CX + '" cy="' + CY + '" r="4" fill="#3b82f6" stroke="#fff" stroke-width="1.2"/>');
-    parts.push(txt(CX, CY + 18, hfov.toFixed(0) + "° HFOV", "#8a92a6", "middle"));
+    parts.push(arc(-half, half, rpx(good), PALETTE.ok(), null, 2));
+    parts.push(txt(CX + 6, CY - rpx(good) + 3, "good " + good.toFixed(0) + " ft", PALETTE.ok(), "start"));
+    if (rpx(state.dist) <= RMAX) parts.push(dot(CX, CY - rpx(state.dist), PALETTE.distLine));
+    parts.push('<circle cx="' + CX + '" cy="' + CY + '" r="4" fill=PALETTE.info() stroke=PALETTE.white stroke-width="1.2"/>');
+    parts.push(txt(CX, CY + 18, hfov.toFixed(0) + "° HFOV", PALETTE.chromeLabel, "middle"));
     $("plan-wedge").innerHTML = parts.join("");
   }
 
@@ -259,7 +290,7 @@
     var sx = function (ft) { return padL + ft * s; };
     var sy = function (ft) { return gy - ft * s; };
     var camX = sx(0), camY = sy(state.heightFt);
-    var parts = ['<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#0f1115"/>'];
+    var parts = ['<rect x="0" y="0" width="' + W + '" height="' + H + '" fill=PALETTE.deep()/>'];
 
     // VFOV cone rays
     var bot = state.tiltDeg + vfov / 2, top = state.tiltDeg - vfov / 2;
@@ -273,52 +304,52 @@
     }
     var te = rayEnd(top), be = rayEnd(bot);
     parts.push('<polygon points="' + f(camX) + "," + f(camY) + " " + f(sx(te.x)) + "," + f(sy(te.y)) +
-      " " + f(sx(be.x)) + "," + f(sy(be.y)) + '" fill="#3b82f6" fill-opacity="0.13"/>');
-    parts.push(line(camX, camY, sx(te.x), sy(te.y), "#3b82f6", null));
-    parts.push(line(camX, camY, sx(be.x), sy(be.y), "#3b82f6", null));
+      " " + f(sx(be.x)) + "," + f(sy(be.y)) + '" fill=PALETTE.info() fill-opacity="0.13"/>');
+    parts.push(line(camX, camY, sx(te.x), sy(te.y), PALETTE.info(), null));
+    parts.push(line(camX, camY, sx(be.x), sy(be.y), PALETTE.info(), null));
 
     // ground + coverage swath
-    parts.push(line(padL, gy, sx(maxX), gy, "#4b5563"));
+    parts.push(line(padL, gy, sx(maxX), gy, PALETTE.ground));
     if (cov.near < maxX) {
       var fEnd = cov.far == null ? maxX : Math.min(cov.far, maxX);
       parts.push('<rect x="' + f(sx(cov.near)) + '" y="' + f(gy) + '" width="' + f((fEnd - cov.near) * s) +
-        '" height="5" fill="#4ade80" fill-opacity="0.5"/>');
-      parts.push(line(sx(cov.near), gy - 5, sx(cov.near), gy + 5, "#4ade80"));
-      parts.push(txt(sx(cov.near), gy + 16, cov.near.toFixed(0) + "ft", "#4ade80", "middle"));
+        '" height="5" fill=PALETTE.ok() fill-opacity="0.5"/>');
+      parts.push(line(sx(cov.near), gy - 5, sx(cov.near), gy + 5, PALETTE.ok()));
+      parts.push(txt(sx(cov.near), gy + 16, cov.near.toFixed(0) + "ft", PALETTE.ok(), "middle"));
       if (cov.far != null && cov.far <= maxX) {
-        parts.push(line(sx(cov.far), gy - 5, sx(cov.far), gy + 5, "#4ade80"));
-        parts.push(txt(sx(cov.far), gy + 16, cov.far.toFixed(0) + "ft", "#4ade80", "middle"));
+        parts.push(line(sx(cov.far), gy - 5, sx(cov.far), gy + 5, PALETTE.ok()));
+        parts.push(txt(sx(cov.far), gy + 16, cov.far.toFixed(0) + "ft", PALETTE.ok(), "middle"));
       }
     }
     // blind zone under mast
     if (cov.near > 0.2) parts.push('<rect x="' + f(sx(0)) + '" y="' + f(gy) + '" width="' +
-      f(cov.near * s) + '" height="5" fill="#7f1d1d" fill-opacity="0.6"/>');
+      f(cov.near * s) + '" height="5" fill=PALETTE.blindZone fill-opacity="0.6"/>');
 
     // mast + camera
-    parts.push(line(camX, gy, camX, camY, "#6b7280", null, 2));
-    parts.push('<circle cx="' + f(camX) + '" cy="' + f(camY) + '" r="4" fill="#3b82f6" stroke="#fff" stroke-width="1.2"/>');
-    parts.push(txt(camX + 6, camY - 4, state.heightFt + "ft", "#8a92a6", "start"));
+    parts.push(line(camX, gy, camX, camY, PALETTE.axisLabel, null, 2));
+    parts.push('<circle cx="' + f(camX) + '" cy="' + f(camY) + '" r="4" fill=PALETTE.info() stroke=PALETTE.white stroke-width="1.2"/>');
+    parts.push(txt(camX + 6, camY - 4, state.heightFt + "ft", PALETTE.chromeLabel, "start"));
 
     // face-height reference line across the plot
-    parts.push(line(padL, sy(eye), sx(maxX), sy(eye), "#a78bfa", "1 5"));
-    parts.push(txt(sx(maxX), sy(eye) - 3, "face " + eye.toFixed(1) + " ft", "#a78bfa", "end"));
+    parts.push(line(padL, sy(eye), sx(maxX), sy(eye), PALETTE.laneVehicle(), "1 5"));
+    parts.push(txt(sx(maxX), sy(eye) - 3, "face " + eye.toFixed(1) + " ft", PALETTE.laneVehicle(), "end"));
     if (state.dist <= maxX) {
-      var col = inFrame ? "#4ade80" : "#f87171";
+      var col = inFrame ? PALETTE.ok() : PALETTE.danger();
       var halfW = Math.max(state.obj.width_ft / 2, 0.2);
       // subject bbox (subjBot..subjTop)
       parts.push('<rect x="' + f(sx(state.dist - halfW)) + '" y="' + f(sy(subjTop)) + '" width="' +
         f(2 * halfW * s) + '" height="' + f((subjTop - subjBot) * s) + '" fill="none" stroke="' + col + '" stroke-width="1.5"/>');
       // camera -> face sightline, down-angle labelled (the point of this view)
       var fdeg = deg(Math.atan((state.heightFt - eye) / state.dist));
-      parts.push(line(camX, camY, sx(state.dist), sy(eye), "#a78bfa", "3 2"));
+      parts.push(line(camX, camY, sx(state.dist), sy(eye), PALETTE.laneVehicle(), "3 2"));
       var mx = (camX + sx(state.dist)) / 2, my = (camY + sy(eye)) / 2;
-      parts.push(txt(mx, my - 3, (fdeg >= 0 ? "↓" : "↑") + Math.abs(fdeg).toFixed(0) + "° to face", "#c4b5fd", "middle"));
+      parts.push(txt(mx, my - 3, (fdeg >= 0 ? "↓" : "↑") + Math.abs(fdeg).toFixed(0) + "° to face", PALETTE.laneVehicleLight(), "middle"));
       // the face itself, at eye height
       parts.push('<circle cx="' + f(sx(state.dist)) + '" cy="' + f(sy(eye)) + '" r="' +
         f(Math.max(0.35 * s, 2.5)) + '" fill="' + col + '"/>');
-      parts.push(txt(sx(state.dist), gy + 16, state.dist + "ft", "#e6e6e6", "middle"));
+      parts.push(txt(sx(state.dist), gy + 16, state.dist + "ft", PALETTE.distLine, "middle"));
     }
-    parts.push(txt(W - padR, padT + 4, state.tiltDeg + "° down · " + vfov.toFixed(0) + "° VFOV", "#8a92a6", "end"));
+    parts.push(txt(W - padR, padT + 4, state.tiltDeg + "° down · " + vfov.toFixed(0) + "° VFOV", PALETTE.chromeLabel, "end"));
     $("plan-elev").innerHTML = parts.join("");
   }
 
@@ -333,7 +364,7 @@
       ' text-anchor="' + (anchor || "start") + '"' + (transform ? ' transform="' + transform + '"' : "") + ">" + s + "</text>";
   }
   function dot(x, y, color) {
-    return '<circle cx="' + f(x) + '" cy="' + f(y) + '" r="3.5" fill="' + color + '" stroke="#0f1115" stroke-width="1"/>';
+    return '<circle cx="' + f(x) + '" cy="' + f(y) + '" r="3.5" fill="' + color + '" stroke=PALETTE.deep() stroke-width="1"/>';
   }
   function niceStep(max) {
     var raw = max / 6, pow = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / pow;

@@ -29,8 +29,8 @@ track across the scene, and enrichment like recognized identities
 ## Settings
 
 Alerts (the attention ladder), quiet hours, sounds, camera and zone
-preferences, appearance (five theme palettes shared with the sidecar's web
-pages), storage, and the Connection Doctor
+preferences, a single Elsinore theme shared with the sidecar's web UI,
+storage, and the Connection Doctor
 (see [Setup](/guide/elsinore-setup)).
 
 Beyond the tabs there are home-screen widgets and Live Activities — covered
