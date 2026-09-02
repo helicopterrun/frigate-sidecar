@@ -46,6 +46,10 @@ The `push:` config section:
 - `relay_base_url` — where the relay lives.
 - `mqtt` host/port — the sidecar must see Frigate's MQTT broker, or no
   events arrive at all.
+- `card_resolution_s` — an open Live Activity "card" idle this long (default
+  10 minutes) is closed silently, covering a resolve that never arrived
+  (e.g. a dropped Frigate `end` or a failed write) so it doesn't leak open
+  forever.
 
 Devices register themselves: install Elsinore, complete onboarding, and the
 phone appears in the device table with a **Test** button.

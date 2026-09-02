@@ -79,3 +79,71 @@ def test_handle_review_payload_end_to_end(tmp_path: Path) -> None:
 
     sent = asyncio.run(engine.handle_review_payload(payload))
     assert sent == 1
+
+
+def test_concurrent_delivery_serializes_la_start(tmp_path: Path) -> None:
+    """Two concurrent `handle_event` calls for the same device/story (the
+    convoy from prod journal 2026-09-02, where every `frigate/events`/
+    `frigate/reviews` message is its own coroutine racing another with its
+    own SQLite connection) must not both see `device_row is None` and both
+    open-and-send an LA start: `_pipeline_lock` should serialize them so the
+    second call finds the first's row already committed."""
+    import asyncio
+
+    db_path = tmp_path / "sidecar.db"
+    _register(
+        db_path, "tok1", cameras=["doorbell"], min_severity="detection",
+        push_to_start_token="pts-1", la_capable=True,
+    )
+    inner = LogTransport()
+    release = asyncio.Event()
+
+    class GatedTransport:
+        """Wraps LogTransport but blocks every LA *start* send on `release`,
+        so two concurrent deliveries are forced to overlap unless the
+        engine's own lock keeps them from both reaching this point at
+        once."""
+
+        def __init__(self) -> None:
+            self.sent = inner.sent
+
+        async def send(self, *args, **kwargs):
+            return await inner.send(*args, **kwargs)
+
+        async def send_situation(self, *args, **kwargs):
+            return await inner.send_situation(*args, **kwargs)
+
+        async def send_test(self, *args, **kwargs):
+            return await inner.send_test(*args, **kwargs)
+
+        async def send_live_activity(self, *args, **kwargs):
+            if kwargs.get("event") == "start":
+                await release.wait()
+            return await inner.send_live_activity(*args, **kwargs)
+
+    engine = _make_engine(db_path, GatedTransport())
+    event = ReviewEvent(
+        review_id="r1", camera="doorbell", severity="alert", labels=("person",),
+        zones=("front_door",),
+    )
+
+    async def run() -> None:
+        t1 = asyncio.create_task(engine.handle_event(event))
+        t2 = asyncio.create_task(engine.handle_event(event))
+        # Give both tasks a chance to queue up on the lock before letting
+        # the gated LA-start send through.
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.gather(t1, t2)
+
+    asyncio.run(run())
+
+    starts = [r for r in inner.sent if r.get("event") == "start"]
+    assert len(starts) == 1
+
+    conn = db.open_sidecar(db_path)
+    try:
+        (row_count,) = conn.execute("SELECT COUNT(*) FROM push_activities").fetchone()
+    finally:
+        conn.close()
+    assert row_count == 1

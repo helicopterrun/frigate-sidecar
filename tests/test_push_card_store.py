@@ -75,6 +75,38 @@ def test_list_open_urgent_cards_excludes_closed_and_other_levels(sidecar_db_path
     assert keys == {"u1"}
 
 
+def test_close_stale_cards_closes_only_idle_open_cards(sidecar_db_path: Path):
+    conn = open_conn(sidecar_db_path)
+    stale = Card(
+        card_key="stale1", level="notify", created_at=1.0, updated_at=100.0, state_since_at=1.0,
+    )
+    fresh = Card(
+        card_key="fresh1", level="notify", created_at=1.0, updated_at=900.0, state_since_at=1.0,
+    )
+    already_closed = Card(
+        card_key="closed1", level="notify", created_at=1.0, updated_at=100.0,
+        state_since_at=1.0, closed=True, resolved=True,
+    )
+    for c in (stale, fresh, already_closed):
+        card_store.upsert_card(conn, c)
+
+    n = card_store.close_stale_cards(conn, idle_for=600.0, now=1000.0)
+
+    assert n == 1
+    closed_fetched = card_store.get_card(conn, "stale1")
+    assert closed_fetched.closed is True
+    assert closed_fetched.resolved is True
+    assert closed_fetched.updated_at == 1000.0
+
+    fresh_fetched = card_store.get_card(conn, "fresh1")
+    assert fresh_fetched.closed is False
+    assert fresh_fetched.updated_at == 900.0
+
+    # Already-closed card is untouched (updated_at unchanged).
+    untouched = card_store.get_card(conn, "closed1")
+    assert untouched.updated_at == 100.0
+
+
 def test_migrate_drop_zone_collapses_split_rows_onto_the_newest(sidecar_db_path: Path):
     conn = open_conn(sidecar_db_path)
     older = Card(

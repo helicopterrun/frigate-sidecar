@@ -80,6 +80,10 @@ class PushEngine:
     # -- Phase 2: Live Activities --
     #: Quiet period after which a Present situation is considered resolved.
     activity_resolution_s: float = 30.0
+    #: An open card idle this long is closed silently -- the resolve that
+    #: never arrived, e.g. a dropped Frigate end or a failed write; sized so
+    #: a real loiter's updates keep it alive.
+    card_resolution_s: float = 600.0
     #: How long the activity lingers on screen after the end push.
     activity_dismissal_tail_s: float = 30.0
     #: How long an ended activity's row survives before reaping, measured past
@@ -108,6 +112,20 @@ class PushEngine:
     # Last-seen current_zones per track — the zone-transition hook's change
     # detector (see handle_object_payload).
     _last_zones: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
+    #: Serializes the delivery pipeline across concurrent per-frame
+    #: coroutines. Every `frigate/events`/`frigate/reviews` message runs as
+    #: its own coroutine with its own SQLite connection; without this lock,
+    #: N handlers race into `open_activity` at once, each seeing
+    #: `device_row is None` before the first one's `open_activity` commits,
+    #: and each holds its write across `await transport.*` -- the next
+    #: handler's write then blocks on the busy_timeout ("database is
+    #: locked") instead of erroring immediately. Result (prod journal
+    #: 2026-09-02): ~25 push-to-start sends for one story instead of one,
+    #: and the card's own resolve dying in the pile-up, leaking it open.
+    #: NOT held inside `_end_activity` -- it's called from within
+    #: `sweep_activities` (already holding it) and from `delivery_wire` with
+    #: `engine=self`, so acquiring there would deadlock.
+    _pipeline_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     def _conn(self) -> sqlite3.Connection:
         from frigate_sidecar import db
@@ -147,15 +165,20 @@ class PushEngine:
 
         if obj.msg_type == "end":
             if self.push_config is not None and self.push_config.delivery_enabled:
-                conn = self._conn()
-                try:
-                    devices = store.list_devices(conn)
-                    await delivery_wire.handle_delivery_resolve(
-                        obj.camera, obj.track_id, conn=conn, devices=devices,
-                        transport=self.transport, config=self.push_config,
-                    )
-                finally:
-                    conn.close()
+                # See `_pipeline_lock`: concurrent per-frame handlers each
+                # hold their own SQLite conn across `await transport.*`
+                # here, which without serialization convoys into
+                # `database is locked` and duplicate push-to-starts.
+                async with self._pipeline_lock:
+                    conn = self._conn()
+                    try:
+                        devices = store.list_devices(conn)
+                        await delivery_wire.handle_delivery_resolve(
+                            obj.camera, obj.track_id, conn=conn, devices=devices,
+                            transport=self.transport, config=self.push_config,
+                        )
+                    finally:
+                        conn.close()
             self.tracks.forget(obj.camera, obj.track_id)
             self._sub_labels.pop(key, None)
             self._last_zones.pop(key, None)
@@ -177,16 +200,17 @@ class PushEngine:
         if zones_now and zones_now != self._last_zones.get(key):
             self._last_zones[key] = zones_now
             if self.push_config is not None and self.push_config.delivery_enabled:
-                conn = self._conn()
-                try:
-                    devices = store.list_devices(conn)
-                    await delivery_wire.handle_zone_transition(
-                        obj.camera, obj.track_id, zones_now, label=obj.label,
-                        conn=conn, devices=devices, transport=self.transport,
-                        config=self.push_config, engine=self, now=now,
-                    )
-                finally:
-                    conn.close()
+                async with self._pipeline_lock:
+                    conn = self._conn()
+                    try:
+                        devices = store.list_devices(conn)
+                        await delivery_wire.handle_zone_transition(
+                            obj.camera, obj.track_id, zones_now, label=obj.label,
+                            conn=conn, devices=devices, transport=self.transport,
+                            config=self.push_config, engine=self, now=now,
+                        )
+                    finally:
+                        conn.close()
         if obj.sub_label:
             old_sub = self._sub_labels.get(key)
             self._sub_labels[key] = obj.sub_label
@@ -195,16 +219,17 @@ class PushEngine:
                 and self.push_config is not None
                 and self.push_config.delivery_enabled
             ):
-                conn = self._conn()
-                try:
-                    devices = store.list_devices(conn)
-                    await delivery_wire.handle_recognition_event(
-                        obj.camera, obj.track_id, obj.sub_label,
-                        conn=conn, devices=devices, transport=self.transport,
-                        config=self.push_config, label=obj.label, now=now,
-                    )
-                finally:
-                    conn.close()
+                async with self._pipeline_lock:
+                    conn = self._conn()
+                    try:
+                        devices = store.list_devices(conn)
+                        await delivery_wire.handle_recognition_event(
+                            obj.camera, obj.track_id, obj.sub_label,
+                            conn=conn, devices=devices, transport=self.transport,
+                            config=self.push_config, label=obj.label, now=now,
+                        )
+                    finally:
+                        conn.close()
         self._maybe_gc(now)
         return 0
 
@@ -232,14 +257,15 @@ class PushEngine:
         # accepted and stored (older app builds keep working), but no
         # situation alert or situation LA push is emitted.
         if self.push_config is not None and self.push_config.delivery_enabled:
-            conn = self._conn()
-            try:
-                sent = await delivery_wire.handle_delivery_event(
-                    event, conn=conn, devices=devices, transport=self.transport,
-                    config=self.push_config, engine=self, now=now,
-                )
-            finally:
-                conn.close()
+            async with self._pipeline_lock:
+                conn = self._conn()
+                try:
+                    sent = await delivery_wire.handle_delivery_event(
+                        event, conn=conn, devices=devices, transport=self.transport,
+                        config=self.push_config, engine=self, now=now,
+                    )
+                finally:
+                    conn.close()
 
         self._maybe_gc(now)
         return sent
@@ -330,37 +356,55 @@ class PushEngine:
         activities, never refreshes them, so the non-negotiable that stage
         transitions are the only thing minting an LA push still holds.
         """
-        now = time.time() if now is None else now
-        conn = self._conn()
-        try:
-            stale = store.stale_activities(
-                conn, quiet_for=self.activity_resolution_s, now=now
-            )
-            devices = {d.apns_token: d for d in store.list_devices(conn)}
-        finally:
-            conn.close()
+        # Whole-body lock: the sweep reads and writes the same
+        # activity/card rows the per-frame handlers do, across `await
+        # self._end_activity(...)` (itself awaiting the transport) -- see
+        # `_pipeline_lock`'s docstring for the convoy this prevents.
+        async with self._pipeline_lock:
+            now = time.time() if now is None else now
+            conn = self._conn()
+            try:
+                stale = store.stale_activities(
+                    conn, quiet_for=self.activity_resolution_s, now=now
+                )
+                devices = {d.apns_token: d for d in store.list_devices(conn)}
+            finally:
+                conn.close()
 
-        sent = 0
-        for row in stale:
-            device = devices.get(row["apns_token"])
-            if device is None:
-                conn = self._conn()
-                try:
-                    store.delete_activity(conn, row["activity_id"])
-                    conn.commit()
-                finally:
-                    conn.close()
-                continue
-            situation = next(
-                (s for s in device.situations if s.id == row["situation_id"]), None
-            )
-            if situation is None:
-                situation = Situation(id=row["situation_id"], name=row["situation_id"])
-            sent += await self._end_activity(
-                device, situation, row["camera"], row["track_id"],
-                reason="quiet", now=now, row=row,
-            )
-        return sent
+            conn = self._conn()
+            try:
+                n_stale_cards = card_store.close_stale_cards(
+                    conn, idle_for=self.card_resolution_s, now=now
+                )
+            finally:
+                conn.close()
+            if n_stale_cards:
+                logger.info(
+                    "push: closed %d stale card(s) idle > %.0fs",
+                    n_stale_cards, self.card_resolution_s,
+                )
+
+            sent = 0
+            for row in stale:
+                device = devices.get(row["apns_token"])
+                if device is None:
+                    conn = self._conn()
+                    try:
+                        store.delete_activity(conn, row["activity_id"])
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    continue
+                situation = next(
+                    (s for s in device.situations if s.id == row["situation_id"]), None
+                )
+                if situation is None:
+                    situation = Situation(id=row["situation_id"], name=row["situation_id"])
+                sent += await self._end_activity(
+                    device, situation, row["camera"], row["track_id"],
+                    reason="quiet", now=now, row=row,
+                )
+            return sent
 
     async def prewarm_thumbnail(self, handle: str, *, camera: str, event_id: str) -> bool:
         """Fetch, shrink, and park the snapshot under `handle` (plan §4 lever 1).

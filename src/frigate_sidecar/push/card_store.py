@@ -429,6 +429,27 @@ def reap_cards(
     return len(rows)
 
 
+def close_stale_cards(
+    conn: sqlite3.Connection, *, idle_for: float, now: float | None = None
+) -> int:
+    """Silently close open cards that have gone idle too long -- the resolve
+    that never arrived, e.g. a dropped Frigate end or a failed write. Without
+    this an open card leaks forever, inflating `extra_stories` on every
+    device's Live Activity until the process restarts or the table is
+    manually cleaned. Only `open` rows are candidates; a real loiter's
+    updates keep `updated_at` moving and the card alive.
+    """
+    now = time.time() if now is None else now
+    cutoff = now - idle_for
+    cur = conn.execute(
+        "UPDATE push_cards SET closed = 1, resolved = 1, updated_at = ? "
+        "WHERE closed = 0 AND resolved = 0 AND updated_at <= ?",
+        (now, cutoff),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def list_open_urgent_cards(conn: sqlite3.Connection) -> list[tuple[Card, dict[str, str]]]:
     """Open (`closed = 0`, `resolved = 0`) `urgent` cards -- the candidate
     set the re-sound sweep checks against its timer. Paired with the copy
@@ -469,6 +490,7 @@ def list_open_cards(conn: sqlite3.Connection) -> list[tuple[Card, dict[str, str]
     mutating. Modeled on `list_open_urgent_cards` without the level filter.
     """
     rows = conn.execute(
-        "SELECT * FROM push_cards WHERE closed = 0 AND resolved = 0"
+        "SELECT * FROM push_cards WHERE closed = 0 AND resolved = 0 "
+        "ORDER BY updated_at DESC"
     ).fetchall()
     return [(_row_to_card(row), _row_to_ctx(row)) for row in rows]

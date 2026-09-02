@@ -517,14 +517,18 @@ async def upload_activity_token(
     if engine is not None:
         from frigate_sidecar.push.delivery_wire import end_activity_if_card_closed
 
-        conn = db.open_sidecar(settings.sidecar.db_path)
-        try:
-            await end_activity_if_card_closed(
-                conn, device, engine.transport, token=body.token,
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        # Same `_pipeline_lock` the per-frame handlers hold across their own
+        # `await transport.*` -- without it this rare race path can convoy
+        # into `database is locked` against a concurrent handler.
+        async with engine._pipeline_lock:
+            conn = db.open_sidecar(settings.sidecar.db_path)
+            try:
+                await end_activity_if_card_closed(
+                    conn, device, engine.transport, token=body.token,
+                )
+                conn.commit()
+            finally:
+                conn.close()
     return {"accepted": True, "activity_id": body.activity_id}
 
 
