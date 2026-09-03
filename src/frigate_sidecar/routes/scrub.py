@@ -177,7 +177,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
             "attention_subjects": list(policy_settings.SUBJECTS_V3),
         },
         "decisions": {"enabled": True},
-        "search": {"enabled": True},
+        "search": {"enabled": True, "related_events": True},
     }
 
 

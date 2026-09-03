@@ -34,6 +34,12 @@ desktop the header shows running real/false-alarm/skip counts.
 Labels are stored in the sidecar's own database; Frigate's data is never
 modified.
 
+**Related events.** `GET /v1/events/{event_id}/related` looks up other
+cameras that saw the same object -- cards the push pipeline's cross-camera
+dedup already linked, plus same-label events on other cameras whose time
+span overlaps this one (padded ±20s). The requested event's own camera is
+always excluded.
+
 ## If it goes wrong
 
 An empty list usually means the filters are too narrow (widen the day range)
