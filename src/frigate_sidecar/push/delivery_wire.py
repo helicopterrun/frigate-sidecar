@@ -850,12 +850,19 @@ async def _deliver_live_activities(
                 handle=media_handle or "", now=now,
             )
             store.record_activity_send(conn, activity_id=activity_id, now=now)
+            # Commit before the loop moves on to the next device's own
+            # `await transport.*`: a per-frame handler holding this write
+            # across another coroutine's send is the convoy that produced
+            # `database is locked` and duplicate push-to-start sends
+            # (root-cause journal 2026-09-02).
+            conn.commit()
             continue
 
         if not device_row["token"]:
             # No per-activity token yet (app hasn't confirmed the start) --
             # keep the row alive so the sweep doesn't reap a young LA.
             store.touch_activity(conn, device_row["activity_id"], now=now)
+            conn.commit()
             continue
 
         if not eligible:
@@ -882,6 +889,7 @@ async def _deliver_live_activities(
             if result.ok:
                 covered.add(device.apns_token)
             store.close_activity(conn, device_row["activity_id"], now=now)
+            conn.commit()
             _la_prev_state.pop(device.apns_token, None)
             continue
 
@@ -979,6 +987,7 @@ async def _deliver_live_activities(
             conn, device_row["activity_id"], thumbnail_revision=revision, pushed=True, now=now,
         )
         store.record_activity_send(conn, activity_id=device_row["activity_id"], now=now)
+        conn.commit()
         _la_prev_state[device.apns_token] = {
             "mutation": mutation, "level": primary_card.level, "primary": p_primary,
             "glyph": glyph_val, "zones": current_zones_tuple,

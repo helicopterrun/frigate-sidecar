@@ -421,6 +421,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             thumbnail_timeout_s=settings.push.thumbnail_timeout_s,
             dwell_source=settings.push.dwell_source,
             activity_resolution_s=settings.push.activity_resolution_s,
+            card_resolution_s=settings.push.card_resolution_s,
             activity_dismissal_tail_s=settings.push.activity_dismissal_tail_s,
             activity_reap_after_s=settings.push.activity_reap_after_s,
             push_config=settings.push,

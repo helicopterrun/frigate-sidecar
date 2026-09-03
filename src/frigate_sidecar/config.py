@@ -648,6 +648,10 @@ class PushSection(BaseModel):
     # faster signal is Frigate's own object `end`, which the engine acts on
     # directly; this catches the case where it never arrives.
     activity_resolution_s: float = 30.0
+    # An open card idle this long is closed silently -- the resolve that
+    # never arrived, e.g. a dropped Frigate end or a failed write; sized so
+    # a real loiter's updates keep it alive.
+    card_resolution_s: float = 600.0
     # How long the activity lingers on screen after the end push.
     activity_dismissal_tail_s: float = 30.0
     activity_reap_after_s: float = 300.0
