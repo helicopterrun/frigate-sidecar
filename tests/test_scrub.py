@@ -1592,3 +1592,118 @@ def test_reel_honours_sidecar_applied_offset(
     assert r.status_code == 200
     events = {e["id"]: e for e in r.json()["events"]}
     assert events["ev1"]["start"] == pytest.approx(now - 205, abs=5)
+
+
+def _publish_sheet(
+    cache_dir: Path, sidecar_db_path: Path, *, camera: str = "doorbell",
+    start: float = 1_785_380_400.0, interval: float = 1.0, count: int = 24,
+    body: bytes = b"x" * 500,
+) -> str:
+    rel = grid.sheet_rel_path(camera, interval, start, count)
+    out = cache_dir / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(body)
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        db.upsert_scrub_sheet(
+            conn, camera=camera, start_ts=start, interval_s=interval, cols=12, rows=8,
+            cell_w=320, cell_h=180, count=count, path=rel, complete=False,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return rel
+
+
+def test_sheet_image_range_request(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _skip_auth(monkeypatch)
+    cache_dir = client.app.state.settings.scrub.cache_dir  # type: ignore[attr-defined]
+    _publish_sheet(cache_dir, sidecar_db_path, body=b"y" * 500)
+    url = "/v1/scrub/doorbell/sheet/1785380400-1.0-24.jpg"
+
+    r_range = client.get(url, headers={"cookie": "session=fake", "Range": "bytes=0-99"})
+    assert r_range.status_code == 206
+    assert r_range.headers["content-range"] == "bytes 0-99/500"
+    assert len(r_range.content) == 100
+    assert r_range.headers["accept-ranges"] == "bytes"
+
+    r_bad = client.get(
+        url, headers={"cookie": "session=fake", "Range": "bytes=10000-20000"}
+    )
+    assert r_bad.status_code == 416
+
+    r_full = client.get(url, headers={"cookie": "session=fake"})
+    assert r_full.status_code == 200
+    assert r_full.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+def test_sheet_image_vanishing_after_exists_check_is_404(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file can be unlinked between the `exists()` check and the response
+    being built; the stat seam introduced for this must turn that into a
+    clean 404 instead of a 500 (Starlette's FileResponse otherwise raises
+    RuntimeError deep inside the ASGI send, not FileNotFoundError, and not
+    until after the route has already returned)."""
+    _skip_auth(monkeypatch)
+    cache_dir = client.app.state.settings.scrub.cache_dir  # type: ignore[attr-defined]
+    rel = _publish_sheet(cache_dir, sidecar_db_path)
+    sheet_path = cache_dir / rel
+    url = "/v1/scrub/doorbell/sheet/1785380400-1.0-24.jpg"
+
+    # Vanish it between the route's `exists()` check and its own explicit
+    # `stat()` call -- that's the window the fix closes; a vanish during the
+    # ASGI send itself (after `FileResponse` is already built) is the residual
+    # risk the spec accepts as unclosable for a file-backed response. Scoped
+    # to this one path so it doesn't disturb every other `exists()` check the
+    # request touches (e.g. Frigate's own DB file).
+    real_exists = Path.exists
+
+    def _exists_then_unlink(self: Path, *a: object, **kw: object) -> bool:
+        result = real_exists(self, *a, **kw)
+        if result and self == sheet_path:
+            self.unlink(missing_ok=True)
+        return result
+
+    monkeypatch.setattr(Path, "exists", _exists_then_unlink)
+
+    r = client.get(url, headers={"cookie": "session=fake"})
+    assert r.status_code == 404
+    assert r.json()["detail"]["error"] == "not_generated"
+
+
+def test_sheets_index_etag_and_304(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _skip_auth(monkeypatch)
+    cache_dir = client.app.state.settings.scrub.cache_dir  # type: ignore[attr-defined]
+    start = 1_785_380_400.0
+    _publish_sheet(cache_dir, sidecar_db_path, start=start, count=24)
+
+    r1 = client.get(
+        "/v1/scrub/doorbell/sheets",
+        params={"start": start, "end": start + 200},
+        headers={"cookie": "session=fake"},
+    )
+    assert r1.status_code == 200
+    assert r1.headers["cache-control"] == "no-cache"
+    etag = r1.headers["etag"]
+
+    r2 = client.get(
+        "/v1/scrub/doorbell/sheets",
+        params={"start": start, "end": start + 200},
+        headers={"cookie": "session=fake", "if-none-match": etag},
+    )
+    assert r2.status_code == 304
+    assert r2.content == b""
+
+    # Publishing another sheet changes the index body -> the ETag changes.
+    _publish_sheet(cache_dir, sidecar_db_path, start=start, count=40)
+    r3 = client.get(
+        "/v1/scrub/doorbell/sheets",
+        params={"start": start, "end": start + 200},
+        headers={"cookie": "session=fake"},
+    )
+    assert r3.headers["etag"] != etag

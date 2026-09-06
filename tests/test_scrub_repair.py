@@ -244,3 +244,57 @@ def test_repair_leaves_a_larger_version_published_after_the_scan(env: Settings) 
     assert COLS * ROWS in counts, "repair deleted a version published after the scan"
     assert 6 not in counts, "the over-claiming version survived"
     assert (env.scrub.cache_dir / newer).exists()
+
+
+def test_verify_reports_a_truncated_sheet_as_unreadable_when_cells_survive(
+    env: Settings,
+) -> None:
+    rel = _publish_overclaiming(
+        env, start_ts=1_800_000_000.0, interval_s=60.0, declared=4,
+        present=[0, 1, 2, 3], keep_cells=True,
+    )
+    (env.scrub.cache_dir / rel).write_bytes(b"\x00" * 100)  # truncate in place
+
+    verdicts = repair.verify_sheets(env)
+    assert len(verdicts) == 1
+    assert verdicts[0].reason == "unreadable"
+
+    result = repair.verify_and_repair(env, repair=True)
+    assert result["unreadable_sheets"] == 1
+    assert result["repaired"] == 1
+    assert result["removed"] == 0
+
+    conn = db.open_sidecar(env.sidecar.db_path)
+    try:
+        sheets = db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+    finally:
+        conn.close()
+    assert len(sheets) == 1
+    assert sheets[0]["count"] == 4  # cells backed all 4 -> re-rendered whole
+    with Image.open(env.scrub.cache_dir / sheets[0]["path"]) as im:
+        im.load()  # the repaired file must actually decode
+    assert repair.verify_and_repair(env)["unreadable_sheets"] == 0
+
+
+def test_verify_removes_a_truncated_sheet_when_cells_are_gone(env: Settings) -> None:
+    rel = _publish_overclaiming(
+        env, start_ts=1_800_000_000.0, interval_s=60.0, declared=4,
+        present=[0, 1, 2, 3], keep_cells=False,
+    )
+    (env.scrub.cache_dir / rel).write_bytes(b"\x00" * 100)  # truncate in place
+
+    verdicts = repair.verify_sheets(env)
+    assert len(verdicts) == 1
+    assert verdicts[0].reason == "unreadable"
+
+    result = repair.verify_and_repair(env, repair=True)
+    assert result["unreadable_sheets"] == 1
+    assert (result["repaired"], result["removed"]) == (0, 1)
+
+    conn = db.open_sidecar(env.sidecar.db_path)
+    try:
+        assert db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000) == []
+    finally:
+        conn.close()
+    assert not (env.scrub.cache_dir / rel).exists()
+    assert repair.verify_and_repair(env)["unreadable_sheets"] == 0

@@ -98,24 +98,35 @@ def healthz(request: Request) -> JSONResponse:
             checks["db"] = "error"
             ok = False
 
+    scrub_low_disk: bool | None = None
     if settings.scrub.enabled:
-        tick = min(settings.scrub.generate_interval_s, settings.scrub.live_edge_interval_s)
-        last_cycle = getattr(app.state, "scrub_last_cycle", None)
-        started_at = getattr(app.state, "started_at", now)
-        if last_cycle is not None:
-            age = now - last_cycle
-            checks["scrub_last_cycle_age_s"] = round(age, 1)
-            if age > tick * _SCRUB_STALE_TICKS:
+        scrub_low_disk = bool(getattr(app.state, "scrub_low_disk", False))
+        if getattr(app.state, "scrub_locked", False):
+            # Another process (a restarting predecessor, or a concurrent CLI
+            # `fsc scrub` invocation) holds the cache lock -- the generation
+            # loop was never started. Distinct from "stale" (a loop that
+            # started and died) so an operator knows to check for a stray
+            # process rather than a wedge.
+            checks["scrub"] = "locked"
+            ok = False
+        else:
+            tick = min(settings.scrub.generate_interval_s, settings.scrub.live_edge_interval_s)
+            last_cycle = getattr(app.state, "scrub_last_cycle", None)
+            started_at = getattr(app.state, "started_at", now)
+            if last_cycle is not None:
+                age = now - last_cycle
+                checks["scrub_last_cycle_age_s"] = round(age, 1)
+                if age > tick * _SCRUB_STALE_TICKS:
+                    checks["scrub"] = "stale"
+                    ok = False
+                else:
+                    checks["scrub"] = "ok"
+            elif now - started_at > tick * _SCRUB_STALE_TICKS:
+                # Never completed a cycle and we're well past startup grace.
                 checks["scrub"] = "stale"
                 ok = False
             else:
-                checks["scrub"] = "ok"
-        elif now - started_at > tick * _SCRUB_STALE_TICKS:
-            # Never completed a cycle and we're well past startup grace.
-            checks["scrub"] = "stale"
-            ok = False
-        else:
-            checks["scrub"] = "starting"
+                checks["scrub"] = "starting"
 
     if settings.face_enrich.enabled:
         # Same staleness shape as scrub. The worker stamps last_cycle only on
@@ -138,7 +149,9 @@ def healthz(request: Request) -> JSONResponse:
         else:
             checks["face_enrich"] = "starting"
 
-    body = {"status": "ok" if ok else "degraded", "checks": checks}
+    body: dict[str, Any] = {"status": "ok" if ok else "degraded", "checks": checks}
+    if scrub_low_disk is not None:
+        body["scrub_low_disk"] = scrub_low_disk
     return JSONResponse(body, status_code=200 if ok else 503)
 
 

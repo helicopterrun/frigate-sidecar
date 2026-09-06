@@ -55,6 +55,7 @@ from frigate_sidecar.routes import status as status_routes
 from frigate_sidecar.routes import toybox as toybox_routes
 from frigate_sidecar.routes import triage as triage_routes
 from frigate_sidecar.routes import zone_hits as zone_hits_routes
+from frigate_sidecar.scrub.lock import ScrubCacheLock, ScrubLockHeld
 
 _PACKAGE_ROOT = Path(__file__).parent
 _TEMPLATES_DIR = _PACKAGE_ROOT / "templates"
@@ -92,18 +93,33 @@ logger = logging.getLogger(__name__)
 _LOW_SPACE_WARN_INTERVAL_S = 900.0
 
 
+_last_disk_check_warn = 0.0
+
+
 def _below_free_space_floor(cache_dir: Path, min_free_bytes: int) -> bool:
     """True if the cache filesystem has less than `min_free_bytes` free.
 
     `shutil.disk_usage` fails if `cache_dir` doesn't exist yet (e.g. very
     first boot before the generator has created it) -- treat that as "can't
     tell, don't block generation on it", matching `_cache_on_separate_filesystem`.
+    An OSError past that point (e.g. the filesystem underneath got yanked)
+    gets a rate-limited warning, since silently returning False here means
+    the free-space floor is quietly not being enforced.
     """
+    global _last_disk_check_warn
     if min_free_bytes <= 0:
         return False
     try:
         return shutil.disk_usage(cache_dir).free < min_free_bytes
     except OSError:
+        now_mono = time.monotonic()
+        if now_mono - _last_disk_check_warn >= _LOW_SPACE_WARN_INTERVAL_S:
+            _last_disk_check_warn = now_mono
+            logger.warning(
+                "scrub: could not stat cache filesystem (%s) -- the free-space "
+                "floor is not being enforced this tick",
+                cache_dir,
+            )
         return False
 
 
@@ -139,9 +155,11 @@ async def _scrub_generation_loop(app: FastAPI) -> None:
     # Measured GOP and aspect per camera, kept for the process lifetime.
     profile = SourceProfile()
     last_low_space_warn = 0.0
+    app.state.scrub_low_disk = False
     while True:
         deadline = time.monotonic() + tick
         if _below_free_space_floor(settings.scrub.cache_dir, settings.scrub.min_free_bytes):
+            app.state.scrub_low_disk = True
             # Below the floor: skip generation for this tick (it's what would
             # be filling the disk further) but do NOT touch scrub_last_cycle --
             # the status dashboard's staleness check (below) is what's supposed
@@ -157,6 +175,7 @@ async def _scrub_generation_loop(app: FastAPI) -> None:
                     settings.scrub.min_free_bytes,
                 )
         else:
+            app.state.scrub_low_disk = False
             try:
                 await generate_cycle(
                     settings, now=time.time(), profile=profile, backfill_deadline=deadline
@@ -371,6 +390,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         _crosscam.check_inputs(settings)
 
     task: asyncio.Task[None] | None = None
+    scrub_lock: ScrubCacheLock | None = None
+    app.state.scrub_locked = False
     if settings.scrub.enabled:
         _check_scrub_inputs(settings)
         if not _cache_on_separate_filesystem(
@@ -383,7 +404,20 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 settings.scrub.cache_dir, settings.frigate.recordings_path,
             )
         else:
-            task = asyncio.create_task(_scrub_generation_loop(app))
+            scrub_lock = ScrubCacheLock(settings.scrub.cache_dir)
+            try:
+                # A restarting predecessor process (systemd RestartSec=5) may
+                # still be releasing the lock -- give it 30s to exit before
+                # giving up, rather than refusing to start over a race.
+                await asyncio.to_thread(scrub_lock.acquire, 30.0)
+            except ScrubLockHeld as exc:
+                logger.error(
+                    "scrub: %s -- generation loop NOT started, HTTP keeps serving", exc
+                )
+                app.state.scrub_locked = True
+                scrub_lock = None
+            else:
+                task = asyncio.create_task(_scrub_generation_loop(app))
 
     push_task: asyncio.Task[None] | None = None
     sweep_task: asyncio.Task[None] | None = None
@@ -461,6 +495,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 pending.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await pending
+        if scrub_lock is not None:
+            scrub_lock.release()
         delivery.cancel_deferred()
         running_subscriber = getattr(app.state, "push_subscriber", None)
         if running_subscriber is not None:

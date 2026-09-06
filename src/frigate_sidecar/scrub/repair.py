@@ -47,7 +47,7 @@ from PIL import Image, ImageStat
 
 from frigate_sidecar import db
 from frigate_sidecar.config import Settings
-from frigate_sidecar.scrub import generator, grid
+from frigate_sidecar.scrub import generator, grid, tiling
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ class SheetVerdict:
     real: int
     path: str
     source: str  # "cells" | "pixels"
+    reason: str = "inflated"  # "inflated" | "unreadable"
 
 
 def _true_count_from_cells(cache_dir: Path, row: dict[str, Any]) -> int | None:
@@ -134,6 +135,22 @@ def _true_count_from_pixels(cache_dir: Path, row: dict[str, Any]) -> int | None:
     return declared
 
 
+def _sheet_is_corrupt(path: Path) -> bool:
+    """Whether the published file itself fails to decode -- truncated or
+    otherwise corrupt -- distinct from an inflated-but-decodable count.
+
+    Checked independently of the cell store: a sheet's declared count can
+    still match what its cells back while the published bytes are broken, and
+    the client only ever sees the published file.
+    """
+    try:
+        with Image.open(path) as im:
+            im.load()
+    except OSError:
+        return True
+    return False
+
+
 def verify_sheets(
     settings: Settings, *, camera: str | None = None, interval: float | None = None
 ) -> list[SheetVerdict]:
@@ -165,6 +182,18 @@ def verify_sheets(
     cache_dir = settings.scrub.cache_dir
     verdicts: list[SheetVerdict] = []
     for row in rows:
+        path = cache_dir / row["path"]
+        if path.exists() and _sheet_is_corrupt(path):
+            logger.warning("scrub: sheet %s is corrupt/unreadable", path)
+            verdicts.append(
+                SheetVerdict(
+                    camera=row["camera"], start_ts=row["start_ts"],
+                    interval_s=row["interval_s"], declared=row["count"], real=0,
+                    path=row["path"], source="pixels", reason="unreadable",
+                )
+            )
+            continue
+
         real = _true_count_from_cells(cache_dir, row)
         source = "cells"
         if real is None:
@@ -177,7 +206,7 @@ def verify_sheets(
                 SheetVerdict(
                     camera=row["camera"], start_ts=row["start_ts"],
                     interval_s=row["interval_s"], declared=row["count"], real=real,
-                    path=row["path"], source=source,
+                    path=row["path"], source=source, reason="inflated",
                 )
             )
     return verdicts
@@ -202,6 +231,9 @@ def repair_sheet(settings: Settings, verdict: SheetVerdict) -> str | None:
         )
         if row is None:
             return None
+
+        if verdict.reason == "unreadable":
+            return _repair_unreadable(conn, cache_dir, verdict, row)
 
         if verdict.real == 0:
             conn.execute(
@@ -254,12 +286,73 @@ def repair_sheet(settings: Settings, verdict: SheetVerdict) -> str | None:
         conn.close()
 
 
+def _repair_unreadable(
+    conn: Any, cache_dir: Path, verdict: SheetVerdict, row: dict[str, Any]
+) -> str | None:
+    """A corrupt/truncated sheet file: re-render from the cell store when it
+    survives (same as the generator would have produced); otherwise there is
+    no honest bytes left to serve, so drop it and let the generator's normal
+    backfill/regeneration path fill the hole."""
+    cells_dir = generator._cells_dir(
+        cache_dir, verdict.camera, verdict.interval_s, verdict.start_ts
+    )
+    count = 0
+    while count < row["count"] and (cells_dir / f"{count:03d}.jpg").exists():
+        count += 1
+
+    old_path = cache_dir / row["path"]
+    if count == 0:
+        conn.execute(
+            "DELETE FROM scrub_sheets WHERE camera = ? AND start_ts = ? "
+            "AND interval_s = ? AND count = ?",
+            (verdict.camera, verdict.start_ts, verdict.interval_s, verdict.declared),
+        )
+        conn.commit()
+        with contextlib.suppress(OSError):
+            old_path.unlink()
+        return None
+
+    ext = Path(row["path"]).suffix
+    rel = grid.sheet_rel_path(verdict.camera, verdict.interval_s, verdict.start_ts, count, ext)
+    target = cache_dir / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tiling.tile_sheet(
+        [(i, cells_dir / f"{i:03d}.jpg") for i in range(count)],
+        cols=row["cols"], rows=row["rows"], cell_w=row["cell_w"], cell_h=row["cell_h"],
+        out_path=target,
+    )
+    db.upsert_scrub_sheet(
+        conn, camera=verdict.camera, start_ts=verdict.start_ts, interval_s=verdict.interval_s,
+        cols=row["cols"], rows=row["rows"], cell_w=row["cell_w"], cell_h=row["cell_h"],
+        count=count, path=rel, complete=count >= row["cols"] * row["rows"],
+    )
+    conn.commit()
+    if count != verdict.declared:
+        # A different count published under a different name -- the old,
+        # declared-count row/file is now a stale duplicate; retire it. When
+        # the count is unchanged (rel == row["path"]) the upsert above *is*
+        # that same row rewritten in place, so there is nothing left to
+        # delete -- doing so anyway would delete the row we just wrote.
+        conn.execute(
+            "DELETE FROM scrub_sheets WHERE camera = ? AND start_ts = ? AND interval_s = ? "
+            "AND count = ?",
+            (verdict.camera, verdict.start_ts, verdict.interval_s, verdict.declared),
+        )
+        conn.commit()
+        if target != old_path:
+            with contextlib.suppress(OSError):
+                old_path.unlink()
+    return rel
+
+
 def verify_and_repair(
     settings: Settings, *, camera: str | None = None, interval: float | None = None,
     repair: bool = False,
 ) -> dict[str, Any]:
-    """Scan for over-claiming sheets, optionally fixing each one."""
+    """Scan for over-claiming and unreadable sheets, optionally fixing each one."""
     verdicts = verify_sheets(settings, camera=camera, interval=interval)
+    inflated = [v for v in verdicts if v.reason == "inflated"]
+    unreadable = [v for v in verdicts if v.reason == "unreadable"]
     repaired = 0
     removed = 0
     if repair:
@@ -270,20 +363,29 @@ def verify_and_repair(
             else:
                 repaired += 1
             logger.info(
-                "scrub: repaired %s %gs sheet %s -- declared %d, real %d (from %s)",
+                "scrub: repaired %s %gs sheet %s (%s) -- declared %d, real %d (from %s)",
                 verdict.camera, verdict.interval_s, grid.fmt_time(verdict.start_ts),
-                verdict.declared, verdict.real, verdict.source,
+                verdict.reason, verdict.declared, verdict.real, verdict.source,
             )
     return {
-        "overclaiming_sheets": len(verdicts),
-        "cells_falsely_claimed": sum(v.declared - v.real for v in verdicts),
+        "overclaiming_sheets": len(inflated),
+        "cells_falsely_claimed": sum(v.declared - v.real for v in inflated),
+        "unreadable_sheets": len(unreadable),
         "repaired": repaired,
         "removed": removed,
         "sheets": [
             {
                 "camera": v.camera, "start": v.start_ts, "interval": v.interval_s,
                 "declared": v.declared, "real": v.real, "source": v.source, "path": v.path,
+                "reason": v.reason,
             }
-            for v in verdicts
+            for v in inflated
+        ],
+        "unreadable": [
+            {
+                "camera": v.camera, "start": v.start_ts, "interval": v.interval_s,
+                "declared": v.declared, "path": v.path,
+            }
+            for v in unreadable
         ],
     }

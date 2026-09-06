@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -185,6 +186,37 @@ def test_healthz_frigate_probe_is_cached_within_window(
     client.app.state._frigate_health_cache = (cache_ts - 3600, verdict)
     client.get("/healthz")
     assert len(calls) == 2
+
+
+def test_healthz_scrub_low_disk_reflects_the_flag(client: TestClient) -> None:
+    """Additive `scrub_low_disk` top-level field -- absent means an older
+    sidecar, present and true means the generation loop is currently skipping
+    cycles for lack of free space (server.py `_scrub_generation_loop`)."""
+    client.app.state.settings.scrub.enabled = True
+    client.app.state.scrub_last_cycle = time.time()
+    client.app.state.scrub_low_disk = False
+
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    assert r.json()["scrub_low_disk"] is False
+
+    client.app.state.scrub_low_disk = True
+    r = client.get("/healthz")
+    assert r.json()["scrub_low_disk"] is True
+
+
+def test_healthz_scrub_locked_is_degraded(client: TestClient) -> None:
+    """When another process holds the scrub cache lock, the service never
+    starts the generation loop -- `/healthz` must surface that distinctly
+    from `stale` so an operator knows to look for a stray process."""
+    client.app.state.settings.scrub.enabled = True
+    client.app.state.scrub_locked = True
+
+    r = client.get("/healthz")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["scrub"] == "locked"
 
 
 def test_motion_blank_form(client: TestClient) -> None:

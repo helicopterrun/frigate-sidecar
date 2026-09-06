@@ -2264,3 +2264,46 @@ def test_filling_a_hole_extends_the_sheet_over_the_cells_beyond_it(env: Settings
         )
     finally:
         conn.close()
+
+
+def test_prune_counts_and_logs_unlink_failures_but_still_removes_the_rest(
+    env: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A blanket `contextlib.suppress(OSError)` around prune's unlinks used to
+    swallow anything past FileNotFoundError -- a permissions problem or a
+    wedged mount looked identical to a normal already-gone race. Now a
+    `PermissionError` on one sheet's file is counted and logged, and prune
+    still finishes and removes every other file."""
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_camera(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=generator.SourceProfile(),
+                sem=asyncio.Semaphore(3),
+            )
+        )
+    finally:
+        conn.close()
+
+    sheet_files = list((env.scrub.cache_dir / "doorbell").rglob("*.jpg"))
+    assert len(sheet_files) > 1, "need at least two sheet files for this to be meaningful"
+    poisoned = sheet_files[0]
+
+    real_unlink = Path.unlink
+
+    def _flaky_unlink(self: Path, *a: object, **kw: object) -> None:
+        if self == poisoned:
+            raise PermissionError(13, "Permission denied")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", _flaky_unlink)
+
+    with caplog.at_level("WARNING", logger="frigate_sidecar.scrub.generator"):
+        result = generator.prune(env, now=1_800_000_030.0 + 30 * 86400)
+
+    assert result["unlink_failures"] == 1
+    assert any("unlink failures" in r.message for r in caplog.records)
+    assert poisoned.exists(), "the poisoned file could not be removed"
+    remaining = list((env.scrub.cache_dir / "doorbell").rglob("*.jpg"))
+    assert remaining == [poisoned], "every other sheet file should still be removed"
