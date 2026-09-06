@@ -21,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 
 from frigate_sidecar.config import Settings
 from frigate_sidecar.db import open_frigate_ro, open_sidecar
+from frigate_sidecar.errors import error_detail
 from frigate_sidecar.guide import SECTION_TITLES, GuideRegistry
 
 logger = logging.getLogger(__name__)
@@ -167,7 +168,9 @@ def guide_topic(request: Request, slug: str) -> object:
     registry = _registry(request)
     topic = registry.topics.get(slug)
     if topic is None:
-        raise HTTPException(status_code=404, detail="unknown guide topic")
+        raise HTTPException(
+            status_code=404, detail=error_detail("not_found", "unknown guide topic")
+        )
     prev_t, next_t = registry.neighbors(slug)
     numbers = registry.numbers()
     return _templates(request).TemplateResponse(

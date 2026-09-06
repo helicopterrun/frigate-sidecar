@@ -57,6 +57,24 @@ the sidecar's own knobs in one place.
 - `watchdog:` — an optional external health watchdog that can restart the
   Frigate container when it wedges. It runs as its own systemd unit and is
   off by default; the sidecar itself never restarts anything.
+  - `enabled` — master on/off switch (default off).
+  - `probe_path` — HTTP path probed against `frigate.base_url` to check
+    liveness (default `/api/version`).
+  - `interval_s` / `timeout_s` — how often it probes, and the per-probe
+    timeout (default 30s / 10s).
+  - `failures_before_restart` — consecutive failed probes before a restart
+    is triggered (default 4).
+  - `restart_command` — shell command run to restart the Frigate container
+    (default `["docker", "restart", "frigate"]`).
+  - `restart_timeout_s` — timeout for the restart command itself (default
+    120s).
+  - `cooldown_s` — after a restart, ignore failures for this long so
+    Frigate's own boot can't trigger a second restart (default 180s).
+  - `max_restarts_per_hour` — safety cap before the watchdog gives up and
+    just logs (default 3).
 - `proxy:` — behavior of the reverse proxy through which your browser
   reaches Frigate's API (timeouts, header handling). Defaults are fine for
   almost everyone.
+  - `enabled` — master on/off switch for the proxy (default on).
+  - `pass_request_headers` — request headers forwarded upstream (default
+    `["range", "authorization", "cookie"]`).

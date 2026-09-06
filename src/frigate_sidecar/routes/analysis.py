@@ -23,6 +23,7 @@ from frigate_sidecar.analysis import (
     zone_hits,
 )
 from frigate_sidecar.config import Settings
+from frigate_sidecar.errors import error_detail
 from frigate_sidecar.frigate_api import FrigateAPIError
 
 # `database is locked` vocabulary, matching routes/scrub.py's `{"error",
@@ -75,7 +76,9 @@ def fps_budget_endpoint(request: Request) -> dict[str, Any]:
     try:
         return fps_budget.analyze(frigate_base_url=s.frigate.base_url)
     except FrigateAPIError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502, detail=error_detail("upstream_unavailable", str(exc))
+        ) from exc
 
 
 @router.get("/motion-active")
@@ -87,7 +90,9 @@ def motion_active_endpoint(
     try:
         return motion_active.analyze(frigate_base_url=s.frigate.base_url, days=days)
     except FrigateAPIError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502, detail=error_detail("upstream_unavailable", str(exc))
+        ) from exc
 
 
 @router.get("/motion-compare")
@@ -102,10 +107,14 @@ def motion_compare_endpoint(
             frigate_base_url=s.frigate.base_url, baseline=baseline, target=target,
         )
     except FrigateAPIError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502, detail=error_detail("upstream_unavailable", str(exc))
+        ) from exc
     except ValueError as exc:
         # Date-parse errors from parse_range bubble up here.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400, detail=error_detail("invalid_range", str(exc))
+        ) from exc
 
 
 @router.get("/zone-hits")
@@ -162,7 +171,9 @@ def annotation_offset_endpoint(
             days=days, camera=camera,
         )
     except annotation_offset.AnnotationOffsetUnavailable as exc:
-        raise HTTPException(status_code=501, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=501, detail=error_detail("not_implemented", str(exc))
+        ) from exc
 
 
 # --- Event-clock alignment (Settings page workflow) -------------------------
@@ -192,7 +203,10 @@ async def alignment_measure(request: Request, days: int = Query(3, ge=1, le=30))
 
     job = _alignment_job(request)
     if job["running"]:
-        raise HTTPException(status_code=409, detail="a measurement is already running")
+        raise HTTPException(
+            status_code=409,
+            detail=error_detail("measurement_running", "a measurement is already running"),
+        )
     s = _settings(request)
     job.update(running=True, error=None)
 
@@ -355,9 +369,13 @@ def alignment_thumbnail(request: Request, event_id: str) -> Any:
         with FrigateClient(s.frigate.base_url) as fc:
             jpeg, _status = fc.event_thumbnail(event_id)
     except FrigateAPIError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502, detail=error_detail("upstream_unavailable", str(exc))
+        ) from exc
     if jpeg is None:
-        raise HTTPException(status_code=404, detail="no thumbnail for event")
+        raise HTTPException(
+            status_code=404, detail=error_detail("not_found", "no thumbnail for event")
+        )
     return Response(
         content=jpeg,
         media_type="image/jpeg",
@@ -424,13 +442,20 @@ async def alignment_apply_config(request: Request) -> Any:
     body = await request.json()
     camera = body.get("camera")
     if not isinstance(camera, str) or not camera:
-        raise HTTPException(status_code=422, detail="camera required")
+        raise HTTPException(
+            status_code=422, detail=error_detail("invalid_camera", "camera required")
+        )
     try:
         offset_ms = int(body.get("offset_ms"))
     except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail="bad offset_ms") from exc
+        raise HTTPException(
+            status_code=422, detail=error_detail("invalid_offset", "bad offset_ms")
+        ) from exc
     if abs(offset_ms) > 60_000:
-        raise HTTPException(status_code=422, detail="offset_ms out of range")
+        raise HTTPException(
+            status_code=422,
+            detail=error_detail("offset_out_of_range", "offset_ms out of range"),
+        )
 
     s = _settings(request)
 
@@ -445,7 +470,9 @@ async def alignment_apply_config(request: Request) -> Any:
     try:
         committed = await asyncio.to_thread(_apply_config)
     except FrigateAPIError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502, detail=error_detail("upstream_unavailable", str(exc))
+        ) from exc
 
     # The config is authoritative now; a lingering sidecar override for the
     # same camera would just be shadowed data waiting to confuse someone.
@@ -485,7 +512,9 @@ async def alignment_restart_frigate(request: Request) -> Any:
     try:
         await asyncio.to_thread(_restart)
     except FrigateAPIError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502, detail=error_detail("upstream_unavailable", str(exc))
+        ) from exc
     applied = list(_restart_pending(request))
     _restart_pending(request).clear()
     return {"restarted": True, "applied": applied}
@@ -506,9 +535,13 @@ def alignment_snapshot(request: Request, event_id: str) -> Any:
         with FrigateClient(s.frigate.base_url) as fc:
             jpeg, _status = fc.event_snapshot_jpeg(event_id)
     except FrigateAPIError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502, detail=error_detail("upstream_unavailable", str(exc))
+        ) from exc
     if jpeg is None:
-        raise HTTPException(status_code=404, detail="no snapshot for event")
+        raise HTTPException(
+        status_code=404, detail=error_detail("not_found", "no snapshot for event")
+    )
     return Response(
         content=jpeg,
         media_type="image/jpeg",
@@ -531,15 +564,21 @@ def alignment_frame(request: Request, camera: str, ts: float = Query(...)) -> An
 
     now = time.time()
     if not math.isfinite(ts) or ts <= 0 or ts > now or now - ts > 30 * 86400:
-        raise HTTPException(status_code=422, detail="ts out of range")
+        raise HTTPException(
+        status_code=422, detail=error_detail("invalid_range", "ts out of range")
+    )
     s = _settings(request)
     try:
         with FrigateClient(s.frigate.base_url) as fc:
             jpeg, status = fc.recording_snapshot(camera, ts)
     except FrigateAPIError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502, detail=error_detail("upstream_unavailable", str(exc))
+        ) from exc
     if jpeg is None:
-        raise HTTPException(status_code=404, detail="no recording covers ts")
+        raise HTTPException(
+        status_code=404, detail=error_detail("not_found", "no recording covers ts")
+    )
     return Response(
         content=jpeg,
         media_type="image/jpeg",
@@ -633,15 +672,26 @@ async def alignment_apply(request: Request) -> Any:
     body = await request.json()
     offsets = body.get("offsets")
     if not isinstance(offsets, dict) or not offsets:
-        raise HTTPException(status_code=422, detail="offsets must be a non-empty object")
+        raise HTTPException(
+            status_code=422,
+            detail=error_detail(
+                "invalid_offsets", "offsets must be a non-empty object"
+            ),
+        )
     clean: dict[str, int] = {}
     for cam, ms in offsets.items():
         try:
             value = int(ms)
         except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail=f"bad offset for {cam}") from exc
+            raise HTTPException(
+                status_code=422,
+                detail=error_detail("invalid_offset", f"bad offset for {cam}"),
+            ) from exc
         if abs(value) > 60_000:
-            raise HTTPException(status_code=422, detail=f"offset for {cam} out of range")
+            raise HTTPException(
+                status_code=422,
+                detail=error_detail("offset_out_of_range", f"offset for {cam} out of range"),
+            )
         clean[str(cam)] = value
 
     s = _settings(request)

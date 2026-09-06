@@ -79,7 +79,7 @@ def test_run_unknown_scenario_rejected(client: TestClient) -> None:
         "dry_run": True,
     })
     assert r.status_code == 400
-    assert "nonexistent" in r.json()["detail"]
+    assert "nonexistent" in r.json()["detail"]["message"]
 
 
 def _poll_done(client: TestClient, run_id: str) -> dict:

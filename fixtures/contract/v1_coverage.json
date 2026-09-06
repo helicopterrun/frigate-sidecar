@@ -1,0 +1,17 @@
+{
+  "authoritative_through": 1785952616.504,
+  "camera": "doorbell",
+  "latest_segment_end": 1785952282.704,
+  "queried": [
+    1785952222.704,
+    1785952622.704
+  ],
+  "recorded": [
+    [
+      1785952262.704,
+      1785952282.704
+    ]
+  ],
+  "recording_retention_days": null,
+  "scrub_retention_days": 4
+}

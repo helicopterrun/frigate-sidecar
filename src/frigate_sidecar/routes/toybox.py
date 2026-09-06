@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from frigate_sidecar.config import Settings
 from frigate_sidecar.db import open_sidecar
+from frigate_sidecar.errors import error_detail
 
 router = APIRouter(tags=["toybox"])
 
@@ -66,7 +67,9 @@ def toybox_view(request: Request) -> Any:
 @router.get("/toybox/scores")
 def toybox_scores(request: Request, game: str = GAME_STATES50) -> JSONResponse:
     if game not in KNOWN_GAMES:
-        raise HTTPException(status_code=404, detail=f"unknown game: {game}")
+        raise HTTPException(
+            status_code=404, detail=error_detail("unknown_game", f"unknown game: {game}")
+        )
     return JSONResponse({"game": game, "scores": _top_scores(_settings(request), game)})
 
 
@@ -86,7 +89,10 @@ def toybox_submit(payload: ScorePayload, request: Request) -> JSONResponse:
     # Sanitize the arcade name: uppercase, alnum only, capped length.
     name = "".join(c for c in payload.name.upper() if c.isalnum())[:_NAME_MAX]
     if not name:
-        raise HTTPException(status_code=400, detail="name must contain a letter or digit")
+        raise HTTPException(
+            status_code=400,
+            detail=error_detail("invalid_name", "name must contain a letter or digit"),
+        )
 
     settings = _settings(request)
     now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")

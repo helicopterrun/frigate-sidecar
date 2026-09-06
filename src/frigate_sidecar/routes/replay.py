@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from frigate_sidecar.config import Settings
+from frigate_sidecar.errors import error_detail
 from frigate_sidecar.push import replay
 
 router = APIRouter(tags=["replay"])
@@ -131,9 +132,12 @@ def map_autotune(request: Request, minutes: float = 240.0) -> JSONResponse:
     if not pairs:
         raise HTTPException(
             status_code=400,
-            detail="no overlapping cross-camera tracks in the capture window — "
-                   "walk the property through two-camera coverage and retry"
-                   + ("; " + "; ".join(warnings) if warnings else ""),
+            detail=error_detail(
+                "no_overlapping_tracks",
+                "no overlapping cross-camera tracks in the capture window — "
+                "walk the property through two-camera coverage and retry"
+                + ("; " + "; ".join(warnings) if warnings else ""),
+            ),
         )
     # Bound optimizer runtime: a busy day can mine far more constraints
     # than the fit needs.
@@ -153,11 +157,17 @@ async def replay_run(body: RunRequest, request: Request) -> JSONResponse:
             replay.resolve_scenario_path(name)
         except FileNotFoundError:
             raise HTTPException(
-                status_code=400, detail=f"unknown scenario: {name}"
+                status_code=400,
+                detail=error_detail("unknown_scenario", f"unknown scenario: {name}"),
             ) from None
 
     if not body.dry_run and not request.app.state.settings.push.enabled:
-        raise HTTPException(status_code=503, detail="push is not enabled (live run requires MQTT)")
+        raise HTTPException(
+            status_code=503,
+            detail=error_detail(
+                "push_disabled", "push is not enabled (live run requires MQTT)"
+            ),
+        )
 
     push_settings = request.app.state.settings.push if not body.dry_run else None
 
@@ -171,7 +181,9 @@ async def replay_run(body: RunRequest, request: Request) -> JSONResponse:
             wait=False,
         )
     except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=409, detail=error_detail("conflict", str(exc))
+        ) from exc
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 — the UI needs JSON, not an HTML 500
@@ -179,7 +191,9 @@ async def replay_run(body: RunRequest, request: Request) -> JSONResponse:
         # bad credentials) used to escape as an unhandled 500 whose HTML error
         # page broke the replay page's JSON parse ("Unexpected token '<'",
         # observed 2026-08-14). Surface the real cause as JSON instead.
-        raise HTTPException(status_code=502, detail=f"replay failed: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=error_detail("replay_failed", f"replay failed: {exc}")
+        ) from exc
 
     return JSONResponse(run.to_dict())
 

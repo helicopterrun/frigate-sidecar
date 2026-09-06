@@ -1,0 +1,27 @@
+{
+  "objects": [
+    {
+      "cameras": [
+        "doorbell"
+      ],
+      "label": "person",
+      "members": [
+        {
+          "age_s": 0.0,
+          "camera": "doorbell",
+          "forward_ft": 21.8,
+          "track_id": "t1",
+          "x": 0.5,
+          "y": 0.3912
+        }
+      ],
+      "stationary": false,
+      "track_ids": [
+        "t1"
+      ],
+      "x": 0.5,
+      "y": 0.3912
+    }
+  ],
+  "t": 1785952622.704
+}

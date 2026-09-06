@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from frigate_sidecar import __version__, db
+from frigate_sidecar.errors import error_detail
 from frigate_sidecar.push.stats import STATS
 
 router = APIRouter(tags=["status"])
@@ -284,7 +285,9 @@ def live_view(request: Request, camera: str) -> Any:
     settings = request.app.state.settings
     cameras = _camera_names(settings)
     if camera not in cameras:
-        raise HTTPException(status_code=404, detail="unknown camera")
+        raise HTTPException(
+            status_code=404, detail=error_detail("unknown_camera", "unknown camera")
+        )
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request, "live.html", {"camera": camera, "cameras": cameras}

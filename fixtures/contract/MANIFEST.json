@@ -10,7 +10,15 @@
     "la_update.json": "7251b3a000820e900d57223c409a56d2287510210a8eb26974b9c8c4874751ff",
     "push_decisions.json": "367591491168b18ff1cce4176250d3cb4dcfcf8946a427c28dc0f43c03e5a125",
     "push_settings_get.json": "8e1fa9ad39233c72129a2d99f4015fa53a8fed5a80e9aa4e0af71f26f92c5d03",
-    "push_settings_put.json": "ac4063d79d8f597d00f5091a48724dbbfdd5c85f993d11f82a9bdb0adae366dc"
+    "push_settings_put.json": "ac4063d79d8f597d00f5091a48724dbbfdd5c85f993d11f82a9bdb0adae366dc",
+    "v1_coverage.json": "5c42781a60b9afe9dc624a91a932e2cfb781c68620c8ce8a1d7a2ad279e49556",
+    "v1_events_related.json": "ba5debfaff2236c6baf68e4b24c3f1fcb214ebfeeac160b9b82b90fcbc57988a",
+    "v1_events_search.json": "bea2924484a8f196ffe0d35b73a5523709b62294e47b7baa05ec36e2e7cb7970",
+    "v1_highlights.json": "6f7b277033f667cc24b2e6bc9c5a2886ba41b55f07c0116d74179c3bcd74ec59",
+    "v1_push_map_live.json": "2e47b0076bc1ef11401ee23bb8169d767e1c8d072f9bd53a3621562fef0fad4b",
+    "v1_push_map_track.json": "182a0fc275b48b10acf4dc951badc2fc64f83fb65a95e86bb7ed32cba753b2b1",
+    "v1_reel.json": "65e5cea2fc766c0ccde3d57a5ed527f08d36aa90f4139edd807542dbd536d9ce",
+    "v1_scrub_sheets.json": "bd27bcb8fa65ef057c090236ecbcd5a32b20f1c00be9287bb397af747fb9c038"
   },
   "version": 1
 }

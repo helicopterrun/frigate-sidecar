@@ -35,6 +35,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
+from frigate_sidecar.errors import error_detail
 from frigate_sidecar.frigate_api import get_async_client
 
 logger = logging.getLogger(__name__)
@@ -92,12 +93,12 @@ def _reject_reserved(path: str) -> None:
     # return a confusing 502 for what is really a 404).
     if path == "v1" or path.startswith("v1/"):
         raise HTTPException(
-            status_code=404, detail={"error": "not_generated", "message": "unknown /v1 path"}
+            status_code=404, detail=error_detail("not_generated", "unknown /v1 path")
         )
     # Defense-in-depth: FastAPI's router already resolves ".." segments before
     # matching, but reject explicitly too (matches wildlife.py's guard).
     if ".." in path.split("/"):
-        raise HTTPException(status_code=400, detail="bad path")
+        raise HTTPException(status_code=400, detail=error_detail("bad_path", "bad path"))
 
 
 @router.api_route(
@@ -107,7 +108,9 @@ def _reject_reserved(path: str) -> None:
 async def proxy_passthrough(path: str, request: Request) -> Any:
     settings = request.app.state.settings
     if not settings.proxy.enabled:
-        raise HTTPException(status_code=404, detail="proxy disabled")
+        raise HTTPException(
+            status_code=404, detail=error_detail("proxy_disabled", "proxy disabled")
+        )
 
     _reject_reserved(path)
 
@@ -136,7 +139,9 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
         )
         resp = await client.send(req, stream=True)
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"upstream error: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=error_detail("upstream_unavailable", f"upstream error: {exc}")
+        ) from exc
 
     headers = {k: resp.headers[k] for k in _RESP_PASS if k in resp.headers}
 

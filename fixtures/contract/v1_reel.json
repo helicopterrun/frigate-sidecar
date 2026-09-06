@@ -1,0 +1,98 @@
+{
+  "authoritative_through": 1785952616.504,
+  "events": [
+    {
+      "continues": null,
+      "end": 1785952482.704,
+      "has_clip": true,
+      "has_snapshot": true,
+      "id": "e1",
+      "label": "package",
+      "path": null,
+      "score": 0.91,
+      "start": 1785952472.704,
+      "sub_label": "amazon",
+      "zones": [
+        "front_door"
+      ]
+    },
+    {
+      "continues": null,
+      "end": null,
+      "has_clip": false,
+      "has_snapshot": true,
+      "id": "e2",
+      "label": "person",
+      "path": null,
+      "score": 0.5,
+      "start": 1785952572.704,
+      "sub_label": null,
+      "zones": []
+    }
+  ],
+  "frames": [],
+  "latest_segment_end": 1785952432.704,
+  "motion": {
+    "interval": 10.0,
+    "start": 1785952322.704,
+    "values": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "queried": [
+    1785952322.704,
+    1785952622.704
+  ],
+  "recorded": [
+    [
+      1785952422.704,
+      1785952432.704
+    ]
+  ],
+  "reviews": [
+    {
+      "detections": [
+        "e1"
+      ],
+      "end": 1785952484.704,
+      "id": "r1",
+      "objects": [
+        "package"
+      ],
+      "severity": "alert",
+      "start": 1785952470.704,
+      "zones": [
+        "front_door"
+      ]
+    }
+  ]
+}

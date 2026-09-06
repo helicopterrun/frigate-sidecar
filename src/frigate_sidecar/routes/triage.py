@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from frigate_sidecar.config import Settings
 from frigate_sidecar.db import open_joined
+from frigate_sidecar.errors import error_detail
 from frigate_sidecar.frigate_api import FrigateClient, FrigatePlusError
 from frigate_sidecar.triage.recorder import (
     AlreadyLabeledError,
@@ -303,7 +304,7 @@ def detail_view(
         event_id=event_id,
     )
     if not ev:
-        raise HTTPException(status_code=404, detail="event not found")
+        raise HTTPException(status_code=404, detail=error_detail("not_found", "event not found"))
 
     ordered = _query_events(
         frigate_db=s.frigate.db_path,
@@ -407,7 +408,7 @@ def _maybe_submit_plus(
 def post_label(payload: LabelPayload, request: Request) -> JSONResponse:
     s = _settings(request)
     if payload.label not in _LABELS:
-        raise HTTPException(status_code=400, detail="invalid label")
+        raise HTTPException(status_code=400, detail=error_detail("invalid_label", "invalid label"))
     try:
         # `force=True` matches the UI's behavior: re-clicking a label updates.
         result = recorder_record(
@@ -420,9 +421,13 @@ def post_label(payload: LabelPayload, request: Request) -> JSONResponse:
             force=True,
         )
     except EventNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="event not found") from exc
+        raise HTTPException(
+            status_code=404, detail=error_detail("not_found", "event not found")
+        ) from exc
     except AlreadyLabeledError as exc:  # not reachable with force=True, kept for type-safety
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=409, detail=error_detail("conflict", str(exc))
+        ) from exc
 
     plus_result: dict[str, Any] = {"status": "not_requested"}
     if payload.submit_plus:

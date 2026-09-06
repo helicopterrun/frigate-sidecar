@@ -33,6 +33,7 @@ _ERR_SITUATION_NOT_FOUND = "situation_not_found"
 _ERR_THUMBNAIL_NOT_FOUND = "thumbnail_not_found"
 _ERR_BAD_SCOPE = "bad_scope"
 _ERR_CARD_NOT_FOUND = "card_not_found"
+_ERR_BAD_FEEDBACK = "invalid_feedback"
 
 
 class DeviceLocation(BaseModel):
@@ -700,7 +701,13 @@ async def post_feedback(request: Request) -> dict[str, Any]:
     changes this phase). Accepts any verdict string for forward compat."""
     body = await request.json()
     if not isinstance(body, dict) or "card_key" not in body or "verdict" not in body:
-        raise HTTPException(status_code=400, detail="card_key and verdict required")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": _ERR_BAD_FEEDBACK,
+                "message": "card_key and verdict required",
+            },
+        )
     logger.info(
         "push-feedback: card_key=%s event_id=%s verdict=%s",
         body["card_key"], body.get("event_id", ""), body["verdict"],

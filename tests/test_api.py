@@ -303,7 +303,7 @@ def test_motion_single_mode_range_anchors_on_the_start_date(
 def test_motion_single_mode_rejects_an_unparseable_target(client: TestClient) -> None:
     r = client.get("/motion", params={"target": "not-a-date"})
     assert r.status_code == 400
-    assert "bad target" in r.json()["detail"]
+    assert "bad target" in r.json()["detail"]["message"]
 
 
 def test_list_has_active_nav(client: TestClient) -> None:

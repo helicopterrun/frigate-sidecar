@@ -35,14 +35,28 @@ variables using the `FRIGATE_SIDECAR_` prefix and `__` for nesting
 - `media_path` / `recordings_path` — where Frigate's recordings live from the
   sidecar's point of view. If scrubbing shows no images, this mapping is the
   most common culprit.
+- `config_path` — Frigate's `config.yml`, read for camera/zone data (default
+  `/opt/frigate/config.yml`).
+- `config_refresh_enabled` — lets `POST /v1/push/frigate-config/refresh`
+  overwrite `config_path` in place. Off by default — only turn this on when
+  `config_path` is a sidecar-owned snapshot, never Frigate's live config.
 
 **The `sidecar:` section — the sidecar itself**
 
 - `db_path` — the sidecar's own SQLite file (labels, scrub cache index,
   push devices, faces). Created automatically.
-- `host` / `port` — where the web app listens.
+- `bind_host` / `bind_port` — where the web app listens (default
+  `0.0.0.0:5001`).
 - `require_frigate_auth` — when on, every sidecar page requires signing in
   with your Frigate account.
+- `auth_cache_ttl_s` — how long a validated Frigate session cookie is
+  trusted before being re-checked upstream (default 60s).
+- `auth_cache_max_entries` — hard cap on remembered sessions in the auth
+  cache (default 1024).
+- `remember_ttl_s` — lifetime of the sidecar's own "stay signed in" cookie
+  minted by `POST /login/remember` (default 30 days).
+- `remember_cache_ttl_s` — the (longer) auth-cache window granted to a
+  request carrying a valid remember-me cookie (default 900s).
 
 `log_level` (top level) defaults to `INFO`.
 

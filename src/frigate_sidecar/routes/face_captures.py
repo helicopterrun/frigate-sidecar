@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from frigate_sidecar.config import Settings
 from frigate_sidecar.db import open_sidecar
+from frigate_sidecar.errors import error_detail
 from frigate_sidecar.faces import crosscam
 
 router = APIRouter(tags=["face-captures"])
@@ -108,18 +109,24 @@ def _resolve(settings: Settings, capture_id: int, column: str) -> Path:
     finally:
         conn.close()
     if not row or not row["rel"]:
-        raise HTTPException(status_code=404, detail="capture not found")
+        raise HTTPException(status_code=404, detail=error_detail("not_found", "capture not found"))
 
     root = Path(settings.face_capture.output_dir).resolve()
     try:
         path = (root / str(row["rel"])).resolve()
     except OSError as exc:
-        raise HTTPException(status_code=404, detail="capture not found") from exc
+        raise HTTPException(
+            status_code=404, detail=error_detail("not_found", "capture not found")
+        ) from exc
     # A hand-edited row must not become an arbitrary file read.
     if root != path and root not in path.parents:
-        raise HTTPException(status_code=404, detail="capture not found")
+        raise HTTPException(
+            status_code=404, detail=error_detail("not_found", "capture not found")
+        )
     if not path.is_file():
-        raise HTTPException(status_code=404, detail="capture file missing")
+        raise HTTPException(
+            status_code=404, detail=error_detail("not_found", "capture file missing")
+        )
     return path
 
 
@@ -191,7 +198,10 @@ def capture_review(
     capture_id: int, payload: CaptureReviewPayload, request: Request
 ) -> JSONResponse:
     if payload.review not in _REVIEWS:
-        raise HTTPException(status_code=400, detail=f"review must be one of {_REVIEWS}")
+        raise HTTPException(
+            status_code=400,
+            detail=error_detail("invalid_review", f"review must be one of {_REVIEWS}"),
+        )
     s = _settings(request)
     conn = open_sidecar(s.sidecar.db_path)
     try:
@@ -199,7 +209,9 @@ def capture_review(
             "SELECT visit_key FROM face_captures WHERE id = ?", (capture_id,)
         ).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="capture not found")
+            raise HTTPException(
+                status_code=404, detail=error_detail("not_found", "capture not found")
+            )
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if payload.visit:
             cur = conn.execute(
@@ -221,5 +233,8 @@ def capture_review(
 def captures_scan(request: Request) -> JSONResponse:
     s = _settings(request)
     if not s.face_capture.enabled:
-        raise HTTPException(status_code=503, detail="face_capture.enabled is false")
+        raise HTTPException(
+            status_code=503,
+            detail=error_detail("feature_disabled", "face_capture.enabled is false"),
+        )
     return JSONResponse({"ok": True, "summary": crosscam.scan(s)})

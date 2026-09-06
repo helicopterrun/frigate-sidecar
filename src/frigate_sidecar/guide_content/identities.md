@@ -50,6 +50,32 @@ The `face_enrich:` section (needs the `enrich` install extra): `enabled`,
 Keep Frigate's own face recognition **disabled** on enrolled cameras — the
 sidecar is the sole author of `sub_label`, and two writers would fight.
 
+- `interval_s` — worker cadence for the enrichment cycle (default 15s).
+- `process_delay_s` — how long after an event ends before it's processed,
+  so its last segment has committed (default 45s).
+- `lookback_s` — how far back each cycle reconsiders ended events, for
+  self-healing catch-up (default 3600s).
+- `max_frames` / `min_sample_gap_s` — at most this many frames are sampled
+  per event, at least this far apart (default 40 / 1.0s).
+- `best_n` — number of best-quality frames kept for embedding aggregation
+  (default 5).
+- `min_face_area_px` — minimum face box area, in pixels on the main-stream
+  frame, to be considered (default 4000).
+- `min_quality` — minimum quality score (sharpness × size × frontality) for
+  a sampled face (default 0.15).
+- `match_threshold` — cosine-distance threshold for matching a face to a
+  NAMED cluster (default 0.45).
+- `cluster_threshold` — cosine-distance threshold for folding a face into
+  an unnamed cluster (default 0.55).
+- `model_dir` — where the insightface model pack is cached, ~300MB on
+  first download.
+- `max_events_per_cycle` — bound on events processed per cycle (default
+  10).
+- `max_attempts` — cap on retries for a transport/inference failure
+  (default 3).
+- `http_timeout_s` — timeout for the Frigate HTTP fetch of each sampled
+  frame (default 15s).
+
 ## If it goes wrong
 
 Clusters never appearing: check `face_enrich` in `/healthz`, confirm the
