@@ -259,6 +259,7 @@ def build_content_state(
     path: dict[str, Any] | None = None,
     extra_stories: int = 0,
     camera: str | None = None,
+    story_started_ts: float | None = None,
 ) -> dict[str, Any]:
     """The dynamic half of the activity, snake_case to match the Swift
     type's `CodingKeys` exactly -- these field names are load-bearing wire
@@ -270,6 +271,11 @@ def build_content_state(
     camera. Both omitted when there is nothing to add -- `extra_stories`
     stays off the wire at 0 (the common single-story case looks exactly like
     before), `camera` only when the caller has one to report.
+
+    `story_started_ts` (additive) is when the story's card was CREATED, as
+    opposed to `state_since_ts`, which resets on every escalation. The
+    widget's deep link needs the former: tapping the activity should land
+    the scrub on the moment the story began, not on its latest escalation.
     """
     state: dict[str, Any] = {
         "level": level,
@@ -295,6 +301,8 @@ def build_content_state(
         state["extra_stories"] = extra_stories
     if camera:
         state["camera"] = camera
+    if story_started_ts is not None:
+        state["story_started_ts"] = story_started_ts
     encoded_size = len(json.dumps(state, separators=(",", ":")).encode())
     assert encoded_size <= _CONTENT_STATE_BUDGET, (
         f"content-state {encoded_size} bytes exceeds {_CONTENT_STATE_BUDGET} byte budget"

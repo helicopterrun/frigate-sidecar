@@ -98,6 +98,9 @@ async def test_full_la_lifecycle_create_enrich_escalate_resolve(sidecar_db_path:
     start_state = sends[0]["payload"]["aps"]["content-state"]
     assert start_state["mutation"] == "create"
     assert start_state["glyph"] == "shippingbox.fill"
+    # The deep link's time: card creation, carried on every frame of the
+    # story (state_since_ts moves on escalation; this one never does).
+    assert start_state["story_started_ts"] == 0.0
     assert sends[0]["payload"]["aps"]["attributes"]["family"] == "package"
     assert "relevance-score" in sends[0]["payload"]["aps"]
     assert "stale-date" in sends[0]["payload"]["aps"]
@@ -118,6 +121,7 @@ async def test_full_la_lifecycle_create_enrich_escalate_resolve(sidecar_db_path:
     enrich_state = sends[1]["payload"]["aps"]["content-state"]
     assert enrich_state["mutation"] == "enrich"
     assert enrich_state["elapsed_seconds"] == 10
+    assert enrich_state["story_started_ts"] == 0.0
 
     # resolve
     resolved = await handle_delivery_resolve(
@@ -133,6 +137,8 @@ async def test_full_la_lifecycle_create_enrich_escalate_resolve(sidecar_db_path:
     assert end_payload["content-state"]["mutation"] == "resolve"
     assert end_payload["content-state"]["glyph"] == "checkmark.circle.fill"
     assert "thumbnail_handle" not in end_payload["content-state"]
+    assert end_payload["content-state"]["story_started_ts"] == 0.0
+    assert end_payload["content-state"]["deep_link_card_key"] == card_key
 
     row = find_activity_row(conn, apns_token=device.apns_token, card_key=card_key, track_id="trk1")
     assert row["ended_at"] is not None
@@ -515,6 +521,13 @@ async def test_deferred_end_when_token_arrives_after_resolve(sidecar_db_path: Pa
     end = la_sends(transport)[-1]
     assert end["event"] == "end"
     assert end["token"] == "lateToken"
+    # The deferred end is still a tappable frame for its dismissal window:
+    # it must deep-link to the story that just closed, not to the device
+    # sentinel (which the app decodes as camera "device", time nil).
+    end_state = end["payload"]["aps"]["content-state"]
+    assert end_state["deep_link_card_key"] == card_key
+    assert end_state["camera"] == "doorbell"
+    assert end_state["story_started_ts"] == 0.0
     row = find_activity_row(
         conn, apns_token=device.apns_token, card_key=card_key, track_id="trk1",
     )

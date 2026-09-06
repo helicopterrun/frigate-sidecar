@@ -855,6 +855,10 @@ async def _deliver_live_activities(
             if not result.ok:
                 continue
             covered.add(device.apns_token)
+            # Only the deep-link fields, deliberately: the visible-delta
+            # comparison on the first update must still see an empty
+            # `prev` (a start is not an update it could be a duplicate of).
+            _la_prev_state[device.apns_token] = _la_deep_link_memory(content_state)
             activity_id = f"a_{secrets.token_urlsafe(8)}"
             store.open_activity(
                 conn, activity_id=activity_id, apns_token=device.apns_token,
@@ -889,7 +893,7 @@ async def _deliver_live_activities(
                 card_key=card_key, thumbnail_handle=None,
                 thumbnail_revision=int(device_row["thumbnail_revision"] or 1),
                 state_since_ts=state_since_ts, motion=motion, zones=zones, path=path,
-                camera=camera,
+                camera=camera, story_started_ts=round(card.created_at, 1),
             )
             payload = live_activities.build_la_end_payload(
                 content_state=content_state, now=now, dismissal_offset=30.0,
@@ -1005,6 +1009,7 @@ async def _deliver_live_activities(
             "mutation": mutation, "level": primary_card.level, "primary": p_primary,
             "glyph": glyph_val, "zones": current_zones_tuple,
             "path_len": path_len, "heading": heading_val,
+            **_la_deep_link_memory(content_state),
         }
 
     return covered
@@ -1018,6 +1023,19 @@ def _pick_primary(
 ) -> tuple[Card, dict[str, str]]:
     """Highest level wins; ties go to the most recently updated story."""
     return max(eligible, key=lambda t: (_LEVEL_RANK.get(t[0].level, 0), t[0].updated_at))
+
+
+def _la_deep_link_memory(content_state: dict[str, Any]) -> dict[str, Any]:
+    """The slice of a sent content-state that the deferred end
+    (`end_activity_if_card_closed`) replays so the ended activity keeps
+    deep-linking to a real story: the device sentinel it would otherwise
+    carry decodes as camera "device" at no time at all in the app."""
+    return {
+        "card_key": content_state["deep_link_card_key"],
+        "camera": content_state.get("camera"),
+        "state_since_ts": content_state.get("state_since_ts"),
+        "story_started_ts": content_state.get("story_started_ts"),
+    }
 
 
 def _build_aggregate_state(
@@ -1086,6 +1104,7 @@ def _build_aggregate_state(
         thumbnail_revision=thumbnail_revision, state_since_ts=p_state_since,
         motion=p_motion, zones=p_zones, path=p_path,
         extra_stories=extra_stories, camera=camera,
+        story_started_ts=round(primary_card.created_at, 1),
     )
 
 
@@ -1128,15 +1147,21 @@ async def end_activity_if_card_closed(
         return False
     # No specific closed card to rebuild copy from (the situation id is the
     # device sentinel, not a card key) -- reuse the last content this
-    # device's activity actually showed.
+    # device's activity actually showed, deep-link target included: the
+    # ended activity stays tappable on the lock screen for its dismissal
+    # window, and the sentinel would route that tap to a camera called
+    # "device" at no time at all.
     prev = _la_prev_state.get(device.apns_token, {})
     content_state = live_activities.build_content_state(
         level=prev.get("level", "log"), mutation=RESOLVE,
         glyph=prev.get("glyph")
         or live_activities.glyph_for("", subject_kind="", label="", mutation=RESOLVE),
         primary=prev.get("primary", ""), secondary="", elapsed_seconds=0,
-        card_key=_DEVICE_SITUATION_ID, thumbnail_handle=None,
+        card_key=prev.get("card_key") or _DEVICE_SITUATION_ID, thumbnail_handle=None,
         thumbnail_revision=int(device_row["thumbnail_revision"] or 1),
+        state_since_ts=prev.get("state_since_ts"),
+        camera=prev.get("camera") or device_row["camera"] or None,
+        story_started_ts=prev.get("story_started_ts"),
     )
     payload = live_activities.build_la_end_payload(
         content_state=content_state, now=now, dismissal_offset=30.0,
