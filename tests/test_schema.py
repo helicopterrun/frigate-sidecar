@@ -26,7 +26,7 @@ import sqlite3
 
 from frigate_sidecar import db
 
-# Frozen pre-migration CREATE TABLE text for the four tables that have
+# Frozen pre-migration CREATE TABLE text for the five tables that have
 # `_ADDED_COLUMNS` entries, exactly as they were before those columns
 # existed (indexes on these tables are unaffected and are NOT duplicated
 # here -- they're left in place from the current SIDECAR_SCHEMA text).
@@ -93,6 +93,25 @@ CREATE TABLE IF NOT EXISTS push_cards (
     resound_count INTEGER NOT NULL DEFAULT 0,
     resolved      INTEGER NOT NULL DEFAULT 0,
     closed        INTEGER NOT NULL DEFAULT 0
+);
+""",
+    # Pre-Wave-6B form: no `excluded_at` (soft-exclude) column.
+    "face_enrichments": """
+CREATE TABLE IF NOT EXISTS face_enrichments (
+    event_id          TEXT PRIMARY KEY,
+    camera            TEXT NOT NULL,
+    event_start_ts    REAL NOT NULL,
+    cluster_id        INTEGER,
+    distance          REAL,
+    faces_found       INTEGER NOT NULL DEFAULT 0,
+    faces_used        INTEGER NOT NULL DEFAULT 0,
+    best_quality      REAL,
+    embedding         BLOB,
+    sub_label_written TEXT,
+    status            TEXT NOT NULL,
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    detail            TEXT,
+    processed_at      TEXT NOT NULL
 );
 """,
 }
