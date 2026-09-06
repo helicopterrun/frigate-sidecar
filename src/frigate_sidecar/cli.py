@@ -177,6 +177,49 @@ def version() -> None:
     typer.echo(__version__)
 
 
+@app.command()
+def backup(
+    dest: str = typer.Argument(..., help="Directory to write, or a path ending in .tar.gz."),
+) -> None:
+    """Back up the sidecar DB, `.session_secret`, and the resolved config file.
+
+    Scrub cache and face-model directories are NOT included -- both are
+    regenerable from Frigate's own recordings/DB.
+    """
+    from pathlib import Path
+
+    from frigate_sidecar.backup import BackupError, create_backup
+
+    try:
+        manifest = create_backup(load_settings(), Path(dest))
+    except BackupError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"Wrote backup to {dest} ({len(manifest.files)} files, version {manifest.version})")
+
+
+@app.command()
+def restore(
+    src: str = typer.Argument(..., help="A backup directory or .tar.gz from `fsc backup`."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Confirm frigate-sidecar is stopped and proceed with the restore.",
+    ),
+) -> None:
+    """Restore a backup made by `fsc backup`. Stop frigate-sidecar first."""
+    from pathlib import Path
+
+    from frigate_sidecar.backup import BackupError, restore_backup
+
+    try:
+        restore_backup(load_settings(), Path(src), force=force)
+    except BackupError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"Restored from {src}")
+
+
 # ----- Triage subcommands -----
 
 

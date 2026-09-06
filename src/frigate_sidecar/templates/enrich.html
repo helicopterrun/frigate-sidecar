@@ -5,6 +5,9 @@
 {% block title %}Identities · frigate-sidecar{% endblock %}
 
 {% block page_heading %}<h1 class="sr-only">Identities</h1>{% endblock %}
+{% block head %}
+<style>.id-excluded { opacity: 0.4; }</style>
+{% endblock %}
 {% block body %}
 <main id="main-content">
   <div class="faces-bar">
@@ -22,6 +25,8 @@
       {% if stats.cycle_age_s is not none %}<b>{{ stats.cycle_age_s }}s</b> ago
       {% else %}<b>not running</b>{% endif %}
     </span>
+    <a href="/enrich/clusters?show_excluded={{ 0 if show_excluded else 1 }}" class="page-link">
+      {{ 'Hide excluded' if show_excluded else 'Show excluded' }}</a>
     <a href="/faces/captures" class="page-link">Face captures →</a>
   </div>
 
@@ -59,16 +64,23 @@
 
     <div class="capture-strip">
       {% for e in c.sightings %}
-      <figure class="capture-card id-sighting" data-event="{{ e.event_id }}">
+      <figure class="capture-card id-sighting{{ ' id-excluded' if e.excluded_at else '' }}"
+              data-event="{{ e.event_id }}">
         <a href="/api/events/{{ e.event_id }}/snapshot.jpg" target="_blank" rel="noopener">
           <img loading="lazy" src="/enrich/thumb/{{ e.event_id }}"
                alt="sighting {{ loop.index }}">
         </a>
-        <button type="button" class="id-evict" data-event="{{ e.event_id }}"
-                title="remove this sighting from the cluster">&times;</button>
+        {% if e.excluded_at %}
+        <button type="button" class="id-include" data-event="{{ e.event_id }}"
+                title="include this sighting again">&#8635;</button>
+        {% else %}
+        <button type="button" class="id-exclude" data-event="{{ e.event_id }}"
+                title="exclude this sighting from the cluster">&times;</button>
+        {% endif %}
         <figcaption>
           {{ fmt_ts(e.event_start_ts) }}
           {%- if e.distance is not none %} · d {{ '%.2f'|format(e.distance) }}{% endif %}
+          {%- if e.excluded_at %} · excluded{% endif %}
         </figcaption>
       </figure>
       {% endfor %}

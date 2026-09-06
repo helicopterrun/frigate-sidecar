@@ -72,6 +72,37 @@ def test_open_sidecar_backfills_dwell_seconds_on_a_pre_migration_activities_tabl
     conn.close()
 
 
+def test_open_sidecar_backfills_excluded_at_on_a_pre_migration_enrichments_table(
+    sidecar_db_path: Path,
+) -> None:
+    """`face_enrichments` shipped without `excluded_at` (Wave 6B-2's soft
+    exclude); a deployment whose table predates the column needs the ALTER in
+    `_ADDED_COLUMNS`, same story as `push_activities.dwell_seconds`."""
+    conn = sqlite3.connect(sidecar_db_path)
+    conn.execute(
+        "CREATE TABLE face_enrichments ("
+        " event_id TEXT PRIMARY KEY, camera TEXT NOT NULL, event_start_ts REAL NOT NULL, "
+        " cluster_id INTEGER, distance REAL, faces_found INTEGER NOT NULL DEFAULT 0, "
+        " faces_used INTEGER NOT NULL DEFAULT 0, best_quality REAL, embedding BLOB, "
+        " sub_label_written TEXT, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, "
+        " detail TEXT, processed_at TEXT NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = db.open_sidecar(sidecar_db_path)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(face_enrichments)")}
+    assert "excluded_at" in cols
+    # Must not raise "no such column" -- the whole point of the ALTER.
+    conn.execute(
+        "INSERT INTO face_enrichments (event_id, camera, event_start_ts, status, "
+        "processed_at, excluded_at) VALUES ('e1', 'cam', 0, 'enriched', '', ?)",
+        ("2026-08-31T00:00:00+00:00",),
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_open_joined_round_trip(frigate_db_path: Path, sidecar_db_path: Path) -> None:
     conn = db.open_joined(frigate_db_path, sidecar_db_path)
     # Insert a triage label via the joined handle.

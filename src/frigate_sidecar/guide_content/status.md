@@ -20,6 +20,10 @@ The page refreshes itself every few seconds and shows:
 - **Hardware** — Coral inference speed, detection FPS, Frigate CPU/GPU,
   host load/memory/disk, and per-mount storage bars.
 - **Storage** — database and cache sizes.
+- **Counters** — sidecar uptime, face enrichment pipeline outcomes
+  (excluded sightings counted separately), named vs. unnamed identity
+  clusters, face captures awaiting review, pushes sent in the last 24h,
+  open Live Activities, the auth cache size, and total triage labels.
 - **Recent activity** — the latest Frigate events as thumbnails.
 
 ## Cameras

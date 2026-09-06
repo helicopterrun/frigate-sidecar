@@ -33,4 +33,14 @@ idempotently at startup, and Frigate's database is only ever read.
 ## Where state lives
 
 Everything the sidecar owns is in its SQLite file plus the scrub cache
-directory — back those up and a reinstall recovers completely.
+directory. The scrub cache and face-model directory are regenerable from
+Frigate's own recordings/DB, so only the DB, `.session_secret`, and config
+need backing up.
+
+## Backup / restore
+
+`fsc backup <dest>` (a directory, or a single `.tar.gz` file) writes those
+three: the sidecar DB, `.session_secret`, and the resolved config. `fsc
+restore <src> --force` brings them back — stop the service first (an
+un-stopped restore can corrupt the DB's WAL); see `docs/deployment.md` for
+the full systemd stop/restore/start sequence and a cron example.

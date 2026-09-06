@@ -419,7 +419,12 @@ CREATE TABLE IF NOT EXISTS face_enrichments (
     status            TEXT NOT NULL,
     attempts          INTEGER NOT NULL DEFAULT 0,
     detail            TEXT,
-    processed_at      TEXT NOT NULL
+    processed_at      TEXT NOT NULL,
+    -- Soft-exclude (Wave 6B-2): a sighting a person marked "not this identity"
+    -- without hard-detaching it (POST .../remove still does that). NULL =
+    -- included. Excluded rows must not feed centroids, sub_label decisions,
+    -- or cluster/stats aggregates unless explicitly asked for.
+    excluded_at       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_face_enrich_cluster ON face_enrichments(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_face_enrich_age     ON face_enrichments(event_start_ts);
@@ -483,6 +488,10 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # task; see push/mqtt.py's _log_task_exception) dropping the activity
         # after the APNs send had already gone out.
         ("dwell_seconds", "INTEGER NOT NULL DEFAULT 0"),
+    ],
+    "face_enrichments": [
+        # Soft-exclude (Wave 6B-2): added after face_enrichments first shipped.
+        ("excluded_at", "TEXT"),
     ],
 }
 

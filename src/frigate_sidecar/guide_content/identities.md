@@ -28,7 +28,7 @@ Unnamed clusters that stop appearing expire on their own after
 ```walkthrough
 - Wait until a cluster shows several sightings of the same person
 - Check the sighting strip is coherent — every thumbnail is the same person
-- Evict any wrong sighting with its ✕ button
+- Exclude any wrong sighting with its ✕ button
 - Type the person's name and tap "name"
 - Watch the toast confirm how many past events were relabeled
 - If a second cluster of the same person exists, use "merge" to fold it in
@@ -36,8 +36,15 @@ Unnamed clusters that stop appearing expire on their own after
 
 ## Repair tools
 
-- **✕ on a sighting** — removes it from the cluster and rebuilds the
-  cluster's face signature exactly from what remains.
+- **✕ on a sighting** — soft-**excludes** it: the sighting stays in the
+  cluster's history but no longer feeds its face signature (centroid),
+  sub_label matching, or the pipeline stats. A toast offers **Undo**
+  right away, and the **Show excluded** link at the top of the page lists
+  everything you've excluded (dimmed, with an "include" action) if you
+  change your mind later. This is different from the hard "remove" the
+  API still exposes, which fully detaches a sighting and can empty (and
+  delete) a cluster — that stays available for repairing a bad join, but
+  the page no longer uses it directly.
 - **merge** — combine two clusters of the same person; the named one
   survives. "Looks like…" hints appear when two clusters are suspiciously
   similar.

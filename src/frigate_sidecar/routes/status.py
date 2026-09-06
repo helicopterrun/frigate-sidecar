@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from frigate_sidecar import __version__, db
+from frigate_sidecar.auth import _cache
 from frigate_sidecar.errors import error_detail
 from frigate_sidecar.push.stats import STATS
 
@@ -203,6 +204,88 @@ def _push_status(app_state: Any, settings: Any) -> dict[str, Any]:
     return push
 
 
+def _counts(request: Request, settings: Any) -> dict[str, Any]:
+    """Additive status-page counters (Wave 6B-2): one query/attribute each,
+    degrading to zeros rather than a 500 on an empty or predating-column DB.
+    """
+    counts: dict[str, Any] = {
+        "uptime_s": round(time.time() - STATS.started_at, 1),
+        "face_enrich": {},
+        "face_clusters": {"named": 0, "unnamed": 0},
+        "face_captures_pending": 0,
+        "push_24h": {},
+        "live_activities_open": 0,
+        "auth": {
+            "cache": len(_cache(request.app)),
+            "login_rate_limit_rejections": getattr(
+                request.app.state, "login_rate_limit_rejections", 0
+            ),
+        },
+        "triage_labels": {"count": 0, "last_labeled_at": None},
+    }
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        with contextlib.suppress(Exception):
+            enrich = {
+                str(r["status"]): int(r["n"])
+                for r in conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM face_enrichments "
+                    "WHERE excluded_at IS NULL GROUP BY status"
+                )
+            }
+            excluded = conn.execute(
+                "SELECT COUNT(*) AS n FROM face_enrichments WHERE excluded_at IS NOT NULL"
+            ).fetchone()
+            enrich["excluded"] = int(excluded["n"]) if excluded else 0
+            counts["face_enrich"] = enrich
+        with contextlib.suppress(Exception):
+            row = conn.execute(
+                "SELECT SUM(name IS NOT NULL) AS named, SUM(name IS NULL) AS unnamed "
+                "FROM face_clusters"
+            ).fetchone()
+            if row is not None:
+                counts["face_clusters"] = {
+                    "named": int(row["named"] or 0),
+                    "unnamed": int(row["unnamed"] or 0),
+                }
+        with contextlib.suppress(Exception):
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM face_captures WHERE review = 'pending'"
+            ).fetchone()
+            counts["face_captures_pending"] = int(row["n"]) if row else 0
+        with contextlib.suppress(Exception):
+            # push_sends has a timestamp (sent_at) but no outcome column, so
+            # "by outcome" isn't derivable from this table -- report the
+            # last-24h total here and fall back to STATS's own counters for
+            # an outcome breakdown.
+            since = time.time() - 86400
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM push_sends WHERE sent_at >= ?", (since,)
+            ).fetchone()
+            snapshot = STATS.snapshot()
+            counts["push_24h"] = {
+                "sent_total": int(row["n"]) if row else 0,
+                "counters": snapshot.get("counters", {}),
+            }
+        with contextlib.suppress(Exception):
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM push_activities WHERE ended_at IS NULL"
+            ).fetchone()
+            counts["live_activities_open"] = int(row["n"]) if row else 0
+        with contextlib.suppress(Exception):
+            row = conn.execute(
+                "SELECT COUNT(*) AS n, MAX(labeled_at) AS last FROM triage_labels"
+            ).fetchone()
+            if row is not None:
+                counts["triage_labels"] = {
+                    "count": int(row["n"] or 0),
+                    "last_labeled_at": row["last"],
+                }
+    finally:
+        conn.close()
+    return counts
+
+
 def _camera_names(settings: Any) -> list[str]:
     with contextlib.suppress(Exception):
         from frigate_sidecar.zones import load_camera_zones
@@ -221,6 +304,7 @@ async def _gather_status(request: Request) -> dict[str, Any]:
     push = await asyncio.to_thread(_push_status, request.app.state, settings)
     hardware = await asyncio.to_thread(_frigate_hardware, settings)
     hardware["host"] = await asyncio.to_thread(_host_stats, settings)
+    counts = await asyncio.to_thread(_counts, request, settings)
     return {
         "version": __version__,
         "time": now,
@@ -233,6 +317,7 @@ async def _gather_status(request: Request) -> dict[str, Any]:
         # GET /v1/stats returns -- one source of truth for the status page.
         "push_stats": STATS.snapshot(),
         "hardware": hardware,
+        "counts": counts,
         "sizes": {
             "sidecar_db": _file_size(settings.sidecar.db_path),
             "frigate_db": _file_size(settings.frigate.db_path),

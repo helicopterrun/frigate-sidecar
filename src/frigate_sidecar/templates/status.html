@@ -196,6 +196,51 @@
   </div>
   {% endif %}
 
+  {% set c = status.counts %}
+  <h2 class="section-h">Counters</h2>
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="stat-label">Sidecar uptime</div>
+      <div class="stat-value" data-k="uptime">{{ c.uptime_s }}s</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Face enrichment</div>
+      <div class="stat-value" data-k="face-enrich">
+        {{ c.face_enrich.get('enriched', 0) }} enriched
+        {%- if c.face_enrich.get('excluded') %} · {{ c.face_enrich['excluded'] }} excluded{% endif %}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Identity clusters</div>
+      <div class="stat-value" data-k="face-clusters">
+        {{ c.face_clusters.named }} named · {{ c.face_clusters.unnamed }} unnamed
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Face captures pending</div>
+      <div class="stat-value" data-k="face-captures-pending">{{ c.face_captures_pending }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Pushes (24h)</div>
+      <div class="stat-value" data-k="push-24h">{{ c.push_24h.get('sent_total', 0) }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Live Activities open</div>
+      <div class="stat-value" data-k="la-open">{{ c.live_activities_open }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Auth cache</div>
+      <div class="stat-value" data-k="auth-cache">
+        {{ c.auth.cache }} entries
+        {%- if c.auth.login_rate_limit_rejections %} · {{ c.auth.login_rate_limit_rejections }} rate-limited{% endif %}
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Triage labels</div>
+      <div class="stat-value" data-k="triage-labels">{{ c.triage_labels.count }}</div>
+    </div>
+  </div>
+
   {% if status.cameras %}
   <h2 class="section-h">
     <a href="/cameras" class="section-link">Cameras &rarr;</a>

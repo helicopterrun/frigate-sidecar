@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from datetime import datetime, timezone
 from typing import Any, cast
 
 import httpx
@@ -56,8 +57,14 @@ def _templates(request: Request) -> Jinja2Templates:
     return cast(Jinja2Templates, request.app.state.templates)
 
 
-def _clusters(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Clusters (named first, then by recency) with their best sightings."""
+def _clusters(conn: sqlite3.Connection, *, show_excluded: bool = False) -> list[dict[str, Any]]:
+    """Clusters (named first, then by recency) with their best sightings.
+
+    Excluded sightings (`excluded_at IS NOT NULL`) are hidden by default —
+    they stay in the cluster's history but a person marked them "not this
+    identity". `show_excluded=True` surfaces them (dimmed, "Include" action)
+    for review/undo.
+    """
     rows = [
         dict(r)
         for r in conn.execute(
@@ -65,17 +72,21 @@ def _clusters(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             "  FROM face_clusters ORDER BY (name IS NULL), last_seen_at DESC"
         )
     ]
+    excluded_clause = "" if show_excluded else "AND excluded_at IS NULL "
     for r in rows:
         r["sightings"] = [
             dict(s)
             for s in conn.execute(
-                "SELECT event_id, event_start_ts, distance, best_quality "
-                "  FROM face_enrichments WHERE cluster_id = ? "
+                "SELECT event_id, event_start_ts, distance, best_quality, excluded_at "
+                "  FROM face_enrichments WHERE cluster_id = ? " + excluded_clause + ""
                 " ORDER BY best_quality DESC LIMIT ?",
                 (r["cluster_id"], _SIGHTINGS_PER_CLUSTER),
             )
         ]
-        r["sample_event_id"] = r["sightings"][0]["event_id"] if r["sightings"] else None
+        r["sample_event_id"] = next(
+            (s["event_id"] for s in r["sightings"] if not s["excluded_at"]),
+            r["sightings"][0]["event_id"] if r["sightings"] else None,
+        )
     return rows
 
 
@@ -117,7 +128,7 @@ def _stats(conn: sqlite3.Connection, request: Request) -> dict[str, Any]:
         str(r["status"]): int(r["n"])
         for r in conn.execute(
             "SELECT status, COUNT(*) AS n FROM face_enrichments "
-            " WHERE event_start_ts >= ? GROUP BY status",
+            " WHERE event_start_ts >= ? AND excluded_at IS NULL GROUP BY status",
             (since,),
         )
     }
@@ -130,11 +141,11 @@ def _stats(conn: sqlite3.Connection, request: Request) -> dict[str, Any]:
 
 
 @router.get("/enrich/clusters", response_class=HTMLResponse)
-def clusters_view(request: Request) -> Any:
+def clusters_view(request: Request, show_excluded: int = 0) -> Any:
     s = _settings(request)
     conn = open_sidecar(s.sidecar.db_path)
     try:
-        clusters = _clusters(conn)
+        clusters = _clusters(conn, show_excluded=bool(show_excluded))
         similar = _similar_pairs(conn)
         stats = _stats(conn, request)
     finally:
@@ -149,18 +160,19 @@ def clusters_view(request: Request) -> Any:
             "known_names": sorted({c["name"] for c in clusters if c["name"]}),
             "enabled": s.face_enrich.enabled,
             "cameras": s.face_enrich.cameras,
+            "show_excluded": bool(show_excluded),
         },
     )
 
 
 @router.get("/enrich/clusters.json")
-def clusters_json(request: Request) -> JSONResponse:
+def clusters_json(request: Request, show_excluded: int = 0) -> JSONResponse:
     s = _settings(request)
     conn = open_sidecar(s.sidecar.db_path)
     try:
         return JSONResponse(
             {
-                "clusters": _clusters(conn),
+                "clusters": _clusters(conn, show_excluded=bool(show_excluded)),
                 "similar": {str(k): v for k, v in _similar_pairs(conn).items()},
                 "stats": _stats(conn, request),
             }
@@ -214,7 +226,9 @@ def _retro_label(
     event_ids = [
         str(r["event_id"])
         for r in conn.execute(
-            "SELECT event_id FROM face_enrichments WHERE cluster_id = ?", (cluster_id,)
+            "SELECT event_id FROM face_enrichments "
+            "WHERE cluster_id = ? AND excluded_at IS NULL",
+            (cluster_id,),
         )
     ]
     labeled = 0
@@ -317,6 +331,53 @@ def cluster_delete(cluster_id: int, request: Request) -> JSONResponse:
                 detail=error_detail("cluster_not_found", "cluster not found"),
             )
         return JSONResponse({"ok": True})
+    finally:
+        conn.close()
+
+
+class ExcludePayload(BaseModel):
+    excluded: bool
+
+
+@router.patch("/enrich/events/{event_id}")
+def sighting_exclude(
+    event_id: str, payload: ExcludePayload, request: Request
+) -> JSONResponse:
+    """Soft-exclude/include one sighting: keeps its cluster assignment but
+    marks it out of centroid/sub_label/stats aggregation, with an Undo path.
+
+    Unlike `/remove`, this never detaches the row or deletes an emptied
+    cluster -- excluding every sighting in a cluster just leaves it looking
+    momentarily empty until one is re-included.
+    """
+    s = _settings(request)
+    conn = open_sidecar(s.sidecar.db_path)
+    try:
+        row = conn.execute(
+            "SELECT cluster_id FROM face_enrichments WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="sighting not found")
+        excluded_at = (
+            datetime.now(timezone.utc).isoformat(timespec="seconds")
+            if payload.excluded
+            else None
+        )
+        conn.execute(
+            "UPDATE face_enrichments SET excluded_at = ? WHERE event_id = ?",
+            (excluded_at, event_id),
+        )
+        cluster_id = row["cluster_id"]
+        if cluster_id is not None:
+            enrich.rebuild_centroid(conn, int(cluster_id))
+        conn.commit()
+        return JSONResponse(
+            {
+                "event_id": event_id,
+                "excluded": payload.excluded,
+                "cluster_id": cluster_id,
+            }
+        )
     finally:
         conn.close()
 

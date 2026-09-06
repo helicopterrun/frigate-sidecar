@@ -277,7 +277,7 @@ def rebuild_centroid(conn: sqlite3.Connection, cluster_id: int) -> None:
         unpack_embedding(r["embedding"])
         for r in conn.execute(
             "SELECT embedding FROM face_enrichments "
-            "WHERE cluster_id = ? AND embedding IS NOT NULL",
+            "WHERE cluster_id = ? AND embedding IS NOT NULL AND excluded_at IS NULL",
             (cluster_id,),
         )
     ]

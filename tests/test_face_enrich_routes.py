@@ -172,6 +172,84 @@ def test_sighting_remove_detaches_and_deletes_empty_cluster(client: TestClient) 
     assert client.post("/enrich/events/ev-a/remove").status_code == 404
 
 
+def test_exclude_hides_sighting_and_stats_but_show_excluded_reveals_it(
+    client: TestClient,
+) -> None:
+    r = client.patch("/enrich/events/ev-a", json={"excluded": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"event_id": "ev-a", "excluded": True, "cluster_id": 1}
+
+    # Hidden by default from the sightings list...
+    clusters = client.get("/enrich/clusters.json").json()["clusters"]
+    c1 = next(c for c in clusters if c["cluster_id"] == 1)
+    assert [s["event_id"] for s in c1["sightings"]] == []
+
+    # ...but present (dimmed) with ?show_excluded=1.
+    clusters = client.get("/enrich/clusters.json?show_excluded=1").json()["clusters"]
+    c1 = next(c for c in clusters if c["cluster_id"] == 1)
+    assert [s["event_id"] for s in c1["sightings"]] == ["ev-a"]
+    assert client.get("/enrich/clusters?show_excluded=1").text.count("id-excluded") >= 1
+
+
+def test_exclude_undo_clears_and_restores_sighting(client: TestClient) -> None:
+    assert client.patch("/enrich/events/ev-a", json={"excluded": True}).status_code == 200
+    r = client.patch("/enrich/events/ev-a", json={"excluded": False})
+    assert r.status_code == 200 and r.json()["excluded"] is False
+    clusters = client.get("/enrich/clusters.json").json()["clusters"]
+    c1 = next(c for c in clusters if c["cluster_id"] == 1)
+    assert [s["event_id"] for s in c1["sightings"]] == ["ev-a"]
+
+
+def test_exclude_unknown_event_404s(client: TestClient) -> None:
+    assert client.patch("/enrich/events/nope", json={"excluded": True}).status_code == 404
+
+
+def test_exclude_does_not_feed_rebuilt_centroid(client: TestClient) -> None:
+    """Excluding a cluster's only remaining sighting must not leave its old
+    embedding in the exact centroid rebuild (naming/merge path)."""
+    conn = db.open_sidecar(client.app.state.settings.sidecar.db_path)  # type: ignore[attr-defined]
+    conn.execute(
+        "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+        "embedding, best_quality, status, processed_at) "
+        "VALUES ('ev-c', 'gate-face', 0, 1, ?, 0.9, 'enriched', '')",
+        (enrich.pack_embedding([0.0, 1.0]),),
+    )
+    conn.commit()
+    conn.close()
+    assert client.patch("/enrich/events/ev-a", json={"excluded": True}).status_code == 200
+    conn = db.open_sidecar(client.app.state.settings.sidecar.db_path)  # type: ignore[attr-defined]
+    row = conn.execute(
+        "SELECT centroid FROM face_clusters WHERE cluster_id = 1"
+    ).fetchone()
+    conn.close()
+    centroid = enrich.unpack_embedding(row["centroid"])
+    # Only ev-c's [0, 1] embedding remains -- not ev-a's [1, 0].
+    assert centroid[1] > centroid[0]
+
+
+def test_excluded_sighting_drops_out_of_toolbar_stats(client: TestClient) -> None:
+    conn = db.open_sidecar(client.app.state.settings.sidecar.db_path)  # type: ignore[attr-defined]
+    conn.execute(
+        "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+        "best_quality, status, processed_at) "
+        "VALUES ('ev-recent', 'gate-face', ?, 1, 0.9, 'enriched', '')",
+        (time.time(),),
+    )
+    conn.commit()
+    conn.close()
+    before = client.get("/enrich/clusters.json").json()["stats"]["counts"].get("enriched", 0)
+    assert client.patch("/enrich/events/ev-recent", json={"excluded": True}).status_code == 200
+    after = client.get("/enrich/clusters.json").json()["stats"]["counts"].get("enriched", 0)
+    assert after == before - 1
+
+
+def test_hard_remove_still_works_alongside_soft_exclude(client: TestClient) -> None:
+    """The old hard-detach route stays available (audit escape hatch)."""
+    r = client.post("/enrich/events/ev-b/remove")
+    assert r.status_code == 200 and r.json()["cluster_deleted"] is True
+
+
 # ---------------------------------------------------------------------------
 # process_event / run_cycle with a stubbed engine and client.
 
