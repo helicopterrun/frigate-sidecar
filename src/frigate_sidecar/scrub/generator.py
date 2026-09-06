@@ -337,6 +337,32 @@ def _prune_cell_dirs(cache_dir: Path, camera: str | None, cutoff: float, span_ce
     return removed
 
 
+def _unlink_reporting_failures(path: Path, failures: list[tuple[Path, OSError]]) -> bool:
+    """Unlink `path`; already-gone is success, any other `OSError` is recorded
+    in `failures` (path + error) for the caller to summarize in one log line
+    rather than the old blanket `contextlib.suppress(OSError)`, which made a
+    permissions/EBUSY problem indistinguishable from a normal race with
+    another prune run.
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        failures.append((path, exc))
+        return False
+    return True
+
+
+def _log_unlink_failures(context: str, failures: list[tuple[Path, OSError]]) -> None:
+    if failures:
+        first_path, first_err = failures[0]
+        logger.warning(
+            "scrub: %s: %d unlink failures, first: %s: %s",
+            context, len(failures), first_path, first_err,
+        )
+
+
 _PUBLISH_TMP_MAX_AGE_S = 3600.0
 
 
@@ -1743,6 +1769,7 @@ def sweep_superseded_versions(
     ).fetchall()
 
     removed = 0
+    failures: list[tuple[Path, OSError]] = []
     for row in rows:
         path = cache_dir / row["path"]
         if path.exists():
@@ -1759,11 +1786,11 @@ def sweep_superseded_versions(
             "AND count = ?",
             (row["camera"], row["start_ts"], row["interval_s"], row["count"]),
         )
-        with contextlib.suppress(OSError):
-            path.unlink()
+        _unlink_reporting_failures(path, failures)
         removed += 1
     if removed:
         conn.commit()
+    _log_unlink_failures("sweep_superseded_versions", failures)
     return removed
 
 
@@ -1790,11 +1817,12 @@ def prune(
         conn.close()
 
     n_files = 0
+    unlink_failures: list[tuple[Path, OSError]] = []
     for rel in paths:
         p = settings.scrub.cache_dir / rel
-        with contextlib.suppress(OSError):
-            p.unlink()
+        if _unlink_reporting_failures(p, unlink_failures):
             n_files += 1
+    _log_unlink_failures("prune", unlink_failures)
     n_cell_dirs = _prune_cell_dirs(
         settings.scrub.cache_dir,
         camera,
@@ -1811,6 +1839,7 @@ def prune(
         "cell_dirs_deleted": n_cell_dirs,
         "superseded_versions_deleted": n_superseded,
         "publish_tmp_deleted": n_publish_tmp,
+        "unlink_failures": len(unlink_failures),
     }
 
 

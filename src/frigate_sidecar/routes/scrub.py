@@ -311,7 +311,12 @@ async def scrub_sheets(
         }
         for r in sheet_rows
     ]
-    return {"sheets": sheets}
+    # The index changes as sheets are published, so it isn't immutable like a
+    # sheet image -- ETag it (304 on a matching If-None-Match, via the same
+    # helper /v1/coverage and /v1/reel use) and mark it must-revalidate.
+    response = _etagged(request, {"sheets": sheets})
+    response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @router.get("/scrub/{camera}/sheet/{spec}")
@@ -345,8 +350,29 @@ async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
             status_code=404,
             detail={"error": _ERR_NOT_GENERATED, "message": "sheet file missing on disk"},
         )
+    # `FileResponse` stats lazily in `__call__` (send time) when it isn't given
+    # a `stat_result` up front -- and on a missing file it raises RuntimeError
+    # there, not FileNotFoundError, which is both untimely (after we've
+    # returned from the route) and the wrong exception type to catch as a 404.
+    # Doing the stat here ourselves and handing it in via `stat_result=` moves
+    # the failure back into this function, where a vanished file is still a
+    # plain FileNotFoundError we can turn into a 404 -- closing the window
+    # down to just the send itself, which is the best a file-backed response
+    # can do.
+    try:
+        stat_result = path.stat()
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_NOT_GENERATED, "message": "sheet file missing on disk"},
+        ) from exc
     media_type = "image/webp" if path.suffix == ".webp" else "image/jpeg"
-    return FileResponse(path, media_type=media_type, headers={"Cache-Control": _IMMUTABLE})
+    return FileResponse(
+        path,
+        media_type=media_type,
+        stat_result=stat_result,
+        headers={"Cache-Control": _IMMUTABLE},
+    )
 
 
 async def _fetch_and_aggregate_motion(

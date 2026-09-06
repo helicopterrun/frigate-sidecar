@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+from collections.abc import Iterator
 from typing import Any
 
 import typer
@@ -564,6 +566,27 @@ def analysis_annotation_offset(
 _BACKFILL_MAX_CYCLES = 500
 
 
+@contextlib.contextmanager
+def _scrub_cache_lock(settings: Any) -> Iterator[None]:
+    """Acquire the scrub cache single-writer lock for a CLI command, exiting 2
+    with the holder's identity on stderr if another writer already has it.
+    CLI commands never wait for it (`timeout_s=0`) -- the service loop is the
+    only holder expected to be slow to release, and it isn't the CLI's job to
+    wait it out."""
+    from frigate_sidecar.scrub.lock import ScrubCacheLock, ScrubLockHeld
+
+    lock = ScrubCacheLock(settings.scrub.cache_dir, timeout_s=0.0)
+    try:
+        lock.acquire()
+    except ScrubLockHeld as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 @scrub_app.command("generate")
 def scrub_generate(
     camera: str | None = typer.Option(None, "--camera"),
@@ -579,7 +602,8 @@ def scrub_generate(
     s = load_settings()
     if camera:
         s = s.model_copy(update={"scrub": s.scrub.model_copy(update={"cameras": [camera]})})
-    results = asyncio.run(generate_cycle(s))
+    with _scrub_cache_lock(s):
+        results = asyncio.run(generate_cycle(s))
     if output_json:
         typer.echo(json.dumps(results))
         return
@@ -616,16 +640,17 @@ def scrub_backfill(
     total_frames = 0
     # Safety stop: the live edge keeps producing frames, so "no new frames"
     # is the intended exit but must not be the only one.
-    for _ in range(_BACKFILL_MAX_CYCLES):
-        results = asyncio.run(generate_cycle(s))
-        new_frames = sum(r.get("new_frames", 0) for r in results)
-        total_frames += new_frames
-        if new_frames == 0:
-            break
-    else:
-        typer.echo(
-            f"# stopped after {_BACKFILL_MAX_CYCLES} cycles; re-run to continue", err=True
-        )
+    with _scrub_cache_lock(s):
+        for _ in range(_BACKFILL_MAX_CYCLES):
+            results = asyncio.run(generate_cycle(s))
+            new_frames = sum(r.get("new_frames", 0) for r in results)
+            total_frames += new_frames
+            if new_frames == 0:
+                break
+        else:
+            typer.echo(
+                f"# stopped after {_BACKFILL_MAX_CYCLES} cycles; re-run to continue", err=True
+            )
     typer.echo(
         json.dumps(
             {"camera": camera, "days": days, "since": cutoff, "new_frames": total_frames}
@@ -648,9 +673,13 @@ def scrub_verify(
     """
     from frigate_sidecar.scrub.repair import verify_and_repair
 
-    result = verify_and_repair(
-        load_settings(), camera=camera, interval=interval, repair=repair
-    )
+    s = load_settings()
+    if repair:
+        with _scrub_cache_lock(s):
+            result = verify_and_repair(s, camera=camera, interval=interval, repair=repair)
+    else:
+        # Read-only: does not take the lock.
+        result = verify_and_repair(s, camera=camera, interval=interval, repair=repair)
     typer.echo(json.dumps(result, default=str))
 
 
@@ -671,9 +700,10 @@ def scrub_prune(
 
     s = load_settings()
     result: dict[str, object] = {}
-    if drop_interval:
-        result["dropped_intervals"] = drop_intervals(s, drop_interval, camera=camera)
-    result.update(prune(s, camera=camera))
+    with _scrub_cache_lock(s):
+        if drop_interval:
+            result["dropped_intervals"] = drop_intervals(s, drop_interval, camera=camera)
+        result.update(prune(s, camera=camera))
     typer.echo(json.dumps(result))
 
 
