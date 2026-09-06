@@ -92,6 +92,18 @@
     toastTimer = setTimeout(function () { toastNode.classList.remove("show"); }, 4000);
   }
 
+  // Reload-vs-overwrite conflict dialog: shared by any page that PUTs a
+  // revisioned document and can hit a 409 (stale rev) -- mapedit's
+  // inspector.js and zones.js both save /v1/push/settings this way.
+  // `onReload` re-pulls the server doc and discards local edits; `onOverwrite`
+  // re-saves the local doc against the server's current rev.
+  function conflictDialog(opts) {
+    return dialog("Settings changed elsewhere while you were editing.", [], [
+      { label: "Reload & lose my edits", kind: "btn-neutral", onclick: opts.onReload },
+      { label: "Overwrite with mine", kind: "btn-primary", onclick: opts.onOverwrite },
+    ]);
+  }
+
   // Triage session tag: shared between the list and detail pages.
   function bindSessionInput() {
     var input = document.getElementById("session");
@@ -121,6 +133,7 @@
     el: el,
     banner: banner,
     dialog: dialog,
+    conflictDialog: conflictDialog,
     toast: toast,
     bindSessionInput: bindSessionInput,
   };

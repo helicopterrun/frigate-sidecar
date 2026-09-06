@@ -854,23 +854,12 @@ export class Inspector {
   }
 
   _conflictDialog() {
-    const overlay = el("div", { class: "me-overlay" });
-    const box = el("div", { class: "me-dialog" },
-      el("p", { text: "Settings changed elsewhere while you were editing." }),
-      el("div", { class: "me-actions" },
-        el("button", {
-          class: "btn-neutral", text: "Reload & lose my edits",
-          onclick: async () => { overlay.remove(); await this.store.reload(); },
-        }),
-        el("button", {
-          class: "btn-primary", text: "Overwrite with mine",
-          onclick: async () => {
-            overlay.remove();
-            const r = await this.store.save({ force: true });
-            this.flash(r.ok ? "Saved." : "Save failed: " + (r.error || "conflict"));
-          },
-        })));
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
+    window.SC.conflictDialog({
+      onReload: async () => { await this.store.reload(); },
+      onOverwrite: async () => {
+        const r = await this.store.save({ force: true });
+        this.flash(r.ok ? "Saved." : "Save failed: " + (r.error || "conflict"));
+      },
+    });
   }
 }

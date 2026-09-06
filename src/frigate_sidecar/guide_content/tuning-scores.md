@@ -25,6 +25,20 @@ populations separate — that's your threshold.
 - Restart Frigate and re-check the feed over the next day or two
 ```
 
+## Reading the table
+
+Filter by `days`, `camera`, `label`, and `min_samples` (cells with fewer
+events than this show no suggestion at all). Each row's **confidence** comes
+from whether triage labels exist for that camera/label: `high`/`med` once
+enough `tp` events are labeled, `low` when suggestions fall back to the raw
+score distribution, `sparse` under 10 samples.
+
+An expandable **"Top-score buckets"** `<details>` block sits below the table:
+open it to see the raw histogram bucket counts behind each row's percentiles,
+per camera/label cell — useful when a suggested threshold looks off and you
+want to see the actual distribution shape rather than trust the summary
+percentiles.
+
 ## Keeping it tuned
 
 Re-run the loop seasonally — foliage, light, and camera changes shift score

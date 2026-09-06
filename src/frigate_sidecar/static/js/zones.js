@@ -196,19 +196,84 @@
     });
   }
 
+  // Re-pull the server document and re-render the zones/neighbors lists from
+  // it -- used at init and after a reload-vs-overwrite conflict choice.
+  async function loadFromServer() {
+    var data = await fetchJson("/v1/push/settings");
+    doc = data.settings;
+    rev = data.rev;
+    zonesList.textContent = "";
+    zonesList.classList.remove("skeleton");
+    (data.available_zones || []).forEach(function (zone) {
+      zonesList.appendChild(renderZone(zone));
+    });
+    renderNeighbors(data.available_cameras || []);
+    return data;
+  }
+
+  async function doSave(useRev) {
+    // Send the whole settings doc; camera_neighbors is sticky server-side
+    // when absent, so it must always be sent explicitly (even empty).
+    if (!doc.camera_neighbors) doc.camera_neighbors = {};
+    return fetch("/v1/push/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({ rev: useRev }, doc)),
+    });
+  }
+
   saveBtn.addEventListener("click", async function () {
     saveBtn.disabled = true;
     saveState.textContent = "saving...";
+    var resp;
     try {
-      // Send the whole settings doc; camera_neighbors is sticky server-side
-      // when absent, so it must always be sent explicitly (even empty).
-      if (!doc.camera_neighbors) doc.camera_neighbors = {};
-      var resp = await fetchJson("/v1/push/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(Object.assign({ rev: rev }, doc)),
+      resp = await doSave(rev);
+    } catch (err) {
+      saveState.textContent = "error: " + err.message;
+      saveBtn.disabled = false;
+      return;
+    }
+    if (resp.status === 409) {
+      saveBtn.disabled = false;
+      saveState.textContent = "conflict — resolve to continue";
+      SC.conflictDialog({
+        onReload: async function () {
+          try {
+            await loadFromServer();
+            dirty = false;
+            saveState.textContent = "reloaded";
+          } catch (err) {
+            showBanner(err.message, true);
+          }
+        },
+        onOverwrite: async function () {
+          saveState.textContent = "saving...";
+          try {
+            var fresh = await fetchJson("/v1/push/settings");
+            var resp2 = await doSave(fresh.rev);
+            if (!resp2.ok) throw new Error("HTTP " + resp2.status);
+            var j = await resp2.json();
+            rev = j.rev;
+            dirty = false;
+            saveState.textContent = "saved ✓";
+          } catch (err) {
+            saveState.textContent = "error: " + err.message;
+          }
+        },
       });
-      rev = resp.rev;
+      return;
+    }
+    try {
+      if (!resp.ok) {
+        var msg = "HTTP " + resp.status;
+        try {
+          var errJson = await resp.json();
+          msg = JSON.stringify(errJson.detail || errJson);
+        } catch (e) { /* keep status text */ }
+        throw new Error(msg);
+      }
+      var okJson = await resp.json();
+      rev = okJson.rev;
       dirty = false;
       saveState.textContent = "saved ✓";
     } catch (err) {
@@ -324,15 +389,7 @@
 
   (async function init() {
     try {
-      var data = await fetchJson("/v1/push/settings");
-      doc = data.settings;
-      rev = data.rev;
-      zonesList.textContent = "";
-      zonesList.classList.remove("skeleton");
-      (data.available_zones || []).forEach(function (zone) {
-        zonesList.appendChild(renderZone(zone));
-      });
-      renderNeighbors(data.available_cameras || []);
+      var data = await loadFromServer();
       if (!(data.available_zones || []).length) {
         showBanner("No zones found in the Frigate config.", false);
       }

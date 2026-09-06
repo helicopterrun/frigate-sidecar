@@ -7,12 +7,27 @@ import pytest
 
 from frigate_sidecar import db
 from frigate_sidecar.analysis import (
+    motion_active,
     motion_rate,
     pull_events,
     score_histogram,
     zone_hits,
 )
 from frigate_sidecar.triage import recorder
+
+
+def test_motion_active_aggregate_bounds_both_ends() -> None:
+    def _hour(motion: int, events: int) -> dict[str, int]:
+        return {"duration": 3600, "motion": motion, "events": events, "objects": events}
+
+    days_data = [
+        {"day": "2026-08-01", "hours": [_hour(10, 1)]},
+        {"day": "2026-08-02", "hours": [_hour(20, 2)]},
+        {"day": "2026-08-03", "hours": [_hour(40, 4)]},
+    ]
+    agg = motion_active._aggregate(days_data, "2026-08-02", "2026-08-02")
+    assert agg["motion"] == 20
+    assert agg["hours_with_data"] == 1
 
 
 def test_pull_events_emits_within_window(frigate_db_path: Path) -> None:

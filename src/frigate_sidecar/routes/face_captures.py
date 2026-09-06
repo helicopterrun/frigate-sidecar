@@ -14,29 +14,22 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from frigate_sidecar.config import Settings
 from frigate_sidecar.db import open_sidecar
 from frigate_sidecar.errors import error_detail
 from frigate_sidecar.faces import crosscam
+from frigate_sidecar.routes._deps import settings_of as _settings
+from frigate_sidecar.routes._deps import templates_of as _templates
 
 router = APIRouter(tags=["face-captures"])
 
 _REVIEWS = ("pending", "kept", "discarded")
-
-
-def _settings(request: Request) -> Settings:
-    return cast(Settings, request.app.state.settings)
-
-
-def _templates(request: Request) -> Jinja2Templates:
-    return cast(Jinja2Templates, request.app.state.templates)
 
 
 def _rows(settings: Settings, *, days: float, review: str, limit: int) -> list[dict[str, Any]]:

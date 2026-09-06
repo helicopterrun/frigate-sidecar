@@ -22,9 +22,9 @@ from frigate_sidecar.analysis import (
     score_histogram,
     zone_hits,
 )
-from frigate_sidecar.config import Settings
 from frigate_sidecar.errors import error_detail
 from frigate_sidecar.frigate_api import FrigateAPIError
+from frigate_sidecar.routes._deps import settings_of as _settings
 
 # `database is locked` vocabulary, matching routes/scrub.py's `{"error",
 # "message"}` shape (docs/scrub-cache-and-proxy-spec.md §4.0) rather than a
@@ -39,10 +39,6 @@ def _db_locked(exc: db.DBLockedError) -> HTTPException:
     )
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
-
-
-def _settings(request: Request) -> Settings:
-    return cast(Settings, request.app.state.settings)
 
 
 @router.get("/score-histogram")
