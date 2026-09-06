@@ -1,5 +1,6 @@
 // Identities: name (promotes + retro-labels past events), merge via picker
-// dialog, evict single sightings, delete. Confirmation dialogs are SC.dialog
+// dialog, exclude/include single sightings (soft, undo-able), delete.
+// Confirmation dialogs are SC.dialog
 // (util.js) -- shared with eventalign.js's restart confirm and zones.js's
 // import confirm, all reusing the map editor's .me-overlay/.me-dialog
 // classes; everything else here is SC helpers.
@@ -10,6 +11,18 @@ function post(path, body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body || {}),
   });
+}
+
+function patch(path, body) {
+  return SC.fetchJson(path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+}
+
+async function setExcluded(eventId, excluded) {
+  return patch('/enrich/events/' + eventId, { excluded });
 }
 
 function clusterMeta(id) {
@@ -139,23 +152,46 @@ document.querySelectorAll('.delete-cluster').forEach(btn => {
   });
 });
 
-document.querySelectorAll('.id-evict').forEach(btn => {
+document.querySelectorAll('.id-exclude').forEach(btn => {
   btn.addEventListener('click', async () => {
+    const eventId = btn.dataset.event;
     const card = btn.closest('.id-sighting');
     btn.disabled = true;
     try {
-      const res = await post('/enrich/events/' + btn.dataset.event + '/remove');
-      if (res.cluster_deleted) {
-        const section = btn.closest('.id-cluster');
-        section && section.remove();
-        SC.toast('last sighting removed — cluster deleted');
-      } else {
-        card && card.remove();
-        SC.toast('sighting removed');
-      }
+      await setExcluded(eventId, true);
     } catch (e) {
-      SC.toast('remove failed: ' + e.message, true);
+      SC.toast('exclude failed: ' + e.message, true);
       btn.disabled = false;
+      return;
     }
+    card && card.remove();
+    SC.toast('Sighting excluded', false, {
+      text: 'Undo',
+      callback: async () => {
+        try {
+          await setExcluded(eventId, false);
+        } catch (e) {
+          SC.toast('undo failed: ' + e.message, true);
+          return;
+        }
+        window.location.reload();
+      },
+    });
+  });
+});
+
+document.querySelectorAll('.id-include').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const eventId = btn.dataset.event;
+    btn.disabled = true;
+    try {
+      await setExcluded(eventId, false);
+    } catch (e) {
+      SC.toast('include failed: ' + e.message, true);
+      btn.disabled = false;
+      return;
+    }
+    SC.toast('sighting included');
+    window.location.reload();
   });
 });

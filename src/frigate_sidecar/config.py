@@ -90,6 +90,16 @@ class SidecarSection(BaseModel):
     # bounded, so disabling the Frigate account cuts the holder off within
     # this window rather than at remember_ttl_s.
     remember_cache_ttl_s: float = 900.0
+    # Per-IP failed login attempt limit -- counts only failed POSTs to
+    # /api/login proxied through (auth.py's LoginRateLimiter). Deliberately
+    # does NOT count 401s from validate_frigate_session on owned routes: the
+    # iOS app fires several requests in parallel on an expired cookie, and
+    # guessing a valid one is infeasible (HMAC-signed) anyway. `0` disables
+    # the limiter entirely. Client IP is `scope["client"][0]`; nothing sits
+    # in front of uvicorn so X-Forwarded-For is never trusted.
+    login_rate_limit_attempts: int = 10
+    # Sliding window, in seconds, the attempts above are counted over.
+    login_rate_limit_window_s: float = 60.0
 
 
 class FaceCaptureSection(BaseModel):

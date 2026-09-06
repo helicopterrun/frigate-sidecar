@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import secrets
 import time
 from http.cookies import SimpleCookie
@@ -50,6 +51,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from starlette.routing import BaseRoute
 
     from frigate_sidecar.config import Settings
+
+logger = logging.getLogger(__name__)
 
 ERR_UNAUTHORIZED = "unauthorized"
 ERR_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
@@ -192,6 +195,108 @@ async def validate_frigate_session(
     )
 
 
+class LoginRateLimiter:
+    """Per-IP sliding-window limiter over failed login attempts.
+
+    An "attempt" is a POST to `/api/login` that the proxy relays (see
+    `FrigateAuthMiddleware`) that fails; a successful login never counts.
+    Deliberately does NOT count 401s from `validate_frigate_session` on owned
+    routes: the iOS app fires several requests in parallel whenever its
+    cookie has expired, so counting each 401 hits the limit in seconds and
+    then 429s its own re-login for a full window. Guessing a valid session
+    cookie is also infeasible (HMAC-signed), so counting those 401s buys no
+    real protection anyway -- only the login endpoint itself is worth
+    limiting. State lives in a plain dict on `app.state`, swept and capped
+    the same way `auth.py`'s `_cache`/`_remember` are -- the IP key space is
+    unbounded, so it has to be evicted or it's a slow memory leak.
+    """
+
+    MAX_ENTRIES = 4096
+
+    def __init__(self, app: FastAPI, attempts: int, window_s: float) -> None:
+        self.app = app
+        self.attempts = attempts
+        self.window_s = window_s
+
+    def _buckets(self) -> dict[str, list[float]]:
+        buckets: dict[str, list[float]] | None = getattr(
+            self.app.state, "login_rate_limit_buckets", None
+        )
+        if buckets is None:
+            buckets = {}
+            self.app.state.login_rate_limit_buckets = buckets
+        return buckets
+
+    def _warned(self) -> dict[str, float]:
+        warned: dict[str, float] | None = getattr(
+            self.app.state, "login_rate_limit_warned", None
+        )
+        if warned is None:
+            warned = {}
+            self.app.state.login_rate_limit_warned = warned
+        return warned
+
+    def _live(self, ip: str, now: float) -> list[float]:
+        buckets = self._buckets()
+        times = [t for t in buckets.get(ip, []) if t > now - self.window_s]
+        buckets[ip] = times
+        return times
+
+    def retry_after(self, ip: str) -> float | None:
+        """Seconds until `ip`'s window frees, or None if it isn't blocked.
+
+        Read-only: does not itself count as an attempt.
+        """
+        if self.attempts <= 0:
+            return None
+        now = time.time()
+        times = self._live(ip, now)
+        if len(times) < self.attempts:
+            return None
+        blocked_since = min(times)
+        if self._warned().get(ip) != blocked_since:
+            self._warned()[ip] = blocked_since
+            logger.warning("login rate limit: %s", ip)
+        return max(1.0, blocked_since + self.window_s - now)
+
+    def record_failure(self, ip: str) -> None:
+        """Count one failed attempt for `ip`."""
+        if self.attempts <= 0:
+            return
+        now = time.time()
+        buckets = self._buckets()
+        times = self._live(ip, now)
+        times.append(now)
+        buckets[ip] = times
+        if len(buckets) > self.MAX_ENTRIES:
+            for k in [k for k, v in buckets.items() if not v]:
+                del buckets[k]
+            while len(buckets) > self.MAX_ENTRIES:
+                oldest = min(buckets, key=lambda k: min(buckets[k], default=now))
+                del buckets[oldest]
+                self._warned().pop(oldest, None)
+
+
+def _client_ip(scope: dict[str, Any]) -> str:
+    client = scope.get("client")
+    return client[0] if client else "unknown"
+
+
+def _rate_limit_response(retry_after: float, app: FastAPI) -> JSONResponse:
+    app.state.login_rate_limit_rejections = (
+        getattr(app.state, "login_rate_limit_rejections", 0) + 1
+    )
+    seconds = int(retry_after) + (1 if retry_after % 1 else 0)
+    body = {
+        "detail": {
+            "error": "rate_limited",
+            "message": f"too many login attempts; retry in {seconds}s",
+        }
+    }
+    response = JSONResponse(body, status_code=429, headers={"Retry-After": str(seconds)})
+    return response
+
+
 class FrigateAuthMiddleware:
     """Require a Frigate session on the sidecar's own routes.
 
@@ -225,13 +330,47 @@ class FrigateAuthMiddleware:
         app: FastAPI = scope["app"]
         settings: Settings = app.state.settings
         path: str = scope.get("path", "")
+        is_login_post = (
+            scope["type"] == "http" and scope.get("method") == "POST" and path == "/api/login"
+        )
+        owns = self._owns(scope)
         if (
             not settings.sidecar.require_frigate_auth
             or path in EXEMPT_PATHS
             or path.startswith(EXEMPT_PREFIXES)
-            or not self._owns(scope)
+            or (not owns and not is_login_post)
         ):
             await self.app(scope, receive, send)
+            return
+
+        if is_login_post:
+            # /api/login is proxied, not owned by the sidecar (routes/proxy.py),
+            # so it never goes through the cookie-validation flow below -- gate
+            # it here, before it reaches Frigate, and count it only if it fails.
+            # Only this endpoint is rate-limited/counted (see LoginRateLimiter's
+            # docstring for why owned-route 401s deliberately are not).
+            limiter = LoginRateLimiter(
+                app,
+                settings.sidecar.login_rate_limit_attempts,
+                settings.sidecar.login_rate_limit_window_s,
+            )
+            ip = _client_ip(scope)
+            retry_after = limiter.retry_after(ip)
+            if retry_after is not None:
+                rl_response: Any = _rate_limit_response(retry_after, app)
+                await rl_response(scope, receive, send)
+                return
+
+            status_holder: dict[str, int] = {}
+
+            async def _send_wrapper(message: Any, _holder: dict[str, int] = status_holder) -> None:
+                if message["type"] == "http.response.start":
+                    _holder["status"] = message["status"]
+                await send(message)
+
+            await self.app(scope, receive, _send_wrapper)
+            if status_holder.get("status", 200) >= 400:
+                limiter.record_failure(ip)
             return
 
         cookie = ""

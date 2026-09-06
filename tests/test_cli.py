@@ -120,3 +120,63 @@ def test_version_prints_package_version() -> None:
 
 def _raise_connect(url: str, timeout: float) -> httpx.Response:
     raise httpx.ConnectError("test: no frigate here")
+
+
+def _write_config(tmp_path: Path) -> Path:
+    frigate_db = tmp_path / "frigate.db"
+    frigate_db.write_bytes(b"")
+    cfg = tmp_path / "sidecar.yml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "frigate": {"db_path": str(frigate_db)},
+                "sidecar": {"db_path": str(tmp_path / "frigate-sidecar.db")},
+            }
+        )
+    )
+    return cfg
+
+
+def test_backup_and_restore_round_trip(tmp_path: Path, monkeypatch) -> None:
+    cfg = _write_config(tmp_path)
+    monkeypatch.setenv("FRIGATE_SIDECAR_CONFIG", str(cfg))
+
+    from frigate_sidecar import db
+
+    sidecar_db = tmp_path / "frigate-sidecar.db"
+    db.open_sidecar(sidecar_db).close()
+
+    dest = tmp_path / "backup"
+    result = runner.invoke(app, ["backup", str(dest)])
+    assert result.exit_code == 0, result.output
+    assert "Wrote backup" in result.output
+    assert (dest / "manifest.json").exists()
+
+    result = runner.invoke(app, ["restore", str(dest), "--force"])
+    assert result.exit_code == 0, result.output
+    assert "Restored" in result.output
+
+
+def test_restore_without_force_exits_1(tmp_path: Path, monkeypatch) -> None:
+    cfg = _write_config(tmp_path)
+    monkeypatch.setenv("FRIGATE_SIDECAR_CONFIG", str(cfg))
+
+    from frigate_sidecar import db
+
+    sidecar_db = tmp_path / "frigate-sidecar.db"
+    db.open_sidecar(sidecar_db).close()
+
+    dest = tmp_path / "backup"
+    runner.invoke(app, ["backup", str(dest)])
+    result = runner.invoke(app, ["restore", str(dest)])
+    assert result.exit_code == 1
+    assert "stop frigate-sidecar" in result.output
+
+
+def test_backup_missing_db_exits_1(tmp_path: Path, monkeypatch) -> None:
+    cfg = _write_config(tmp_path)
+    monkeypatch.setenv("FRIGATE_SIDECAR_CONFIG", str(cfg))
+
+    result = runner.invoke(app, ["backup", str(tmp_path / "backup")])
+    assert result.exit_code == 1
+    assert "not found" in result.output

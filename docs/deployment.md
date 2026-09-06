@@ -72,6 +72,42 @@ for push, the MQTT broker — usually all LAN addresses. Bridged networking
 works too: publish `5001` and make sure `frigate.base_url` /
 `frigate.proxy_base_url` / `push.mqtt_host` resolve from inside the container.
 
+## Backup / restore
+
+`fsc backup <dest>` writes the sidecar's own state: the SQLite DB, the
+`.session_secret` signing key (losing it just signs every remember-me device
+out — regenerated on next start if missing), and the resolved `sidecar.yml`.
+The scrub cache and face-model directories are NOT included — both are
+regenerable from Frigate's own recordings/DB and are usually far larger.
+`<dest>` is a plain directory, or a single file if named `*.tar.gz`.
+
+Systemd stop/restore/start:
+
+```sh
+sudo systemctl stop frigate-sidecar
+sudo -u frigate-sidecar fsc backup /opt/frigate-sidecar/backups/$(date +%F).tar.gz
+# ... or, to restore:
+sudo -u frigate-sidecar fsc restore /opt/frigate-sidecar/backups/2026-08-30.tar.gz --force
+sudo systemctl start frigate-sidecar
+curl -s localhost:5001/healthz
+```
+
+`fsc restore` refuses to run at all without `--force` (a restore under a
+running service can corrupt the DB's WAL — `--force` is your confirmation
+that the unit above is stopped). Restoring a backup taken before a schema
+migration is fine: the first open after the restore re-creates any newer
+tables and columns (empty) — a warning is logged so you know it happened.
+
+A cron example for a nightly backup while the service stays up (safe: the DB
+copy uses SQLite's own online backup API, not a raw file copy):
+
+```cron
+15 3 * * * frigate-sidecar fsc backup /opt/frigate-sidecar/backups/$(date +\%F).tar.gz
+```
+
+Prune old backups yourself (e.g. `find backups/ -mtime +30 -delete` in the
+same crontab) — `fsc backup`/`restore` don't manage retention.
+
 ## Releases
 
 Tagging `vX.Y.Z` (matching `__version__` in `src/frigate_sidecar/__init__.py`)

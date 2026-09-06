@@ -57,6 +57,13 @@ variables using the `FRIGATE_SIDECAR_` prefix and `__` for nesting
   minted by `POST /login/remember` (default 30 days).
 - `remember_cache_ttl_s` — the (longer) auth-cache window granted to a
   request carrying a valid remember-me cookie (default 900s).
+- `login_rate_limit_attempts` / `login_rate_limit_window_s` — caps failed
+  login attempts per client IP (default 10 per 60s); only a failed POST to
+  `/api/login` counts (a stale session cookie elsewhere never does — a
+  client with an expired cookie can fire several requests in parallel, and
+  guessing a valid one is infeasible anyway). Once the limit is hit the
+  sidecar answers 429 with a `Retry-After` header until the window clears.
+  Set `login_rate_limit_attempts` to `0` to disable.
 
 `log_level` (top level) defaults to `INFO`.
 
