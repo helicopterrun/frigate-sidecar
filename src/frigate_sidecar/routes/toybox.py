@@ -9,7 +9,7 @@ sidecar DB (`toybox_scores`). The game itself is fully client-side
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from frigate_sidecar.config import Settings
 from frigate_sidecar.db import open_sidecar
 from frigate_sidecar.errors import error_detail
+from frigate_sidecar.routes._deps import settings_of as _settings
 
 router = APIRouter(tags=["toybox"])
 
@@ -26,10 +27,6 @@ router = APIRouter(tags=["toybox"])
 GAME_STATES50: Final = "states50"
 _TOP_N = 10
 _NAME_MAX = 8  # arcade initials are short; keep the board tidy
-
-
-def _settings(request: Request) -> Settings:
-    return cast(Settings, request.app.state.settings)
 
 
 def _top_scores(settings: Settings, game: str, limit: int = _TOP_N) -> list[dict[str, Any]]:

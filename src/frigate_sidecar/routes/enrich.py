@@ -21,12 +21,11 @@ import logging
 import sqlite3
 import time
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from frigate_sidecar.config import Settings
@@ -34,6 +33,8 @@ from frigate_sidecar.db import open_sidecar
 from frigate_sidecar.errors import error_detail
 from frigate_sidecar.faces import enrich
 from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient, get_async_client
+from frigate_sidecar.routes._deps import settings_of as _settings
+from frigate_sidecar.routes._deps import templates_of as _templates
 
 logger = logging.getLogger(__name__)
 
@@ -47,14 +48,6 @@ _SIGHTINGS_PER_CLUSTER = 8
 # hint. Deliberately looser than face_enrich.cluster_threshold (0.55): the
 # hint is a human-confirmed suggestion, not an automatic join.
 _SUGGEST_THRESHOLD = 0.6
-
-
-def _settings(request: Request) -> Settings:
-    return cast(Settings, request.app.state.settings)
-
-
-def _templates(request: Request) -> Jinja2Templates:
-    return cast(Jinja2Templates, request.app.state.templates)
 
 
 def _clusters(conn: sqlite3.Connection, *, show_excluded: bool = False) -> list[dict[str, Any]]:

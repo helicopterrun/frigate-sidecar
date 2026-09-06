@@ -17,24 +17,16 @@ from typing import cast
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
 
-from frigate_sidecar.config import Settings
 from frigate_sidecar.db import open_frigate_ro, open_sidecar
 from frigate_sidecar.errors import error_detail
 from frigate_sidecar.guide import SECTION_TITLES, GuideRegistry
+from frigate_sidecar.routes._deps import settings_of as _settings
+from frigate_sidecar.routes._deps import templates_of as _templates
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["guide"])
-
-
-def _settings(request: Request) -> Settings:
-    return cast(Settings, request.app.state.settings)
-
-
-def _templates(request: Request) -> Jinja2Templates:
-    return cast(Jinja2Templates, request.app.state.templates)
 
 
 def _registry(request: Request) -> GuideRegistry:
