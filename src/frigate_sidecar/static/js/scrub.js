@@ -150,6 +150,26 @@
     return visibleSpan() > state.win.span / 2 && state.win.span < MAX_WINDOW_S - 1;
   }
 
+  // A failed fetch used to leave the previous camera's reel/frame on screen
+  // with only the status line saying "unavailable" -- easy to mistake for
+  // the current camera having gone quiet. Clear the stale picture and name
+  // the failure, with a Retry that re-issues the same load.
+  function showLoadError(message) {
+    state.reel = null;
+    state.sheets = [];
+    state.win = null;
+    setStatus(message);
+    drawReel();
+    if (moment) moment.innerHTML = "";
+    frame.style.backgroundImage = "none";
+    frame.style.aspectRatio = "";
+    frame.textContent = "";
+    frame.appendChild(SC.el("div", { class: "empty error", text: message }, []));
+    var retry = SC.el("button", { type: "button", class: "btn-neutral", text: "Retry" }, []);
+    retry.addEventListener("click", function () { load(true); });
+    frame.appendChild(retry);
+  }
+
   var lastLoadAt = 0;
   async function load(force) {
     if (state.loading) return;
@@ -171,7 +191,11 @@
         fetch("/v1/reel/" + encodeURIComponent(state.camera) + q + "&motion_scale=" + scale),
         fetch("/v1/scrub/" + encodeURIComponent(state.camera) + "/sheets" + q)
       ]);
-      if (!res[0].ok || !res[1].ok) { setStatus("unavailable"); return; }
+      if (!res[0].ok || !res[1].ok) {
+        var code = !res[0].ok ? res[0].status : res[1].status;
+        showLoadError("Failed to load — HTTP " + code);
+        return;
+      }
       state.reel = await res[0].json();
       var sheets = (await res[1].json()).sheets || [];
       // Finest tier first, so the frame lookup lands on the highest-cadence
@@ -180,7 +204,7 @@
       state.sheets = sheets;
       state.win = w;
     } catch (e) {
-      setStatus("unavailable");
+      showLoadError("Failed to load — " + (e && e.message ? e.message : "network error"));
       return;
     } finally {
       state.loading = false;

@@ -65,17 +65,6 @@ watchdog:
   cooldown_s: 180.0              # ignore failures this long after a restart (boot)
   max_restarts_per_hour: 3       # safety cap; logs loudly instead of looping
 
-# Face-training-crop curation (B1). Scores Frigate's OWN auto-saved face crops
-# out of clips/faces/train and promotes the good ones into the named Face
-# Library via Frigate's API. Requires the optional [faces] extra (cv2/numpy).
-# NOTE: `enabled` here is currently inert -- nothing reads it; the feature is
-# gated by whether frigate-sidecar-faces.timer is installed.
-face:
-  enabled: false
-  auto_promote: false          # start observe-only; flip on after reading the histogram
-  quality_threshold: 0.0       # min combined quality_score to auto-promote
-  min_recog_score: 0.9
-  per_person_cap: 40
 
 # High-res cross-camera face capture (B2). When a person event fires on a
 # TRIGGER camera, grab the CAPTURE camera's full main-stream frame out of

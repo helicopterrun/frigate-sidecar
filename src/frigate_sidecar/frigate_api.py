@@ -20,20 +20,37 @@ class FrigateAPIError(RuntimeError):
     pass
 
 
+# Finite default for the shared client -- every current caller (the `/v1`
+# motion fetch, the session check, the config-refresh and thumbnail proxies)
+# already passes its own short `timeout=` per request, so this is only a
+# backstop for a caller that forgets to. It used to be `read=None` (unbounded)
+# for every request through the client, which meant a stalled Frigate
+# connection on ANY of those callers hung forever, not just the media proxy
+# that actually needs a long-lived read. The proxy route (routes/proxy.py)
+# passes its own long `timeout=` on the one request that legitimately streams
+# VOD/live media, plus its own idle-read watchdog per chunk -- see there.
+_DEFAULT_TIMEOUT = httpx.Timeout(15.0)
+
+# Sized for a single-household LAN NVR: a handful of simultaneous VOD/live
+# viewers plus the sidecar's own polling (motion fetch, session check). No
+# `httpx.Limits` before this meant an unbounded connection pool -- a client
+# left on a live view for a while, or several browser tabs proxying media
+# concurrently, had nothing capping how many sockets piled up against
+# Frigate.
+_DEFAULT_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+
+
 def get_async_client(app: FastAPI) -> httpx.AsyncClient:
     """One pooled AsyncClient per app, created lazily and closed on shutdown.
 
     Used by the reverse proxy, the `/v1` motion fetch and the session check.
     A fresh client per request threw away keep-alive to Frigate and paid a new
     connection setup on every proxied media range request.
-
-    `read=None` is the media default (VOD/live are long-lived streams the user
-    pauses and seeks); the short-lived callers pass their own `timeout=`.
     """
     client = getattr(app.state, "http_client", None)
     if client is None or getattr(client, "is_closed", False):
         client = httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, read=None), follow_redirects=False
+            timeout=_DEFAULT_TIMEOUT, limits=_DEFAULT_LIMITS, follow_redirects=False
         )
         app.state.http_client = client
     return client
@@ -237,15 +254,6 @@ class FrigateClient:
             raise FrigateAPIError(f"POST {url}: {exc}") from exc
         if r.status_code not in (200, 201):
             raise FrigateAPIError(f"POST {url}: HTTP {r.status_code}")
-
-    def get_faces(self) -> dict[str, list[str]]:
-        """Return Frigate's registered faces: {name: [filenames], 'train': [...]}.
-
-        The `train` key is the rolling pool of unpromoted recognition attempts;
-        every other key is a registered person's library directory.
-        """
-        data = self._get_json("/api/faces")
-        return data if isinstance(data, dict) else {}
 
     def train_face(self, name: str, training_file: str) -> str:
         """Promote a `train/` crop into a named library via Frigate's API.

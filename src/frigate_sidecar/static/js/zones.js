@@ -260,16 +260,9 @@
     }
   });
 
-  document.getElementById("import-file").addEventListener("change", async function (ev) {
-    var file = ev.target.files && ev.target.files[0];
-    ev.target.value = ""; // allow re-picking the same file
-    if (!file) return;
+  async function applyImport(imported) {
     syncState.textContent = "importing...";
     try {
-      var imported = JSON.parse(await file.text());
-      if (typeof imported !== "object" || !imported || Array.isArray(imported)) {
-        throw new Error("not a settings document");
-      }
       var image = imported._floorplan_image;
       delete imported._floorplan_image;
       if (image && imported.floorplan) {
@@ -293,6 +286,39 @@
       location.reload();
     } catch (err) {
       syncState.textContent = "import error: " + err.message;
+    }
+  }
+
+  document.getElementById("import-file").addEventListener("change", async function (ev) {
+    var file = ev.target.files && ev.target.files[0];
+    ev.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+    var imported;
+    try {
+      imported = JSON.parse(await file.text());
+      if (typeof imported !== "object" || !imported || Array.isArray(imported)) {
+        throw new Error("not a settings document");
+      }
+    } catch (err) {
+      syncState.textContent = "import error: " + err.message;
+      return;
+    }
+    // This PUTs the whole policy doc over whatever is running -- confirm
+    // before clobbering it, same danger-confirm as enrich.js's cluster delete.
+    SC.dialog("Replace all settings with the imported file?", [
+      el("p", { text: "This overwrites the running configuration immediately." }),
+    ], [
+      { label: "cancel" },
+      { label: "replace", kind: "btn-danger", onclick: function () { return applyImport(imported); } },
+    ]);
+  });
+
+  // Unsaved edits (zone names/classes/overrides, camera neighbors) are lost
+  // on navigation with no other warning -- same guard as mapedit/main.js.
+  window.addEventListener("beforeunload", function (ev) {
+    if (dirty) {
+      ev.preventDefault();
+      ev.returnValue = "";
     }
   });
 

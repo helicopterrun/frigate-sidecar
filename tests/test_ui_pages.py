@@ -56,7 +56,9 @@ def test_status_json_shape(client: TestClient) -> None:
 def test_debug_page(client: TestClient) -> None:
     r = client.get("/debug")
     assert r.status_code == 200
-    assert "/toybox" in r.text
+    # Utilities (toybox/docs/version links) live only in Settings › About now
+    # — debug.html just points there instead of duplicating the list.
+    assert "/settings#about" in r.text
     assert "Capabilities" in r.text
 
 
@@ -139,6 +141,29 @@ def test_triage_moved_to_slash_triage(client: TestClient) -> None:
     r = client.get("/triage")
     assert r.status_code == 200
     assert "filters" in r.text
+
+
+def test_triage_q_filters_by_camera_label_or_sub_label(client: TestClient) -> None:
+    # Header search box's q=, same substring match as /v1/events/search.
+    # e3 is the only alley-east event, seeded with days=14 covered by default.
+    r = client.get("/triage", params={"q": "alley-east"})
+    assert r.status_code == 200
+    assert "1 matching event" in r.text
+
+    r = client.get("/triage", params={"q": "no-such-camera-or-label"})
+    assert r.status_code == 200
+    assert "0 matching event" in r.text
+
+
+def test_triage_active_query_shows_removable_chip(client: TestClient) -> None:
+    r = client.get("/triage", params={"q": "alley"})
+    assert r.status_code == 200
+    assert "“alley”" in r.text
+    # The clear link drops q but keeps the other (default) filters.
+    assert 'href="/triage?camera=&amp;label=&amp;triage=any' in r.text
+
+    r = client.get("/triage")
+    assert "Clear search" not in r.text
 
 
 # ---- Frigate DB missing on this instance (dev host without the SQLite file) ----

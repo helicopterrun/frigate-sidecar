@@ -41,6 +41,32 @@
     };
   }
 
+  // Small modal dialog: a title, content nodes, and action buttons (each
+  // {label, kind, onclick}; kind defaults to "btn-neutral", pass "btn-danger"
+  // for the destructive action). Markup/classes are the map editor's
+  // .me-overlay/.me-dialog/.me-actions (triage.css) -- shared here so a
+  // confirm-before-disruptive-action dialog isn't reimplemented per page.
+  function dialog(title, contentNodes, actions) {
+    var buttons = actions.map(function (a) {
+      return el("button", { class: "btn " + (a.kind || "btn-neutral"), text: a.label }, []);
+    });
+    var overlay = el("div", { class: "me-overlay" }, [
+      el("div", { class: "me-dialog" },
+        [el("h3", { text: title }, [])].concat(contentNodes, [
+          el("div", { class: "me-actions" }, buttons),
+        ])),
+    ]);
+    actions.forEach(function (a, i) {
+      buttons[i].addEventListener("click", async function () {
+        if (a.onclick) await a.onclick();
+        overlay.remove();
+      });
+    });
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
   // Transient toast, replaces alert(): non-blocking, auto-dismisses.
   // Optional `action` ({text, callback}) adds a clickable button, e.g. undo.
   var toastNode = null;
@@ -94,6 +120,7 @@
     fetchJson: fetchJson,
     el: el,
     banner: banner,
+    dialog: dialog,
     toast: toast,
     bindSessionInput: bindSessionInput,
   };

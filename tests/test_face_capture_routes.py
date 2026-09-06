@@ -86,7 +86,7 @@ def env(
 
 def test_page_renders_and_groups_by_visit(env: tuple[TestClient, dict[str, int]]) -> None:
     client, _ = env
-    r = client.get("/faces/captures?days=3650")
+    r = client.get("/faces/captures?days=365")
     assert r.status_code == 200
     assert "gate-face" in r.text
     assert "doorbell" in r.text
@@ -94,7 +94,7 @@ def test_page_renders_and_groups_by_visit(env: tuple[TestClient, dict[str, int]]
 
 def test_json_groups_captures_under_one_visit(env: tuple[TestClient, dict[str, int]]) -> None:
     client, _ = env
-    r = client.get("/faces/captures.json?days=3650")
+    r = client.get("/faces/captures.json?days=365")
     assert r.status_code == 200
     visits = r.json()["visits"]
     assert len(visits) == 1
@@ -138,7 +138,29 @@ def test_review_single_and_whole_visit(env: tuple[TestClient, dict[str, int]]) -
     )
     assert r.status_code == 200 and r.json()["updated"] >= 2
 
-    assert client.get("/faces/captures.json?days=3650&review=pending").json()["visits"] == []
+    assert client.get("/faces/captures.json?days=365&review=pending").json()["visits"] == []
+
+
+def test_captures_json_rejects_out_of_range_days_and_limit(
+    env: tuple[TestClient, dict[str, int]],
+) -> None:
+    """`days` and `limit` go straight into the SQL query -- clamp them
+    server-side rather than trusting the client."""
+    client, _ids = env
+    assert client.get("/faces/captures.json?days=366").status_code == 422
+    assert client.get("/faces/captures.json?days=0").status_code == 422
+    assert client.get("/faces/captures.json?limit=501").status_code == 422
+    assert client.get("/faces/captures.json?limit=0").status_code == 422
+    # In-range values still work.
+    assert client.get("/faces/captures.json?days=365&limit=500").status_code == 200
+
+
+def test_captures_view_rejects_out_of_range_days_and_limit(
+    env: tuple[TestClient, dict[str, int]],
+) -> None:
+    client, _ids = env
+    assert client.get("/faces/captures?days=366").status_code == 422
+    assert client.get("/faces/captures?limit=501").status_code == 422
 
 
 def test_review_rejects_a_bogus_value(env: tuple[TestClient, dict[str, int]]) -> None:

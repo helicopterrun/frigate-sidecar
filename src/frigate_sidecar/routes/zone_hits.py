@@ -27,6 +27,7 @@ def zone_hits_view(
 
     result: dict[str, Any] | None = None
     error: str | None = None
+    status_code = 200
     try:
         result = zone_hits.analyze(
             frigate_db=settings.frigate.db_path,
@@ -36,6 +37,9 @@ def zone_hits_view(
         )
     except Exception as exc:  # noqa: BLE001 -- surface, don't 500, like /motion
         error = str(exc)
+        # Non-200 so `ttl_page_cache` skips it -- a 200 here stuck a stale
+        # error banner in the cache for the full TTL past the outage.
+        status_code = 503
 
     cameras = sorted({h["camera"] for h in result["hits"]}) if result else []
     return templates.TemplateResponse(
@@ -49,4 +53,5 @@ def zone_hits_view(
             "cameras": cameras,
             "counts": {},
         },
+        status_code=status_code,
     )

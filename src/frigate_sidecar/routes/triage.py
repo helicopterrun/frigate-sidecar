@@ -57,6 +57,7 @@ def _query_events(
     days: int,
     limit: int,
     order: str,
+    q: str = "",
 ) -> list[dict[str, Any]]:
     where: list[str] = []
     params: list[Any] = []
@@ -78,6 +79,14 @@ def _query_events(
     elif triage in _LABELS:
         where.append("t.label = ?")
         params.append(triage)
+
+    # Free-text search from the header's search box: same substring match
+    # (label/camera/sub_label) as /v1/events/search's `q`, applied token by
+    # token so a multi-word query narrows rather than requiring an exact hit.
+    for token in q.split():
+        like = f"%{token}%"
+        where.append("(e.camera LIKE ? OR e.label LIKE ? OR e.sub_label LIKE ?)")
+        params.extend([like, like, like])
 
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     order_sql = "DESC" if order == "newest" else "ASC"
@@ -248,18 +257,19 @@ def list_view(
     days: int = Query(default=14, ge=1, le=365),
     limit: int = Query(default=50, ge=1, le=500),
     order: str = "newest",
+    q: str = "",
 ) -> Any:
     s = _settings(request)
     events = _query_events(
         frigate_db=s.frigate.db_path,
         sidecar_db=s.sidecar.db_path,
         camera=camera, label=label, triage=triage,
-        days=days, limit=limit, order=order,
+        days=days, limit=limit, order=order, q=q,
     )
     opts = _get_filter_options(s.frigate.db_path, s.sidecar.db_path)
     filters = {
         "camera": camera or "", "label": label or "", "triage": triage,
-        "days": days, "limit": limit, "order": order,
+        "days": days, "limit": limit, "order": order, "q": q,
     }
     return _templates(request).TemplateResponse(
         request,

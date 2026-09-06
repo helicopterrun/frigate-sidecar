@@ -215,6 +215,40 @@ def test_added_columns_has_no_duplicate_table_keys():
         raise AssertionError("_ADDED_COLUMNS assignment not found")
 
 
+def test_read_with_retry_succeeds_after_transient_locks() -> None:
+    calls = {"n": 0}
+
+    def _flaky() -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return "ok"
+
+    result = db.read_with_retry(_flaky, attempts=3, backoff=0.001)
+    assert result == "ok"
+    assert calls["n"] == 3
+
+
+def test_read_with_retry_raises_typed_error_when_always_locked() -> None:
+    def _always_locked() -> None:
+        raise sqlite3.OperationalError("database table is locked")
+
+    with pytest.raises(db.DBLockedError):
+        db.read_with_retry(_always_locked, attempts=3, backoff=0.001)
+
+
+def test_read_with_retry_does_not_retry_a_non_locking_operational_error() -> None:
+    calls = {"n": 0}
+
+    def _bad_sql() -> None:
+        calls["n"] += 1
+        raise sqlite3.OperationalError("no such table: bogus")
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        db.read_with_retry(_bad_sql, attempts=3, backoff=0.001)
+    assert calls["n"] == 1
+
+
 def test_open_sidecar_migrates_pre_zones_csv_card_table(tmp_path):
     """A DB created before zones_csv must gain the column on open — the
     dedup query and every card upsert read it."""

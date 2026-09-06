@@ -1,4 +1,4 @@
-// Test-push buttons on the devices page.
+// Test-push buttons on the /settings page (devices moved off /devices).
 document.querySelectorAll("button[data-token]").forEach(function (btn) {
   btn.addEventListener("click", async function () {
     btn.disabled = true;

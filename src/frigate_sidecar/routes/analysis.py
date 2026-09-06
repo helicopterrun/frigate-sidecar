@@ -6,10 +6,12 @@ and returns the same structured payload as JSON.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from frigate_sidecar import db
 from frigate_sidecar.analysis import (
     annotation_offset,
     fps_budget,
@@ -22,6 +24,18 @@ from frigate_sidecar.analysis import (
 )
 from frigate_sidecar.config import Settings
 from frigate_sidecar.frigate_api import FrigateAPIError
+
+# `database is locked` vocabulary, matching routes/scrub.py's `{"error",
+# "message"}` shape (docs/scrub-cache-and-proxy-spec.md §4.0) rather than a
+# bare string -- so a client can distinguish "transiently unavailable, retry
+# me" from every other 5xx.
+_ERR_DB_LOCKED = "db_locked"
+
+
+def _db_locked(exc: db.DBLockedError) -> HTTPException:
+    return HTTPException(
+        status_code=503, detail={"error": _ERR_DB_LOCKED, "message": str(exc)}
+    )
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
@@ -101,11 +115,14 @@ def zone_hits_endpoint(
     camera: str | None = None,
 ) -> dict[str, Any]:
     s = _settings(request)
-    return zone_hits.analyze(
-        frigate_db=s.frigate.db_path,
-        sidecar_db=s.sidecar.db_path,
-        days=days, camera=camera,
-    )
+    try:
+        return zone_hits.analyze(
+            frigate_db=s.frigate.db_path,
+            sidecar_db=s.sidecar.db_path,
+            days=days, camera=camera,
+        )
+    except db.DBLockedError as exc:
+        raise _db_locked(exc) from exc
 
 
 @router.get("/pull-events")
@@ -119,12 +136,15 @@ def pull_events_endpoint(
     """Returns up to `limit` events as a JSON array (capped for HTTP use)."""
     s = _settings(request)
     out: list[dict[str, Any]] = []
-    for ev in pull_events.pull(
-        frigate_db=s.frigate.db_path, days=days, camera=camera, label=label,
-    ):
-        out.append(ev)
-        if len(out) >= limit:
-            break
+    try:
+        for ev in pull_events.pull(
+            frigate_db=s.frigate.db_path, days=days, camera=camera, label=label,
+        ):
+            out.append(ev)
+            if len(out) >= limit:
+                break
+    except db.DBLockedError as exc:
+        raise _db_locked(exc) from exc
     return out
 
 
@@ -398,7 +418,6 @@ async def alignment_apply_config(request: Request) -> Any:
     cost one restart, not one each. The explicit restart is
     `POST /analysis/annotation-offset/restart-frigate`; `restart_pending`
     in the state response drives the button."""
-    from frigate_sidecar import db
     from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient
     from frigate_sidecar.routes import scrub as scrub_routes
 
@@ -414,22 +433,30 @@ async def alignment_apply_config(request: Request) -> Any:
         raise HTTPException(status_code=422, detail="offset_ms out of range")
 
     s = _settings(request)
-    try:
+
+    def _apply_config() -> bool:
         with FrigateClient(s.frigate.base_url) as fc:
             fc.set_annotation_offset(camera, offset_ms)
-            committed = _commit_frigate_config(
-                str(s.frigate.config_path), camera, offset_ms
-            )
+            return _commit_frigate_config(str(s.frigate.config_path), camera, offset_ms)
+
+    # `FrigateClient` and `git commit` (inside `_commit_frigate_config`) are
+    # both sync -- run off-thread so a slow Frigate config write doesn't stall
+    # every other request on this single-worker event loop.
+    try:
+        committed = await asyncio.to_thread(_apply_config)
     except FrigateAPIError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     # The config is authoritative now; a lingering sidecar override for the
     # same camera would just be shadowed data waiting to confuse someone.
-    conn = db.open_sidecar(s.sidecar.db_path)
-    try:
-        db.set_event_clock_offset(conn, camera, 0)
-    finally:
-        conn.close()
+    def _clear_sidecar_override() -> None:
+        conn = db.open_sidecar(s.sidecar.db_path)
+        try:
+            db.set_event_clock_offset(conn, camera, 0)
+        finally:
+            conn.close()
+
+    await asyncio.to_thread(_clear_sidecar_override)
     scrub_routes.invalidate_event_clock_offsets()
 
     pending = _restart_pending(request)
@@ -447,9 +474,16 @@ async def alignment_restart_frigate(request: Request) -> Any:
     from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient
 
     s = _settings(request)
-    try:
+
+    def _restart() -> None:
         with FrigateClient(s.frigate.base_url) as fc:
             fc.restart()
+
+    # Sync `FrigateClient.restart()` blocks for Frigate's own ~30s restart
+    # window -- run off-thread so it doesn't stall every other request on
+    # this single-worker event loop for the duration.
+    try:
+        await asyncio.to_thread(_restart)
     except FrigateAPIError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     applied = list(_restart_pending(request))
@@ -594,7 +628,6 @@ async def alignment_apply(request: Request) -> Any:
 
     An offset of 0 clears the override. Frigate's own
     `detect.annotation_offset` still wins over these when set."""
-    from frigate_sidecar import db
     from frigate_sidecar.routes import scrub as scrub_routes
 
     body = await request.json()
@@ -612,11 +645,15 @@ async def alignment_apply(request: Request) -> Any:
         clean[str(cam)] = value
 
     s = _settings(request)
-    conn = db.open_sidecar(s.sidecar.db_path)
-    try:
-        for cam, ms in clean.items():
-            db.set_event_clock_offset(conn, cam, ms)
-    finally:
-        conn.close()
+
+    def _write_offsets() -> None:
+        conn = db.open_sidecar(s.sidecar.db_path)
+        try:
+            for cam, ms in clean.items():
+                db.set_event_clock_offset(conn, cam, ms)
+        finally:
+            conn.close()
+
+    await asyncio.to_thread(_write_offsets)
     scrub_routes.invalidate_event_clock_offsets()
     return {"applied": clean}

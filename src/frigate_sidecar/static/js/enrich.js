@@ -1,6 +1,8 @@
 // Identities: name (promotes + retro-labels past events), merge via picker
-// dialog, evict single sightings, delete. Confirmation dialogs reuse the map
-// editor's .me-overlay/.me-dialog classes; everything else is SC helpers.
+// dialog, evict single sightings, delete. Confirmation dialogs are SC.dialog
+// (util.js) -- shared with eventalign.js's restart confirm and zones.js's
+// import confirm, all reusing the map editor's .me-overlay/.me-dialog
+// classes; everything else here is SC helpers.
 
 function post(path, body) {
   return SC.fetchJson(path, {
@@ -22,28 +24,7 @@ function clusterMeta(id) {
   };
 }
 
-// Small dialog helper: title, a content node, and action buttons.
-function dialog(title, contentNodes, actions) {
-  const buttons = actions.map(a =>
-    SC.el('button', { class: 'btn ' + (a.kind || 'btn-neutral'), text: a.label }, [])
-  );
-  const overlay = SC.el('div', { class: 'me-overlay' }, [
-    SC.el('div', { class: 'me-dialog' }, [
-      SC.el('h3', { text: title }, []),
-      ...contentNodes,
-      SC.el('div', { class: 'me-actions' }, buttons),
-    ]),
-  ]);
-  actions.forEach((a, i) => {
-    buttons[i].addEventListener('click', async () => {
-      if (a.onclick) await a.onclick();
-      overlay.remove();
-    });
-  });
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  document.body.appendChild(overlay);
-  return overlay;
-}
+const dialog = SC.dialog;
 
 function clusterRow(meta, extra) {
   const row = SC.el('div', { class: 'id-pick-row' }, [

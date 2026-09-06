@@ -199,10 +199,79 @@ def test_motion_blank_form(client: TestClient) -> None:
 
 
 def test_motion_error_on_unreachable_frigate(client: TestClient) -> None:
-    # Live API not reachable -> error banner, but page still 200.
+    # Live API not reachable -> error banner, and a non-200 so the page-level
+    # TTL cache (routes/_cache.py) doesn't stick the "unreachable" banner past
+    # the outage.
     r = client.get("/motion", params={"baseline": "yesterday", "target": "today"})
-    assert r.status_code == 200
+    assert r.status_code == 503
     assert "Frigate API unreachable" in r.text or "date parse error" in r.text
+
+
+def _stub_motion_active(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Replaces `motion_active.analyze` with one that records its `days` kwarg
+    and returns an empty result -- so single-window `/motion` parsing can be
+    checked without a live Frigate."""
+    from frigate_sidecar.analysis import motion_active
+
+    captured: dict[str, object] = {}
+
+    def fake_analyze(*, frigate_base_url: str, days: int) -> dict[str, object]:
+        captured["days"] = days
+        return {"since": "stub", "rows": []}
+
+    monkeypatch.setattr(motion_active, "analyze", fake_analyze)
+    return captured
+
+
+def test_motion_single_mode_today_is_one_day(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _stub_motion_active(monkeypatch)
+    r = client.get("/motion", params={"target": "today"})
+    assert r.status_code == 200
+    assert captured["days"] == 1
+
+
+def test_motion_single_mode_yesterday_is_two_days_back(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`target=yesterday` used to fall through the old ternary to a flat 14
+    days -- silently becoming "the last 14 days" instead of yesterday."""
+    captured = _stub_motion_active(monkeypatch)
+    r = client.get("/motion", params={"target": "yesterday"})
+    assert r.status_code == 200
+    assert captured["days"] == 2
+
+
+def test_motion_single_mode_explicit_date_anchors_days_since(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import date, timedelta
+
+    captured = _stub_motion_active(monkeypatch)
+    target = (date.today() - timedelta(days=5)).isoformat()
+    r = client.get("/motion", params={"target": target})
+    assert r.status_code == 200
+    assert captured["days"] == 6  # since = 5 days ago -> days-back = 5 + 1
+
+
+def test_motion_single_mode_range_anchors_on_the_start_date(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import date, timedelta
+
+    captured = _stub_motion_active(monkeypatch)
+    lo = (date.today() - timedelta(days=10)).isoformat()
+    hi = (date.today() - timedelta(days=3)).isoformat()
+    r = client.get("/motion", params={"target": f"{lo}..{hi}"})
+    assert r.status_code == 200
+    assert captured["days"] == 11
+
+
+def test_motion_single_mode_rejects_an_unparseable_target(client: TestClient) -> None:
+    r = client.get("/motion", params={"target": "not-a-date"})
+    assert r.status_code == 400
+    assert "bad target" in r.json()["detail"]
 
 
 def test_list_has_active_nav(client: TestClient) -> None:
@@ -232,19 +301,45 @@ def test_score_histogram_camera_filter(client: TestClient) -> None:
     assert 'value="alley-east" selected' in r.text
 
 
+def test_score_histogram_page_degrades_instead_of_500ing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike its siblings (motion/zone-hits/fps-budget), this route had no
+    try/except at all -- a locked/broken DB read 500ed here."""
+    from frigate_sidecar.analysis import score_histogram
+
+    def boom(**_kwargs: object) -> object:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(score_histogram, "analyze", boom)
+    # `ttl_page_cache`'s cache is keyed on the full URL and shared across every
+    # app instance in this process (it lives on the decorated function, not
+    # per-app) -- a `days=7` hit from another test's successful render would
+    # otherwise serve that cached 200 here without ever calling `boom`.
+    r = client.get("/score-histogram", params={"days": 13})
+    # Degrades (503, so the TTL cache skips it) instead of a raw 500 -- and
+    # now renders the same error banner as its siblings (motion/zone-hits/
+    # fps-budget), with the exception text visible in the body.
+    assert r.status_code == 503
+    assert "Score Histogram" in r.text or "score-histogram" in r.text
+    assert "boom" in r.text
+
+
 def test_fps_budget_page_error_when_api_down(client: TestClient) -> None:
-    # Test config points at a non-existent Frigate; page should still 200
-    # with an error banner.
+    # Test config points at a non-existent Frigate; page renders an error
+    # banner with a non-200 status (so the TTL cache doesn't stick it).
     r = client.get("/fps-budget")
-    assert r.status_code == 200
+    assert r.status_code == 503
     assert "Frigate API unreachable" in r.text
 
 
 def test_nav_appears_on_all_pages(client: TestClient) -> None:
-    # Same nav on all pages.
+    # Same nav on all pages. `/fps-budget` errors (no live Frigate in this
+    # test) but still renders the shared nav around its error banner.
     for path in ("/", "/motion", "/score-histogram", "/fps-budget"):
         r = client.get(path)
-        assert r.status_code == 200, path
+        expected = 503 if path == "/fps-budget" else 200
+        assert r.status_code == expected, path
         for label in ("Triage", "Motion", "Scores", "FPS budget"):
             assert label in r.text, f"{label} missing on {path}"
 
@@ -272,6 +367,41 @@ def test_analysis_zone_hits(client: TestClient) -> None:
     assert r.status_code == 200
     body = r.json()
     assert "hits" in body and "mask_candidates" in body
+
+
+def test_analysis_zone_hits_maps_db_locked_to_503(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from frigate_sidecar import db
+    from frigate_sidecar.analysis import zone_hits
+
+    def always_locked(**_kwargs: object) -> object:
+        raise db.DBLockedError("database is locked")
+
+    monkeypatch.setattr(zone_hits, "analyze", always_locked)
+    r = client.get("/analysis/zone-hits", params={"days": 7})
+    assert r.status_code == 503
+    assert r.json()["detail"] == {
+        "error": "db_locked", "message": "database is locked",
+    }
+
+
+def test_analysis_pull_events_maps_db_locked_to_503(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from frigate_sidecar import db
+    from frigate_sidecar.analysis import pull_events
+
+    def always_locked(**_kwargs: object) -> object:
+        raise db.DBLockedError("database is locked")
+        yield  # pragma: no cover - makes this a generator function, like pull()
+
+    monkeypatch.setattr(pull_events, "pull", always_locked)
+    r = client.get("/analysis/pull-events", params={"days": 7, "limit": 100})
+    assert r.status_code == 503
+    assert r.json()["detail"] == {
+        "error": "db_locked", "message": "database is locked",
+    }
 
 
 def test_analysis_pull_events(client: TestClient) -> None:

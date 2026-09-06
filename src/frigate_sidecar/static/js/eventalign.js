@@ -134,19 +134,32 @@
     if (!restartBtn) {
       restartBtn = SC.el("button", { class: "btn-primary", id: "align-restart" });
       restartBtn.style.display = "none";
-      restartBtn.addEventListener("click", async function () {
-        restartBtn.disabled = true;
-        try {
-          var resp = await fetch("/analysis/annotation-offset/restart-frigate", {
-            method: "POST",
-          });
-          if (!resp.ok) throw new Error("HTTP " + resp.status);
-          SC.toast("Frigate is restarting (~30 s) — offsets apply when it's back");
-        } catch (e) {
-          SC.toast("restart failed: " + e);
-        }
-        restartBtn.disabled = false;
-        refresh();
+      restartBtn.addEventListener("click", function () {
+        // One click used to fire the restart directly -- ~30s of blind
+        // cameras with no confirmation. Same danger-confirm as enrich.js's
+        // cluster delete.
+        SC.dialog("Restart Frigate?", [
+          SC.el("p", { text: "Every camera goes blind for about 30 seconds while it restarts." }, []),
+        ], [
+          { label: "cancel" },
+          {
+            label: "restart", kind: "btn-danger",
+            onclick: async function () {
+              restartBtn.disabled = true;
+              try {
+                var resp = await fetch("/analysis/annotation-offset/restart-frigate", {
+                  method: "POST",
+                });
+                if (!resp.ok) throw new Error("HTTP " + resp.status);
+                SC.toast("Frigate is restarting (~30 s) — offsets apply when it's back");
+              } catch (e) {
+                SC.toast("restart failed: " + e);
+              }
+              restartBtn.disabled = false;
+              refresh();
+            },
+          },
+        ]);
       });
       var measure = document.getElementById("align-measure");
       if (measure) measure.parentNode.insertBefore(restartBtn, measure.nextSibling);

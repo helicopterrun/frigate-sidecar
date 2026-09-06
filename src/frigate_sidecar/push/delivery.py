@@ -302,18 +302,34 @@ def _schedule_deferred_resolve(
     payload: dict[str, Any], collapse_id: str, delay_s: float,
 ) -> None:
     async def _later() -> None:
-        await asyncio.sleep(delay_s)
-        result = await transport.send_situation(
-            device, payload=payload, collapse_id=collapse_id, apns_priority=5,
-        )
-        logger.info(
-            "push: deferred resolve row sent device=%s card_key=%s ok=%s",
-            device.device_id, collapse_id, result.ok,
-        )
+        try:
+            await asyncio.sleep(delay_s)
+            result = await transport.send_situation(
+                device, payload=payload, collapse_id=collapse_id, apns_priority=5,
+            )
+            logger.info(
+                "push: deferred resolve row sent device=%s card_key=%s ok=%s",
+                device.device_id, collapse_id, result.ok,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "push: deferred resolve failed device=%s card_key=%s",
+                device.device_id, collapse_id,
+            )
 
     task = asyncio.get_running_loop().create_task(_later())
     _DEFERRED_TASKS.add(task)
     task.add_done_callback(_DEFERRED_TASKS.discard)
+
+
+def cancel_deferred() -> None:
+    """Cancel any in-flight deferred resolves. Call at shutdown so the
+    process doesn't leave dangling tasks (or log "Task exception was never
+    retrieved") when the lifespan tears down before a `_later()` fires."""
+    for task in list(_DEFERRED_TASKS):
+        task.cancel()
 
 
 def _device_eligible(

@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from frigate_sidecar.analysis import motion_active, motion_compare
@@ -72,6 +72,7 @@ def motion_view(
     mode: str | None = None
     rows: list[dict[str, Any]] = []
     error: str | None = None
+    status_code = 200
     range_labels = {"baseline": "", "target": ""}
 
     if baseline or target:
@@ -92,9 +93,31 @@ def motion_view(
                     rows.append(row)
             else:
                 mode = "single"
+                # `target` promises a date/preset -- "" or "today" (today
+                # only), "yesterday", a single `YYYY-MM-DD`, or a
+                # `YYYY-MM-DD..YYYY-MM-DD` range -- but this used to hard-code
+                # every one of those except "today" to a flat 14 days, so
+                # "yesterday only" silently became "the last 14 days".
+                # `parse_range` (already used by Compare mode below) knows
+                # this vocabulary; reuse it rather than re-parsing target here.
+                try:
+                    lo, _hi = motion_compare.parse_range(target or "today")
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"bad target {target!r}: {exc}",
+                    ) from exc
+                # motion_active.analyze only takes a "since N days ago
+                # through now" window (no upper bound), so an explicit past
+                # range's end date still can't be enforced here the way
+                # Compare mode enforces both ends -- but the start date is
+                # now honoured instead of ignored. `max(..., 1)` guards a
+                # `target` in the future, where the subtraction would
+                # otherwise go negative.
+                days = max((date.today() - date.fromisoformat(lo)).days + 1, 1)
                 result = motion_active.analyze(
                     frigate_base_url=settings.frigate.base_url,
-                    days=1 if target in ("", "today") else 14,
+                    days=days,
                 )
                 range_labels["target"] = result.get("since", target or "today")
                 for row in result["rows"]:
@@ -108,8 +131,10 @@ def motion_view(
                 rows.sort(key=lambda r: -float(r.get("mu_per_hr", 0)))
         except FrigateAPIError as exc:
             error = f"Frigate API unreachable: {exc}"
+            status_code = 503
         except ValueError as exc:
             error = f"date parse error: {exc}"
+            status_code = 503
 
     return templates.TemplateResponse(
         request,
@@ -124,4 +149,5 @@ def motion_view(
             "range_labels": range_labels,
             "counts": {},  # header expects this; motion page doesn't need counts
         },
+        status_code=status_code,
     )

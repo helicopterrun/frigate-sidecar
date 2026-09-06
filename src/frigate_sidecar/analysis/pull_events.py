@@ -7,7 +7,12 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from frigate_sidecar.db import open_frigate_ro, parse_event_data, time_window_clause
+from frigate_sidecar.db import (
+    open_frigate_ro,
+    parse_event_data,
+    read_with_retry,
+    time_window_clause,
+)
 
 _OPTIONAL_COLS = (
     "area",
@@ -47,39 +52,46 @@ def pull(
         where += " AND label = ?"
         params.append(label)
 
-    conn = open_frigate_ro(frigate_db)
-    cols = _column_select(conn)
-    sql = f"SELECT {cols} FROM event WHERE {where} ORDER BY start_time"
-    try:
-        for row in conn.execute(sql, params):
-            ev = parse_event_data(row)
-            try:
-                zones = json.loads(ev["zones"]) if ev.get("zones") else []
-            except (TypeError, json.JSONDecodeError):
-                zones = []
-            yield {
-                "id": ev["id"],
-                "camera": ev["camera"],
-                "label": ev["label"],
-                "sub_label": ev["sub_label"],
-                "start_time": ev["start_time"],
-                "end_time": ev["end_time"],
-                "duration": (ev["end_time"] or ev["start_time"]) - ev["start_time"],
-                "score": ev["data_score"] if ev["data_score"] is not None else ev["score"],
-                "top_score": ev["data_top_score"]
-                if ev["data_top_score"] is not None
-                else ev["top_score"],
-                "false_positive": ev["false_positive"],
-                "retain_indefinitely": ev["retain_indefinitely"],
-                "has_clip": bool(ev["has_clip"]),
-                "has_snapshot": bool(ev["has_snapshot"]),
-                "area": ev["area"],
-                "ratio": ev["ratio"],
-                "region": ev["data_region"],
-                "box": ev["data_box"],
-                "zones": zones,
-                "type": ev.get("data_type"),
-                "plus_id": ev["plus_id"],
-            }
-    finally:
-        conn.close()
+    def _fetch_rows() -> list[Any]:
+        # A full read from scratch -- opens its own connection so a retry
+        # after `database is locked` doesn't reuse a connection that just
+        # failed (see db.read_with_retry).
+        conn = open_frigate_ro(frigate_db)
+        try:
+            cols = _column_select(conn)
+            sql = f"SELECT {cols} FROM event WHERE {where} ORDER BY start_time"
+            return conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+
+    rows = read_with_retry(_fetch_rows)
+    for row in rows:
+        ev = parse_event_data(row)
+        try:
+            zones = json.loads(ev["zones"]) if ev.get("zones") else []
+        except (TypeError, json.JSONDecodeError):
+            zones = []
+        yield {
+            "id": ev["id"],
+            "camera": ev["camera"],
+            "label": ev["label"],
+            "sub_label": ev["sub_label"],
+            "start_time": ev["start_time"],
+            "end_time": ev["end_time"],
+            "duration": (ev["end_time"] or ev["start_time"]) - ev["start_time"],
+            "score": ev["data_score"] if ev["data_score"] is not None else ev["score"],
+            "top_score": ev["data_top_score"]
+            if ev["data_top_score"] is not None
+            else ev["top_score"],
+            "false_positive": ev["false_positive"],
+            "retain_indefinitely": ev["retain_indefinitely"],
+            "has_clip": bool(ev["has_clip"]),
+            "has_snapshot": bool(ev["has_snapshot"]),
+            "area": ev["area"],
+            "ratio": ev["ratio"],
+            "region": ev["data_region"],
+            "box": ev["data_box"],
+            "zones": zones,
+            "type": ev.get("data_type"),
+            "plus_id": ev["plus_id"],
+        }
