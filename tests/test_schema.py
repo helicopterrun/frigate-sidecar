@@ -12,9 +12,9 @@ TABLE text is brittle here: several of those columns are the LAST column in
 their table (no trailing comma to also strip) and a couple of the CREATE
 TABLE bodies contain inline `CHECK(x IN (...))` constraints with their own
 commas, so a naive comma-split misparses them. Per the migration-schema
-spec, this test instead keeps a frozen, hand-written copy of the four
+spec, this test instead keeps a frozen, hand-written copy of the five
 affected tables (`push_devices`, `push_handles`, `push_activities`,
-`push_cards`) as they existed before their `_ADDED_COLUMNS` entries were
+`push_cards`, `face_enrichments`) as they existed before their `_ADDED_COLUMNS` entries were
 added, confirmed against git history / the comments in db.py at write time.
 Every other table is reused verbatim from the current `SIDECAR_SCHEMA`.
 """
