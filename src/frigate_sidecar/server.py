@@ -26,6 +26,7 @@ from frigate_sidecar.guide import load_guide
 from frigate_sidecar.push import delivery, delivery_wire
 from frigate_sidecar.push import store as push_store
 from frigate_sidecar.push.engine import PushEngine
+from frigate_sidecar.push.log_context import PushContextFilter
 from frigate_sidecar.push.mqtt import MqttReviewSubscriber, compute_backoff
 from frigate_sidecar.push.transport import LogTransport, PushTransport, RelayTransport
 from frigate_sidecar.routes import analysis as analysis_routes
@@ -231,6 +232,9 @@ def _build_push_transport(settings: Settings) -> PushTransport:
             settings.push.relay_base_url,
             timeout=settings.push.relay_timeout_s,
             relay_key=settings.push.relay_key,
+            retry_attempts=settings.push.relay_retry_attempts,
+            breaker_failures=settings.push.relay_breaker_failures,
+            breaker_open_s=settings.push.relay_breaker_open_s,
         )
     return LogTransport()
 
@@ -580,8 +584,15 @@ def run() -> None:
     # never did.
     logging.basicConfig(
         level=settings.log_level.upper(),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format="%(asctime)s %(levelname)s %(name)s%(push_ctx)s: %(message)s",
     )
+    # Push-pipeline lines carry " [cam=... track=...]" after the logger name so
+    # a start/end/result line can be tied back to the frame that caused it.
+    # The filter has to sit on the handler, not the logger: logger filters
+    # only see records logged directly to that logger, handler filters see
+    # everything that propagates through.
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(PushContextFilter())
     # httpx logs a line per request at INFO. Every proxied request goes through
     # it, so at this cadence that is thousands of lines an hour burying anything
     # the sidecar has to say (the watchdog quiets it for the same reason).

@@ -214,6 +214,9 @@ push:
   mqtt_port: 1883
   mqtt_username: null
   mqtt_password: null
+  # Hard cap on the consumer queue depth; non-terminal frames are dropped
+  # (mqtt.dropped.overflow, see /v1/stats) rather than growing unbounded.
+  mqtt_queue_max: 2000
   mqtt_topic_reviews: frigate/reviews
   mqtt_topic_available: frigate/available
   reconnect_backoff_s: 2.0
@@ -227,7 +230,19 @@ push:
   # key and never receives camera names, labels, or snapshots -- only
   # {device_token, environment, handle, server_id, severity}.
   relay_base_url: https://push-relay.example.invalid
-  relay_timeout_s: 10.0
+  # Per-attempt timeout; a 3-attempt retryable send is bounded at roughly
+  # 2*relay_timeout_s + relay_timeout_s + ~2s of backoff.
+  relay_timeout_s: 5.0
+  # Total attempts for retryable kinds (push, liveactivity start/end); 1 =
+  # no retry. Retryable outcomes: connect/timeout errors, 5xx, 429.
+  # liveactivity update/situation/test always send once, never retried.
+  relay_retry_attempts: 3
+  # Consecutive attempt-level transport failures (exception or 5xx; 429/4xx
+  # never count) that open the circuit breaker and short-circuit further
+  # relay sends -- see "Relay breaker" on /status.
+  relay_breaker_failures: 3
+  # How long the breaker stays open before a single half-open probe attempt.
+  relay_breaker_open_s: 30.0
   # How long a minted handle (opaque camera/event-id reference for the NSE's
   # handle-redemption fetch) stays valid.
   handle_ttl_s: 3600.0

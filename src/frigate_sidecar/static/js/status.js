@@ -92,6 +92,31 @@
     setCell("sidecar-db", fmtBytes(s.sizes.sidecar_db));
     setCell("frigate-db", fmtBytes(s.sizes.frigate_db));
 
+    // Push pipeline (wave 2A): relay retry/breaker + MQTT queue counters.
+    var ps = s.push_stats || {};
+    var pc = ps.counters || {};
+    var pg = ps.gauges || {};
+    function pcount(k) { return pc[k] !== undefined ? String(pc[k]) : "0"; }
+    setCell("push-ok", pcount("relay.send.ok"));
+    setCell("push-failed", pcount("relay.send.failed"));
+    setCell("push-unregistered", pcount("relay.send.unregistered"));
+    setCell("push-retries", pcount("relay.retry"));
+    setCell("push-queue-depth", pg["mqtt.queue.depth"] !== undefined ? String(pg["mqtt.queue.depth"]) : "0");
+    setCell("push-queue-hw", pg["mqtt.queue.high_water"] !== undefined ? String(pg["mqtt.queue.high_water"]) : "0");
+    setCell("push-dropped", pcount("mqtt.dropped.overflow"));
+    setCell("push-sweep-ended", pcount("pipeline.sweep.ended"));
+    setCell("push-db-locked", pcount("db.locked.retry"));
+    var breakerCell = document.querySelector('[data-k="push-breaker"]');
+    if (breakerCell) {
+      var breakerOpen = !!pg["relay.breaker.state"];
+      var text = breakerOpen ? "open" : "closed";
+      if (breakerOpen && pg["relay.breaker.open_until"]) {
+        text += " until " + hhmm(pg["relay.breaker.open_until"] * 1000);
+      }
+      breakerCell.textContent = text;
+      breakerCell.className = "stat-value cell-class " + (breakerOpen ? "noise" : "ok");
+    }
+
     // Worst live-edge lag across cameras (status page tile).
     var worst = null;
     (s.scrub.cameras || []).forEach(function (c) {

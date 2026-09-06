@@ -585,6 +585,9 @@ class PushSection(BaseModel):
     mqtt_username: str | None = None
     mqtt_password: str | None = None
     mqtt_client_id: str = "frigate-sidecar-push"
+    # Hard cap on the consumer queue depth (mqtt.py); consumed by that worker
+    # -- this field only declares the knob and its bounds.
+    mqtt_queue_max: int = Field(default=2000, ge=100, le=100000)
     mqtt_topic_reviews: str = "frigate/reviews"
     mqtt_topic_available: str = "frigate/available"
     # Dwell input only -- `frigate/reviews` stays the sole authority on
@@ -615,7 +618,19 @@ class PushSection(BaseModel):
     # alerts. Overridable for forks running their own relay under their own
     # bundle id/team.
     relay_base_url: str = "https://elsinore-push-relay.helicopterrun.workers.dev"
-    relay_timeout_s: float = 10.0
+    # Per-attempt timeout (was a whole-send 10.0s before retry existed).
+    relay_timeout_s: float = 5.0
+    # Total attempts for retryable kinds (push, liveactivity start/end); 1 =
+    # no retry. liveactivity update/situation/test always send once regardless
+    # (transport.py's per-kind policy -- a late retried LA update can arrive
+    # after an end, and situation/test have no supersession semantics to lean
+    # on).
+    relay_retry_attempts: int = Field(default=3, ge=1, le=10)
+    # Consecutive transport failures (exception or 5xx at the attempt level;
+    # 429/4xx never count) that open the circuit breaker.
+    relay_breaker_failures: int = Field(default=3, ge=1, le=50)
+    # How long the breaker stays open before a single half-open probe attempt.
+    relay_breaker_open_s: float = Field(default=30.0, ge=1, le=600)
 
     # -- Handle redemption (spec §3 step 2) --
     handle_ttl_s: float = 3600.0

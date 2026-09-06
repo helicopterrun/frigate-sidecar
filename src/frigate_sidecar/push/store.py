@@ -155,6 +155,12 @@ def upsert_device(
             push_to_start_token, int(la_capable), int(frequent_pushes_enabled),
         ),
     )
+    # Commits itself (spec Wave 2B §3): sqlite3's default isolation leaves
+    # the write transaction -- and the WAL write lock -- open across every
+    # `await` in the caller until *something* commits, which is the
+    # "database is locked" HTTP routes were seeing. Single-statement helpers
+    # commit right here instead of leaving it to the caller.
+    conn.commit()
     return device_id
 
 
@@ -163,6 +169,7 @@ def delete_device(conn: sqlite3.Connection, apns_token: str) -> bool:
     /v1/push/devices/{token}) and 410/400 feedback-driven pruning (spec §5).
     Returns True if a row was actually removed."""
     cur = conn.execute("DELETE FROM push_devices WHERE apns_token = ?", (apns_token,))
+    conn.commit()
     return cur.rowcount > 0
 
 
@@ -204,6 +211,7 @@ def mint_handle(
         "situation_id, track_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (handle, camera, event_id, review_id, now, now + ttl_s, situation_id, track_id),
     )
+    conn.commit()
     return handle
 
 
@@ -219,6 +227,7 @@ def store_thumbnail(conn: sqlite3.Connection, handle: str, jpeg: bytes) -> bool:
     cur = conn.execute(
         "UPDATE push_handles SET thumbnail = ? WHERE handle = ?", (sqlite3.Binary(jpeg), handle)
     )
+    conn.commit()
     return cur.rowcount > 0
 
 
@@ -260,12 +269,14 @@ def set_snooze(
         "ON CONFLICT(apns_token, scope) DO UPDATE SET until_epoch=excluded.until_epoch",
         (apns_token, scope, float(until_epoch), now),
     )
+    conn.commit()
 
 
 def clear_snooze(conn: sqlite3.Connection, *, apns_token: str, scope: str) -> bool:
     cur = conn.execute(
         "DELETE FROM push_snoozes WHERE apns_token = ? AND scope = ?", (apns_token, scope)
     )
+    conn.commit()
     return cur.rowcount > 0
 
 
@@ -301,6 +312,7 @@ def list_snoozes(
 def prune_expired_snoozes(conn: sqlite3.Connection, *, now: float | None = None) -> int:
     now = time.time() if now is None else now
     cur = conn.execute("DELETE FROM push_snoozes WHERE until_epoch <= ?", (now,))
+    conn.commit()
     return cur.rowcount
 
 
@@ -314,23 +326,38 @@ def replace_snoozes(
     and on every token reissue, and a launch silently cancelling a snooze the
     user set an hour ago would break the plan's "state that survives app kill"
     non-negotiable in the most confusing way available.
+
+    The delete and every insert run inside one `with conn:` block (spec Wave
+    2B §3): this is the one helper that genuinely needs delete+insert(s)
+    atomic -- a partial replacement (old snoozes gone, only some new ones
+    landed) is a real user-visible bug, not just an internal inconsistency.
     """
-    conn.execute("DELETE FROM push_snoozes WHERE apns_token = ?", (apns_token,))
     now = time.time()
-    for item in snoozes:
-        scope = str(item.get("scope") or "").strip()
-        if not scope:
-            continue
-        # Plan §8 spells the registration field `until`; the standalone
-        # `POST /v1/push/snooze` body spells it `until_epoch`. Both are read
-        # here so a client using either vocabulary lands in the same place.
-        raw_until = item.get("until", item.get("until_epoch", 0))
-        try:
-            until = float(raw_until)
-        except (TypeError, ValueError):
-            continue
-        if until > now:
-            set_snooze(conn, apns_token=apns_token, scope=scope, until_epoch=until, now=now)
+    with conn:
+        conn.execute("DELETE FROM push_snoozes WHERE apns_token = ?", (apns_token,))
+        for item in snoozes:
+            scope = str(item.get("scope") or "").strip()
+            if not scope:
+                continue
+            # Plan §8 spells the registration field `until`; the standalone
+            # `POST /v1/push/snooze` body spells it `until_epoch`. Both are
+            # read here so a client using either vocabulary lands in the
+            # same place.
+            raw_until = item.get("until", item.get("until_epoch", 0))
+            try:
+                until = float(raw_until)
+            except (TypeError, ValueError):
+                continue
+            if until > now:
+                # Inlined rather than calling `set_snooze` (which self-commits):
+                # every insert here must land inside this one `with conn:`
+                # transaction, not as its own independently-committed write.
+                conn.execute(
+                    "INSERT INTO push_snoozes (apns_token, scope, until_epoch, created_at) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(apns_token, scope) DO UPDATE SET until_epoch=excluded.until_epoch",
+                    (apns_token, scope, until, now),
+                )
 
 
 # -- Rate limiting (plan §6) -------------------------------------------------
@@ -355,6 +382,7 @@ def record_send(
         "INSERT INTO push_sends (apns_token, situation_id, sent_at) VALUES (?, ?, ?)",
         (apns_token, situation_id, now),
     )
+    conn.commit()
 
 
 def bump_suppressed(conn: sqlite3.Connection, *, apns_token: str, situation_id: str) -> None:
@@ -363,6 +391,7 @@ def bump_suppressed(conn: sqlite3.Connection, *, apns_token: str, situation_id: 
         "ON CONFLICT(apns_token, situation_id) DO UPDATE SET count = count + 1",
         (apns_token, situation_id),
     )
+    conn.commit()
 
 
 def take_suppressed(conn: sqlite3.Connection, *, apns_token: str, situation_id: str) -> int:
@@ -382,6 +411,7 @@ def take_suppressed(conn: sqlite3.Connection, *, apns_token: str, situation_id: 
             "DELETE FROM push_suppressed WHERE apns_token = ? AND situation_id = ?",
             (apns_token, situation_id),
         )
+        conn.commit()
     return count
 
 
@@ -390,6 +420,7 @@ def prune_old_sends(
 ) -> int:
     now = time.time() if now is None else now
     cur = conn.execute("DELETE FROM push_sends WHERE sent_at <= ?", (now - older_than,))
+    conn.commit()
     return cur.rowcount
 
 
@@ -436,6 +467,7 @@ def open_activity(
         (activity_id, apns_token, situation_id, track_id, camera, collapse_id, handle,
          int(from_detection), now, now),
     )
+    conn.commit()
 
 
 def attach_activity_token(
@@ -478,6 +510,7 @@ def attach_activity_token(
         " apns_token=excluded.apns_token, last_seen_at=excluded.last_seen_at",
         (activity_id, apns_token, situation_id, track_id, token, now, now),
     )
+    conn.commit()
 
 
 def find_activity(conn: sqlite3.Connection, *, apns_token: str) -> sqlite3.Row | None:
@@ -546,6 +579,7 @@ def touch_activity(
         return
     args.append(activity_id)
     conn.execute(f"UPDATE push_activities SET {', '.join(sets)} WHERE activity_id = ?", args)
+    conn.commit()
 
 
 def close_activity(
@@ -556,11 +590,17 @@ def close_activity(
         "UPDATE push_activities SET ended_at = ?, stage = 'ending' WHERE activity_id = ?",
         (now, activity_id),
     )
+    conn.commit()
 
 
 def delete_activity(conn: sqlite3.Connection, activity_id: str) -> bool:
-    cur = conn.execute("DELETE FROM push_activities WHERE activity_id = ?", (activity_id,))
-    conn.execute("DELETE FROM push_activity_sends WHERE activity_id = ?", (activity_id,))
+    """Deletes both the activity row and its send-history rows -- two
+    statements that must land together (spec Wave 2B §3): a row deleted
+    without its sends, or vice versa, is a dangling reference either way, so
+    this is wrapped in `with conn:` rather than two independent commits."""
+    with conn:
+        cur = conn.execute("DELETE FROM push_activities WHERE activity_id = ?", (activity_id,))
+        conn.execute("DELETE FROM push_activity_sends WHERE activity_id = ?", (activity_id,))
     return cur.rowcount > 0
 
 
@@ -577,6 +617,7 @@ def dismiss_activity(
         "WHERE activity_id = ? AND ended_at IS NULL",
         (now, activity_id),
     )
+    conn.commit()
     if cur.rowcount > 0:
         return True
     # Idempotent: a second dismiss (or a dismiss racing close_activity) on an
@@ -651,6 +692,7 @@ def record_activity_send(
         "INSERT INTO push_activity_sends (activity_id, sent_at) VALUES (?, ?)",
         (activity_id, now),
     )
+    conn.commit()
 
 
 def redeem_handle(
@@ -676,4 +718,5 @@ def redeem_handle(
 def prune_expired_handles(conn: sqlite3.Connection, *, now: float | None = None) -> int:
     now = time.time() if now is None else now
     cur = conn.execute("DELETE FROM push_handles WHERE expires_at <= ?", (now,))
+    conn.commit()
     return cur.rowcount

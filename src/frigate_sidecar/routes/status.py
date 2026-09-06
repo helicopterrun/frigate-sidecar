@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from frigate_sidecar import __version__, db
+from frigate_sidecar.push.stats import STATS
 
 router = APIRouter(tags=["status"])
 
@@ -227,6 +228,9 @@ async def _gather_status(request: Request) -> dict[str, Any]:
         "proxy_enabled": settings.proxy.enabled,
         "scrub": scrub,
         "push": push,
+        # Wave 2A: relay retry/breaker + MQTT queue counters, same snapshot
+        # GET /v1/stats returns -- one source of truth for the status page.
+        "push_stats": STATS.snapshot(),
         "hardware": hardware,
         "sizes": {
             "sidecar_db": _file_size(settings.sidecar.db_path),
@@ -240,6 +244,26 @@ async def _gather_status(request: Request) -> dict[str, Any]:
 @router.get("/status.json")
 async def status_json(request: Request) -> dict[str, Any]:
     return await _gather_status(request)
+
+
+@router.get("/v1/stats")
+async def v1_stats(request: Request) -> dict[str, Any]:
+    """Push-pipeline counters/gauges (wave 2A): `STATS.snapshot()` plus a
+    couple of derived conveniences a client shouldn't have to compute itself
+    from the raw gauge names. Registered on the same (owned-route) router as
+    every other sidecar page, so it picks up the shared Frigate-session gate
+    (`FrigateAuthMiddleware`) automatically -- no separate auth wiring."""
+    settings = request.app.state.settings
+    snapshot = STATS.snapshot()
+    gauges = snapshot.get("gauges", {})
+    return {
+        **snapshot,
+        "relay": {"breaker_open": bool(gauges.get("relay.breaker.state", 0))},
+        "queue": {
+            "depth": gauges.get("mqtt.queue.depth", 0),
+            "max": settings.push.mqtt_queue_max,
+        },
+    }
 
 
 @router.get("/cameras", response_class=HTMLResponse)
