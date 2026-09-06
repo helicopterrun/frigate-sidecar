@@ -29,6 +29,18 @@
   const nameInput = document.getElementById("tb-name");
   const againBtn = document.getElementById("tb-again");
 
+  // Built lazily since the template has no mount point for it: a submit
+  // error used to be swallowed and the form hidden, so a flaky save looked
+  // like it had gone through. This keeps the form up with the reason.
+  const submitErrorEl = document.createElement("div");
+  submitErrorEl.className = "help warn-note";
+  submitErrorEl.hidden = true;
+  nameForm.insertBefore(submitErrorEl, nameForm.querySelector("button"));
+  function setSubmitError(msg) {
+    submitErrorEl.textContent = msg || "";
+    submitErrorEl.hidden = !msg;
+  }
+
   const paths = {}; // code -> <path>
   const centroids = {}; // code -> {x, y}
 
@@ -370,6 +382,13 @@
 
   function renderBoard(scores) {
     boardEl.innerHTML = "";
+    if (!scores.length) {
+      const li = document.createElement("li");
+      li.style.color = "var(--muted-2)";
+      li.textContent = "No scores yet — be the first!";
+      boardEl.appendChild(li);
+      return;
+    }
     for (const s of scores) {
       const li = document.createElement("li");
       const rank = document.createElement("span");
@@ -393,24 +412,29 @@
       nameInput.focus();
       return;
     }
+    setSubmitError("");
     try {
       const r = await fetch("/toybox/scores", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ game: GAME, name: name, score: score }),
       });
+      if (!r.ok) throw new Error("HTTP " + r.status);
       const data = await r.json();
       if (data.scores) renderBoard(data.scores);
+      nameForm.hidden = true;
+      nameInput.value = "";
     } catch (e) {
-      /* leave the board as-is on failure */
+      // Keep the form up with the score still filled in -- a swallowed
+      // failure used to hide the form and lose the score silently.
+      setSubmitError("Couldn't save your score (" + e.message + ") — try again?");
     }
-    nameForm.hidden = true;
-    nameInput.value = "";
   }
 
   // --- wire up -------------------------------------------------------------
 
   buildMap();
+  if (!boardEl.children.length) renderBoard([]); // server-rendered board was empty
   startBtn.addEventListener("click", startGame);
   againBtn.addEventListener("click", startGame);
   nameForm.addEventListener("submit", submitScore);

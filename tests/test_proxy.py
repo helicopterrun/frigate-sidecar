@@ -6,6 +6,7 @@ Covers docs/scrub-cache-and-proxy-spec.md §6: Range/Authorization forwarding,
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -220,3 +221,50 @@ def test_options_is_proxied(client: TestClient) -> None:
     r = client.options("/api/config")
     assert r.status_code == 204
     assert _StubAsyncClient.last_request["method"] == "OPTIONS"
+
+
+def test_build_request_gets_the_media_stream_timeout(client: TestClient) -> None:
+    """The one request through the shared client that legitimately needs an
+    unbounded read (see frigate_api._DEFAULT_TIMEOUT's now-finite default)."""
+    from frigate_sidecar.routes import proxy as proxy_module
+
+    _StubAsyncClient.next_response = _StubResponse(200, {"content-type": "video/mp4"}, b"x")
+    r = client.get("/vod/doorbell/index.m3u8")
+    assert r.status_code == 200
+    assert _StubAsyncClient.last_request["timeout"] is proxy_module._UPSTREAM_TIMEOUT
+
+
+class _HangingResponse:
+    """A response whose body stalls forever after its first chunk -- what the
+    idle-chunk watchdog in `proxy.stream_body` is meant to catch."""
+
+    status_code = 200
+    headers = httpx.Headers({"content-type": "video/mp4"})
+
+    def __init__(self) -> None:
+        self.aclosed = False
+
+    async def aiter_raw(self) -> Any:
+        yield b"first-chunk"
+        await asyncio.Event().wait()  # never set
+        yield b"unreachable"  # pragma: no cover
+
+    async def aclose(self) -> None:
+        self.aclosed = True
+
+
+def test_idle_chunk_watchdog_ends_a_stalled_stream(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from frigate_sidecar.routes import proxy as proxy_module
+
+    monkeypatch.setattr(proxy_module, "_IDLE_CHUNK_TIMEOUT_S", 0.05)
+    hanging = _HangingResponse()
+    _StubAsyncClient.next_response = hanging  # type: ignore[assignment]
+
+    r = client.get("/vod/doorbell/index.m3u8")
+    assert r.status_code == 200
+    # The stream is cut short at the idle timeout rather than hanging or
+    # raising -- the client sees the bytes that did arrive, and nothing more.
+    assert r.content == b"first-chunk"
+    assert hanging.aclosed is True

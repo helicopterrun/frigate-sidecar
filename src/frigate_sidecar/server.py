@@ -457,6 +457,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 pending.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await pending
+        delivery.cancel_deferred()
         running_subscriber = getattr(app.state, "push_subscriber", None)
         if running_subscriber is not None:
             running_subscriber.stop()

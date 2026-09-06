@@ -32,7 +32,9 @@
     <button type="button" class="secondary" onclick="window.location='/score-histogram'">reset</button>
   </form>
 
-  {% if result.rows %}
+  {% if error %}
+    <div class="empty error">{{ error }}</div>
+  {% elif result.rows %}
   <table class="motion-table">
     <thead><tr>
       <th>camera</th><th>label</th>

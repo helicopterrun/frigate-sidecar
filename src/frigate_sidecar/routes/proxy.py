@@ -59,6 +59,19 @@ _RESP_PASS = (
 
 _WS_SUBPROTOCOL_HEADER = "sec-websocket-protocol"
 
+# This is the one route through the shared client (frigate_api.get_async_client)
+# that legitimately needs an unbounded read: VOD/live media are long-lived
+# streams the user pauses and seeks, so the client's own (now finite) default
+# timeout would cut them off mid-view. Scoped to this one request rather than
+# the shared client's default -- see frigate_api._DEFAULT_TIMEOUT.
+_UPSTREAM_TIMEOUT = httpx.Timeout(30.0, read=None)
+
+# `read=None` above means httpx itself will wait forever on a stalled chunk;
+# this is what actually bounds that -- a chunk that doesn't arrive within this
+# many idle seconds ends the response instead of holding the connection (and
+# the client's wait) open indefinitely.
+_IDLE_CHUNK_TIMEOUT_S = 30.0
+
 
 def _upstream_url(settings: Any, path: str, query: str, *, scheme_ws: bool = False) -> str:
     base = settings.frigate.proxy_base_url.rstrip("/")
@@ -115,7 +128,11 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
     client = get_async_client(request.app)
     try:
         req = client.build_request(
-            request.method, upstream, headers=fwd_headers, content=body or None
+            request.method,
+            upstream,
+            headers=fwd_headers,
+            content=body or None,
+            timeout=_UPSTREAM_TIMEOUT,
         )
         resp = await client.send(req, stream=True)
     except httpx.HTTPError as exc:
@@ -137,7 +154,21 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
             if buffered:
                 yield resp.content
             else:
-                async for chunk in resp.aiter_raw():
+                chunks = resp.aiter_raw()
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(
+                            chunks.__anext__(), timeout=_IDLE_CHUNK_TIMEOUT_S
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "proxy: idle read timeout (%.0fs) streaming %s; ending response",
+                            _IDLE_CHUNK_TIMEOUT_S,
+                            upstream,
+                        )
+                        break
                     yield chunk
         finally:
             await resp.aclose()

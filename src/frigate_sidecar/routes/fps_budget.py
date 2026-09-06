@@ -34,11 +34,15 @@ def fps_budget_view(request: Request) -> Any:
     result: dict[str, Any] | None = None
     error: str | None = None
     util_css = "muted"
+    status_code = 200
     try:
         result = fps_budget.analyze(frigate_base_url=settings.frigate.base_url)
         util_css = _util_css(float(result["utilization_pct"]))
     except FrigateAPIError as exc:
         error = f"Frigate API unreachable: {exc}"
+        # Non-200 so `ttl_page_cache` skips it -- a 200 here stuck a stale
+        # "unreachable" banner in the cache for the full TTL past the outage.
+        status_code = 503
 
     return templates.TemplateResponse(
         request,
@@ -49,4 +53,5 @@ def fps_budget_view(request: Request) -> Any:
             "util_css": util_css,
             "counts": {},
         },
+        status_code=status_code,
     )

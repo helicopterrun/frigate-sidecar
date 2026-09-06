@@ -147,3 +147,48 @@ def test_concurrent_delivery_serializes_la_start(tmp_path: Path) -> None:
     finally:
         conn.close()
     assert row_count == 1
+
+
+def test_maybe_gc_reaps_stale_last_zones(tmp_path: Path) -> None:
+    """`_last_zones` piggybacks on `tracks.reap()` the same way `_sub_labels`
+    already does: an entry whose track has aged out of `self.tracks` is
+    dropped too, so the dict doesn't grow forever for tracks that never send
+    an explicit `end` message."""
+    db_path = tmp_path / "sidecar.db"
+    engine = _make_engine(db_path)
+    key = ("doorbell", "t1")
+
+    now = 1_000_000.0
+    engine.tracks.observe_object("doorbell", "t1", ("yard",), now=now)
+    engine._last_zones[key] = ("yard",)
+    engine._sub_labels[key] = "known_person"
+
+    # Not yet stale: gc_interval hasn't elapsed and the track isn't old
+    # enough to reap.
+    engine._maybe_gc(now)
+    assert key in engine._last_zones
+
+    # Advance past both the gc interval and the track's own reap horizon.
+    later = now + engine.gc_interval_s + engine.tracks.reap_after_s + 1
+    engine._maybe_gc(later)
+    assert key not in engine._last_zones
+    assert key not in engine._sub_labels
+    assert key not in engine.tracks
+
+
+def test_reset_tracks_clears_last_zones(tmp_path: Path) -> None:
+    """A Frigate restart reissues track ids (handoff item 8) -- a stale
+    `_last_zones` entry surviving `reset_tracks` would describe a different
+    object entirely, exactly like the `_sub_labels`/`tracks` case this
+    mirrors."""
+    db_path = tmp_path / "sidecar.db"
+    engine = _make_engine(db_path)
+    engine.tracks.observe_object("doorbell", "t1", ("yard",), now=1.0)
+    engine._last_zones[("doorbell", "t1")] = ("yard",)
+    engine._sub_labels[("doorbell", "t1")] = "known_person"
+
+    engine.reset_tracks()
+
+    assert engine._last_zones == {}
+    assert engine._sub_labels == {}
+    assert len(engine.tracks) == 0

@@ -13,7 +13,7 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from frigate_sidecar import __version__, db
 from frigate_sidecar.push import policy_settings, store
@@ -156,6 +156,17 @@ def _notification_examples() -> list[dict[str, str]]:
             }
         )
     return out
+
+
+@router.get("/zones")
+@router.get("/devices")
+async def _settings_redirect() -> RedirectResponse:
+    """/zones and /devices were absorbed into /settings (see module
+    docstring) -- redirect rather than 404 for anyone with an old link or
+    bookmark. Without a route here, these paths fall through to
+    `proxy_routes`'s catch-all and return Frigate's SPA with HTTP 200.
+    """
+    return RedirectResponse(url="/settings")
 
 
 @router.get("/settings", response_class=HTMLResponse)

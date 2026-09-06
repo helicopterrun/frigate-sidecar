@@ -24,6 +24,40 @@
     if (cls !== undefined) n.className = "stat-value cell-class " + cls;
   }
 
+  // A failed poll used to leave every cell showing stale values with no
+  // indication anything was wrong. This banner (built lazily, since neither
+  // status.html nor cameras.html -- both load this script -- carry a fixed
+  // banner mount point) says so, and clears on the next successful tick.
+  var staleShowBanner = null;
+  var staleBannerNode = null;
+  var lastGoodAt = null;
+
+  function pad2(n) { return n < 10 ? "0" + n : "" + n; }
+  function hhmm(ms) {
+    var d = new Date(ms);
+    return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+
+  function showStaleBanner() {
+    if (!staleShowBanner) {
+      var main = document.getElementById("main-content") || document.body;
+      staleBannerNode = document.createElement("div");
+      staleBannerNode.className = "help page-intro";
+      staleBannerNode.style.display = "none";
+      staleBannerNode.setAttribute("role", "status");
+      main.insertBefore(staleBannerNode, main.firstChild);
+      staleShowBanner = SC.banner(staleBannerNode);
+    }
+    staleShowBanner(
+      "Updating failed — showing values from " + (lastGoodAt ? hhmm(lastGoodAt) : "startup") + ".",
+      true
+    );
+  }
+
+  function clearStaleBanner() {
+    if (staleBannerNode) staleBannerNode.style.display = "none";
+  }
+
   function lagHtml(lag) {
     if (lag === null || lag === undefined) return "—";
     if (lag < 120) return '<span class="cell-class ok">' + Math.round(lag) + "s</span>";
@@ -36,8 +70,11 @@
     try {
       s = await SC.fetchJson("/status.json");
     } catch (e) {
+      showStaleBanner();
       return; // transient — try again next tick
     }
+    lastGoodAt = Date.now();
+    clearStaleBanner();
     setCell("frigate", s.frigate.reachable ? s.frigate.version : "unreachable",
       s.frigate.reachable ? "ok" : "noise");
     setCell("scrub", s.scrub.enabled ? "on" : "off", s.scrub.enabled ? "ok" : "muted");

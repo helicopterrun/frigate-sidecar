@@ -60,10 +60,6 @@ _LAST_RUN = ".last-run.json"
 _TERMINAL = ("captured", "no_recording", "deduped", "skipped")
 
 
-class FaceCaptureError(RuntimeError):
-    """Configuration or precondition failure that makes a run pointless."""
-
-
 @dataclass(frozen=True)
 class Candidate:
     """A trigger event that may deserve a capture."""

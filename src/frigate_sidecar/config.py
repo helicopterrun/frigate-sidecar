@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import logging
 import os
+import types
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Union, get_args, get_origin
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -822,9 +824,52 @@ def _discover_yaml_path(explicit: str | os.PathLike[str] | None) -> Path | None:
     return None
 
 
+def _unwrap_model_type(annotation: Any) -> type[BaseModel] | None:
+    """If `annotation` is (or wraps in `X | None` / `Optional[X]`) a
+    `BaseModel` subclass, return that subclass; otherwise `None`."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    # `X | None` resolves to `types.UnionType` on 3.10+, `Optional[X]` to `typing.Union`.
+    if get_origin(annotation) in (Union, types.UnionType):
+        for arg in get_args(annotation):
+            found = _unwrap_model_type(arg)
+            if found is not None:
+                return found
+    return None
+
+
+def _warn_unknown_keys(data: Any, model: type[BaseModel], *, path: str = "") -> None:
+    """Recursively walk raw YAML `data` against `model`'s fields and log
+    every key with no matching field, at WARNING, with its dotted path.
+
+    `Settings` (and its nested sections) use `extra="ignore"` so a stale or
+    misspelled key in prod's YAML doesn't fail startup -- but silently is too
+    silent: a renamed key (or a typo) then just quietly reverts to the
+    default with no signal anywhere. This is the "someone still gets told"
+    half of that trade-off.
+    """
+    if not isinstance(data, Mapping):
+        return
+    fields = model.model_fields
+    for key, value in data.items():
+        dotted = f"{path}.{key}" if path else str(key)
+        field = fields.get(key)
+        if field is None:
+            logger.warning(
+                "config: unknown key %r -- not part of the sidecar schema "
+                "(typo, or a renamed/removed setting?)",
+                dotted,
+            )
+            continue
+        nested_model = _unwrap_model_type(field.annotation)
+        if nested_model is not None and isinstance(value, Mapping):
+            _warn_unknown_keys(value, nested_model, path=dotted)
+
+
 def load_settings(config_path: str | os.PathLike[str] | None = None) -> Settings:
     yaml_path = _discover_yaml_path(config_path)
     yaml_data = _read_yaml(yaml_path) if yaml_path else {}
+    _warn_unknown_keys(yaml_data, Settings)
 
     class _BoundSettings(Settings):
         @classmethod

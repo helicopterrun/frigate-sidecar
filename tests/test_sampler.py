@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
+import pytest
+
+from frigate_sidecar import db
 from frigate_sidecar.triage import recorder, sampler
 
 
@@ -75,3 +79,71 @@ def test_sample_camera_filter(
         seed=1,
     )
     assert {ev["camera"] for ev in out} == {"alley-overview"}
+
+
+class _FlakyConn:
+    """Wraps a real sqlite3 connection, raising `database is locked` on the
+    first call whose SQL contains `match`, then delegating for real.
+
+    `sqlite3.Connection` is a C type, so its `execute` can't be monkeypatched
+    directly -- the module-level `open_joined` name `sampler.py` imports is
+    swapped for one returning this wrapper instead.
+    """
+
+    def __init__(self, real: sqlite3.Connection, calls: dict[str, int], match: str) -> None:
+        self._real = real
+        self._calls = calls
+        self._match = match
+
+    def execute(self, sql: str, *args: object, **kwargs: object) -> object:
+        if self._match in sql:
+            self._calls["n"] += 1
+            if self._calls["n"] < 2:
+                raise sqlite3.OperationalError("database is locked")
+        return self._real.execute(sql, *args, **kwargs)  # type: ignore[arg-type]
+
+    def close(self) -> None:
+        self._real.close()
+
+
+def test_sample_retries_a_transient_lock_then_succeeds(
+    frigate_db_path: Path, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        sampler,
+        "open_joined",
+        lambda *a, **kw: _FlakyConn(db.open_joined(*a, **kw), calls, "FROM event e"),
+    )
+    monkeypatch.setattr(db.time, "sleep", lambda _s: None)  # no real delay in tests
+
+    out = sampler.sample(
+        frigate_db=frigate_db_path,
+        sidecar_db=sidecar_db_path,
+        api_base_url="http://example.test:5000",
+        days=7,
+        n=10,
+        seed=1,
+    )
+    assert {ev["id"] for ev in out} == {"e1", "e2", "e3", "e4"}
+    assert calls["n"] == 2
+
+
+def test_sample_raises_db_locked_error_when_always_locked(
+    frigate_db_path: Path, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def always_locked(*_a: object, **_kw: object) -> object:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(sampler, "open_joined", always_locked)
+    monkeypatch.setattr(db.time, "sleep", lambda _s: None)
+
+    with pytest.raises(db.DBLockedError):
+        sampler.sample(
+            frigate_db=frigate_db_path,
+            sidecar_db=sidecar_db_path,
+            api_base_url="http://example.test:5000",
+            days=7,
+            n=10,
+            seed=1,
+        )

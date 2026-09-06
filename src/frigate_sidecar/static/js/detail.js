@@ -35,6 +35,10 @@ function setPlusStatus(cls, text) {
   plusStatus.textContent = text || '';
 }
 
+function setActionButtonsDisabled(disabled) {
+  document.querySelectorAll('[data-label], [data-clear]').forEach(b => { b.disabled = disabled; });
+}
+
 async function applyLabel(label) {
   // Instant feedback: light the chosen button before the round-trip.
   document.querySelectorAll('[data-label]').forEach(b => {
@@ -43,11 +47,17 @@ async function applyLabel(label) {
   const note = document.getElementById('note').value;
   const session = sessionInput ? sessionInput.value : '';
   const submitPlus = !!(plusToggle && plusToggle.checked && !plusToggle.disabled);
-  const res = await fetch('/label', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({event_id: eventId, label, note, session, submit_plus: submitPlus})
-  });
+  setActionButtonsDisabled(true);
+  let res;
+  try {
+    res = await fetch('/label', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({event_id: eventId, label, note, session, submit_plus: submitPlus})
+    });
+  } finally {
+    setActionButtonsDisabled(false);
+  }
   if (!res.ok) { SC.toast('Save failed: ' + await res.text(), true); return; }
   const result = await res.json();
   const plus = result.plus || {status: 'not_requested'};
@@ -84,13 +94,22 @@ async function applyLabel(label) {
 }
 
 async function clearLabel() {
-  const res = await fetch('/clear-label', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({event_id: eventId})
-  });
+  setActionButtonsDisabled(true);
+  let res;
+  try {
+    res = await fetch('/clear-label', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({event_id: eventId})
+    });
+  } finally {
+    setActionButtonsDisabled(false);
+  }
   if (!res.ok) { SC.toast('Clear failed: ' + await res.text(), true); return; }
-  window.location.reload();
+  // Same toast treatment as a label: a beat of feedback before the reload,
+  // rather than jumping straight to a blank page.
+  SC.toast('Cleared');
+  setTimeout(() => { window.location.reload(); }, 700);
 }
 
 document.querySelectorAll('[data-label]').forEach(b => {

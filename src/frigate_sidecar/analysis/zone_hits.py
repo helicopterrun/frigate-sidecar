@@ -12,7 +12,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from frigate_sidecar.db import open_joined, parse_event_data, time_window_clause
+from frigate_sidecar.db import (
+    open_joined,
+    parse_event_data,
+    read_with_retry,
+    time_window_clause,
+)
 
 
 def _centroid(box: list[float] | None) -> tuple[float, float]:
@@ -51,20 +56,24 @@ def analyze(
         where += " AND e.camera = ?"
         params.append(camera)
 
-    _probe = open_joined(frigate_db, sidecar_db)
-    try:
-        cols = {row[1] for row in _probe.execute("PRAGMA table_info(event)")}
-    finally:
-        _probe.close()
-    area_col = "e.area" if "area" in cols else "NULL AS area"
-
-    sql = f"""
-        SELECT e.id, e.camera, e.label, e.zones, {area_col}, e.data,
-               t.label AS triage
-          FROM event e
-          LEFT JOIN sidecar.triage_labels t ON t.event_id = e.id
-         WHERE {where}
-    """
+    def _fetch_rows() -> list[Any]:
+        # A full read from scratch (column probe + main query, one
+        # connection) so a `database is locked` retry gets a fresh
+        # connection rather than reusing one that just failed.
+        conn = open_joined(frigate_db, sidecar_db, sidecar_alias="sidecar")
+        try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(event)")}
+            area_col = "e.area" if "area" in cols else "NULL AS area"
+            sql = f"""
+                SELECT e.id, e.camera, e.label, e.zones, {area_col}, e.data,
+                       t.label AS triage
+                  FROM event e
+                  LEFT JOIN sidecar.triage_labels t ON t.event_id = e.id
+                 WHERE {where}
+            """
+            return conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
 
     zone_hits: dict[str, dict[str, dict[str, int]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(int))
@@ -74,29 +83,25 @@ def analyze(
     )
     cam_label_events: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
 
-    conn = open_joined(frigate_db, sidecar_db, sidecar_alias="sidecar")
-    try:
-        for row in conn.execute(sql, params):
-            ev = parse_event_data(row)
-            try:
-                zones = json.loads(ev["zones"]) if ev.get("zones") else []
-            except (TypeError, json.JSONDecodeError):
-                zones = []
-            cam, lbl, triage = ev["camera"], ev["label"], row["triage"]
-            if not zones:
-                zone_hits[cam]["__none__"][lbl] += 1
+    for row in read_with_retry(_fetch_rows):
+        ev = parse_event_data(row)
+        try:
+            zones = json.loads(ev["zones"]) if ev.get("zones") else []
+        except (TypeError, json.JSONDecodeError):
+            zones = []
+        cam, lbl, triage = ev["camera"], ev["label"], row["triage"]
+        if not zones:
+            zone_hits[cam]["__none__"][lbl] += 1
+            if triage == "fp":
+                zone_fps[cam]["__none__"][lbl] += 1
+        else:
+            for z in zones:
+                zone_hits[cam][z][lbl] += 1
                 if triage == "fp":
-                    zone_fps[cam]["__none__"][lbl] += 1
-            else:
-                for z in zones:
-                    zone_hits[cam][z][lbl] += 1
-                    if triage == "fp":
-                        zone_fps[cam][z][lbl] += 1
-            cam_label_events[(cam, lbl)].append(
-                {"id": ev["id"], "box": ev["data_box"], "zones": zones, "triage": triage}
-            )
-    finally:
-        conn.close()
+                    zone_fps[cam][z][lbl] += 1
+        cam_label_events[(cam, lbl)].append(
+            {"id": ev["id"], "box": ev["data_box"], "zones": zones, "triage": triage}
+        )
 
     hits_rows: list[dict[str, Any]] = []
     for cam in sorted(zone_hits.keys()):

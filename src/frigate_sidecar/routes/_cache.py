@@ -37,7 +37,11 @@ def ttl_page_cache(seconds: float = 60.0) -> Callable[[_PageHandler], _PageHandl
                 return HTMLResponse(hit[1])
             response = fn(*args, request=request, **kwargs)
             # TemplateResponse renders its body at construction; only cache
-            # successes so an error page doesn't stick for the TTL.
+            # successes so an error page doesn't stick for the TTL. This
+            # holds only because every decorated handler marks its own error
+            # render non-200 (503 when Frigate/the DB is unreachable, 400 on
+            # a bad query param) -- a handler that renders an error banner
+            # but leaves the default 200 status would still get cached here.
             if getattr(response, "status_code", None) == 200:
                 cache[key] = (now, bytes(response.body))
                 cache.move_to_end(key)

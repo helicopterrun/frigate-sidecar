@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -125,7 +125,10 @@ def _resolve(settings: Settings, capture_id: int, column: str) -> Path:
 
 @router.get("/faces/captures", response_class=HTMLResponse)
 def captures_view(
-    request: Request, days: float = 7.0, review: str = "pending", limit: int = 200
+    request: Request,
+    days: float = Query(7.0, ge=1, le=365),
+    review: str = "pending",
+    limit: int = Query(200, ge=1, le=500),
 ) -> Any:
     s = _settings(request)
     if review not in (*_REVIEWS, "all"):
@@ -148,7 +151,10 @@ def captures_view(
 
 @router.get("/faces/captures.json")
 def captures_json(
-    request: Request, days: float = 7.0, review: str = "pending", limit: int = 200
+    request: Request,
+    days: float = Query(7.0, ge=1, le=365),
+    review: str = "pending",
+    limit: int = Query(200, ge=1, le=500),
 ) -> JSONResponse:
     s = _settings(request)
     if review not in (*_REVIEWS, "all"):

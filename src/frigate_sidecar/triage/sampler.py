@@ -18,7 +18,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from frigate_sidecar.db import open_joined, parse_event_data, time_window_clause
+from frigate_sidecar.db import (
+    open_joined,
+    parse_event_data,
+    read_with_retry,
+    time_window_clause,
+)
 
 
 @dataclass(frozen=True)
@@ -91,56 +96,61 @@ def sample(
         where += " AND e.label = ?"
         params.append(label)
 
-    conn = open_joined(frigate_db, sidecar_db, sidecar_alias="sidecar")
-    area_col, ratio_col = _select_optional_columns(conn)
-    sql = f"""
-        SELECT e.id, e.camera, e.label, e.start_time, e.end_time,
-               e.score, e.top_score, {area_col}, {ratio_col}, e.zones,
-               e.has_clip, e.has_snapshot, e.data
-          FROM event e
-          LEFT JOIN sidecar.triage_labels t ON t.event_id = e.id
-         WHERE {where}
-           AND t.event_id IS NULL
-           AND e.has_snapshot = 1
-    """
+    def _fetch_rows() -> list[Any]:
+        # A full read from scratch (column probe + main query, one
+        # connection) so a `database is locked` retry gets a fresh
+        # connection rather than reusing one that just failed.
+        conn = open_joined(frigate_db, sidecar_db, sidecar_alias="sidecar")
+        try:
+            area_col, ratio_col = _select_optional_columns(conn)
+            sql = f"""
+                SELECT e.id, e.camera, e.label, e.start_time, e.end_time,
+                       e.score, e.top_score, {area_col}, {ratio_col}, e.zones,
+                       e.has_clip, e.has_snapshot, e.data
+                  FROM event e
+                  LEFT JOIN sidecar.triage_labels t ON t.event_id = e.id
+                 WHERE {where}
+                   AND t.event_id IS NULL
+                   AND e.has_snapshot = 1
+            """
+            return conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
 
     bands: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
-    try:
-        for row in conn.execute(sql, params):
-            ev = parse_event_data(row)
-            top = ev["data_top_score"] if ev["data_top_score"] is not None else ev["top_score"]
-            score = ev["data_score"] if ev["data_score"] is not None else ev["score"]
-            if top is None:
-                continue
-            dtype = ev.get("data_type")
-            # `data_type` is None on older events; skip rows where it is set
-            # to something other than "object".
-            if dtype is not None and dtype != "object":
-                continue
-            try:
-                zones = json.loads(ev["zones"]) if ev.get("zones") else []
-            except (TypeError, json.JSONDecodeError):
-                zones = []
-            band = score_band(float(top))
-            bands[(ev["camera"], ev["label"], band)].append(
-                {
-                    "id": ev["id"],
-                    "camera": ev["camera"],
-                    "label": ev["label"],
-                    "start_time": ev["start_time"],
-                    "end_time": ev["end_time"],
-                    "duration": (ev["end_time"] or ev["start_time"]) - ev["start_time"],
-                    "score": score,
-                    "top_score": top,
-                    "area": ev["area"],
-                    "ratio": ev["ratio"],
-                    "zones": zones,
-                    "has_clip": bool(ev["has_clip"]),
-                    "score_band": band,
-                }
-            )
-    finally:
-        conn.close()
+    for row in read_with_retry(_fetch_rows):
+        ev = parse_event_data(row)
+        top = ev["data_top_score"] if ev["data_top_score"] is not None else ev["top_score"]
+        score = ev["data_score"] if ev["data_score"] is not None else ev["score"]
+        if top is None:
+            continue
+        dtype = ev.get("data_type")
+        # `data_type` is None on older events; skip rows where it is set
+        # to something other than "object".
+        if dtype is not None and dtype != "object":
+            continue
+        try:
+            zones = json.loads(ev["zones"]) if ev.get("zones") else []
+        except (TypeError, json.JSONDecodeError):
+            zones = []
+        band = score_band(float(top))
+        bands[(ev["camera"], ev["label"], band)].append(
+            {
+                "id": ev["id"],
+                "camera": ev["camera"],
+                "label": ev["label"],
+                "start_time": ev["start_time"],
+                "end_time": ev["end_time"],
+                "duration": (ev["end_time"] or ev["start_time"]) - ev["start_time"],
+                "score": score,
+                "top_score": top,
+                "area": ev["area"],
+                "ratio": ev["ratio"],
+                "zones": zones,
+                "has_clip": bool(ev["has_clip"]),
+                "score_band": band,
+            }
+        )
 
     quotas = SampleQuota.for_n(n)
     by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)

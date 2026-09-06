@@ -23,6 +23,15 @@
         <small>Review one at a time</small></a>
       {% endif %}
     </div>
+    {% if filters.q %}
+    <div class="triage-progress">
+      <span class="nb-chip on">
+        “{{ filters.q }}”
+        <a href="/triage?{{ {'camera': filters.camera, 'label': filters.label, 'triage': filters.triage, 'days': filters.days, 'limit': filters.limit, 'order': filters.order} | urlencode }}"
+           aria-label="Clear search" title="Clear search">&times;</a>
+      </span>
+    </div>
+    {% endif %}
   </div>
 
   <details class="filters-wrap" open>
@@ -61,6 +70,9 @@
       </select>
     </label>
     <label>session <input id="session" type="text" placeholder="2026-05-09a" size="12"></label>
+    {# Carries the header search box's q= through a filter-form submit so
+       changing camera/label/etc. doesn't silently drop an active search. #}
+    <input type="hidden" name="q" value="{{ filters.q }}">
     <button type="submit">apply</button>
     <button type="button" class="secondary" onclick="window.location='/triage'">reset</button>
   </form>

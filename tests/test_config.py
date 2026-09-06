@@ -46,3 +46,62 @@ def test_env_overrides_yaml(
 def test_settings_constructible_directly() -> None:
     s = Settings()
     assert s.sidecar.bind_port == 5001
+
+
+def test_unknown_top_level_key_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`extra="ignore"` keeps a stale/renamed top-level key from failing
+    startup, but it must still be logged so it isn't silently dropped."""
+    cfg = tmp_path / "sidecar.yml"
+    cfg.write_text("nonexistent_top_level_key: 1\n")
+    with caplog.at_level("WARNING", logger="frigate_sidecar.config"):
+        load_settings(config_path=cfg)
+    assert any(
+        "nonexistent_top_level_key" in r.message for r in caplog.records
+    )
+
+
+def test_unknown_nested_key_warns_with_dotted_path(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A typo'd/renamed key nested under a section is walked recursively and
+    reported with its dotted path (e.g. `push.nonexistent_nested_key`), not
+    just flagged at the top level."""
+    cfg = tmp_path / "sidecar.yml"
+    cfg.write_text(
+        """
+push:
+  enabled: true
+  nonexistent_nested_key: 5
+"""
+    )
+    with caplog.at_level("WARNING", logger="frigate_sidecar.config"):
+        s = load_settings(config_path=cfg)
+    assert s.push.enabled is True  # extra="ignore" -- still loads fine
+    assert any(
+        "push.nonexistent_nested_key" in r.message for r in caplog.records
+    )
+
+
+def test_known_keys_produce_no_warnings(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    cfg = tmp_path / "sidecar.yml"
+    cfg.write_text(
+        """
+frigate:
+  base_url: http://example.test:5000
+sidecar:
+  bind_port: 9999
+push:
+  enabled: true
+log_level: DEBUG
+"""
+    )
+    with caplog.at_level("WARNING", logger="frigate_sidecar.config"):
+        load_settings(config_path=cfg)
+    unknown_key_warnings = [
+        r.message for r in caplog.records if "unknown key" in r.message
+    ]
+    assert unknown_key_warnings == []

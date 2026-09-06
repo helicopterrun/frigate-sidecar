@@ -152,6 +152,7 @@ class PushEngine:
             logger.info("push: clearing %d track(s) after mqtt reconnect", len(self.tracks))
         self.tracks.clear()
         self._sub_labels.clear()
+        self._last_zones.clear()
 
     async def handle_object_payload(self, payload: dict[str, Any]) -> int:
         """Process one `frigate/events` message — track observation and
@@ -441,21 +442,6 @@ class PushEngine:
 
     # -- shared bookkeeping --------------------------------------------------
 
-    def _account(self, device: Device, result: TransportResult, to_prune: list[str]) -> int:
-        if result.ok:
-            return 1
-        if result.unregistered:
-            # 410 Unregistered / 400 BadDeviceToken (spec §5) -- permanent,
-            # prune immediately rather than waiting for a retry to fail
-            # again.
-            to_prune.append(device.apns_token)
-            logger.info("push: pruning device %s (%s)", device.device_id, result.error)
-        else:
-            logger.warning(
-                "push: send failed for device %s: %s", device.device_id, result.error
-            )
-        return 0
-
     def _prune(self, tokens: list[str]) -> None:
         """Drop permanently-dead device rows (410/400, spec §5)."""
         conn = self._conn()
@@ -479,6 +465,8 @@ class PushEngine:
         reaped = self.tracks.reap(now=now)
         for key in [k for k in self._sub_labels if k not in self.tracks]:
             del self._sub_labels[key]
+        for key in [k for k in self._last_zones if k not in self.tracks]:
+            del self._last_zones[key]
         conn = self._conn()
         try:
             handles = store.prune_expired_handles(conn, now=now)

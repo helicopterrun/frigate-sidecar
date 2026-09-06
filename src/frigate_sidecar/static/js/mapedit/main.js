@@ -1,4 +1,4 @@
-// Bootstrap for the CAD-style /cameras map editor.
+// Bootstrap for the CAD-style /map editor.
 
 import { Store } from "./state.js";
 import { MapView } from "./view.js";

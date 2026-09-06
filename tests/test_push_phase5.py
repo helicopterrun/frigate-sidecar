@@ -500,6 +500,87 @@ async def test_non_covered_device_resolve_row_is_immediate(sidecar_db_path: Path
     assert len(situation_sends(transport)) == 1
 
 
+@pytest.mark.asyncio
+async def test_deferred_resolve_exception_is_logged_not_lost(
+    sidecar_db_path: Path, monkeypatch, caplog,
+):
+    """A failure inside the deferred `_later()` task (e.g. the transport
+    raising) must be caught and logged with the event's identity, not left
+    to surface only as asyncio's "Task exception was never retrieved"."""
+    import asyncio
+    import logging
+
+    from frigate_sidecar.push import delivery
+    from frigate_sidecar.push.cards import RESOLVE, Card
+
+    monkeypatch.setattr(delivery, "RESOLVE_DEFER_S", 0.0)
+
+    class BoomTransport(LogTransport):
+        async def send_situation(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = BoomTransport()
+    device = make_device()
+    card = Card(
+        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        created_at=1.0, updated_at=9.0, state_since_at=1.0,
+        resolved=True, closed=True,
+    )
+    payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+
+    with caplog.at_level(logging.ERROR, logger="frigate_sidecar.push.delivery"):
+        await send_card_mutation(
+            conn, transport, [device], card, RESOLVE, payload,
+            subject_kind="person", camera="doorbell", now=10.0,
+            demote_tokens={"tok1"}, suppress_demoted=True,
+        )
+        assert delivery._DEFERRED_TASKS, "deferred task should be scheduled"
+        # Let the deferred task raise, settle, and its done-callback fire.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert not delivery._DEFERRED_TASKS, "failed task must still be removed from the set"
+    assert any("deferred resolve failed" in r.message for r in caplog.records)
+    assert any("doorbell:person:trk1" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_cancel_deferred_cancels_pending_tasks(sidecar_db_path: Path, monkeypatch):
+    """`cancel_deferred()` (called from the lifespan shutdown) must not leave
+    a deferred resolve running past process teardown."""
+    import asyncio
+
+    from frigate_sidecar.push import delivery
+    from frigate_sidecar.push.cards import RESOLVE, Card
+
+    monkeypatch.setattr(delivery, "RESOLVE_DEFER_S", 10.0)
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    card = Card(
+        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        created_at=1.0, updated_at=9.0, state_since_at=1.0,
+        resolved=True, closed=True,
+    )
+    payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+
+    await send_card_mutation(
+        conn, transport, [device], card, RESOLVE, payload,
+        subject_kind="person", camera="doorbell", now=10.0,
+        demote_tokens={"tok1"}, suppress_demoted=True,
+    )
+    assert len(delivery._DEFERRED_TASKS) == 1
+
+    delivery.cancel_deferred()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert not delivery._DEFERRED_TASKS
+    assert situation_sends(transport) == []
+
+
 # ---------------------------------------------------------------------------
 # Ephemeral resolve flag (event-lifetime notifications)
 # ---------------------------------------------------------------------------

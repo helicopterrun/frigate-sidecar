@@ -330,9 +330,7 @@ CREATE TABLE IF NOT EXISTS push_card_track_aliases (
 --
 -- Keyed on its own autoincrement id, NOT on a filename: every file this feature
 -- serves is addressed by row id, so no client-supplied string ever reaches the
--- filesystem. (the retired B1 curation routes took a filename because those files were
--- Frigate's and are in no table of ours; these are, so the traversal class is
--- removed rather than guarded.)
+-- filesystem -- the traversal class is removed rather than guarded.
 --
 -- UNIQUE(trigger_event_id, offset_ms) is what makes the capture job idempotent:
 -- a re-run over an overlapping lookback window is a no-op, not a duplicate grab.
@@ -594,6 +592,49 @@ def open_joined(
     # `main` doesn't propagate to the attached DB.
     conn.execute(f"ATTACH DATABASE ? AS {sidecar_alias}", (str(sp),))
     return conn
+
+
+class DBLockedError(RuntimeError):
+    """`database is locked` outlasted every retry in `read_with_retry`.
+
+    Frigate itself writes frigate.db continuously; `busy_timeout = 3000` on
+    the connection (`open_frigate_ro`/`open_sidecar`) already makes SQLite's
+    own busy handler wait out the common case before `OperationalError` ever
+    reaches Python. This is for the rarer case where a writer holds the lock
+    past that -- a big transaction, a WAL checkpoint -- so a transient stall
+    gets a couple of short retries instead of failing the request outright,
+    and a genuinely stuck lock (or a corrupt DB) still fails fast rather than
+    retrying forever.
+    """
+
+
+def read_with_retry(
+    fn: Callable[[], T], *, attempts: int = 3, backoff: float = 0.3
+) -> T:
+    """Call `fn` (a full read: open connection, query, fetch, close), retrying
+    briefly if it raises `sqlite3.OperationalError` for `database is locked` /
+    `database table is locked`.
+
+    `fn` re-runs from scratch on each attempt -- it must open its own
+    connection (never reuse one from a failed attempt) so a retry actually
+    gets a fresh shot at the lock rather than replaying the same doomed
+    connection. Any other `sqlite3.OperationalError` (a real schema/SQL
+    problem) is not a locking issue and is re-raised immediately, unretried.
+    Exhausting `attempts` raises `DBLockedError` instead of the raw
+    `OperationalError`, so callers can map it to a typed response.
+    """
+    last: sqlite3.OperationalError | None = None
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            last = exc
+            if attempt < attempts - 1:
+                time.sleep(backoff * (attempt + 1))
+    assert last is not None  # attempts >= 1 guarantees at least one iteration
+    raise DBLockedError(str(last)) from last
 
 
 # Publish lag: how far behind wall-clock a segment's end_time typically is once
