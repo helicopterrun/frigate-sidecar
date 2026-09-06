@@ -195,6 +195,13 @@ def test_build_content_state_field_names_are_snake_case_and_exact():
     assert state["deep_link_card_key"] == "doorbell:stranger:1786235300-aywxqj"
 
 
+def test_build_content_state_story_started_ts_is_additive():
+    assert "story_started_ts" not in _content_state()
+    state = _content_state(story_started_ts=1786235300.5, state_since_ts=1786235340.0)
+    assert state["story_started_ts"] == 1786235300.5
+    assert state["state_since_ts"] == 1786235340.0
+
+
 def test_build_la_start_payload_shape():
     state = _content_state()
     payload = la.build_la_start_payload(

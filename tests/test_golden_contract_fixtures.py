@@ -133,6 +133,7 @@ def _content_state_full() -> dict[str, Any]:
         thumbnail_handle=HANDLE,
         thumbnail_revision=2,
         state_since_ts=SENT_AT - 42.0,
+        story_started_ts=SENT_AT - 300.0,
         # Shapes as _build_motion / the zones-ladder builder in
         # delivery_wire.py actually emit them — the app's ContentState
         # requires motion.heading and zones.ladder/current_index.
