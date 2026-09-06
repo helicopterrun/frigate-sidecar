@@ -22,15 +22,56 @@ here against a mock relay in tests, never against real Apple infrastructure.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
 
 from frigate_sidecar.push.models import Device
+from frigate_sidecar.push.stats import STATS
 
 logger = logging.getLogger(__name__)
+
+# -- Retry backoff (RelayTransport, wave 2A) ----------------------------------
+_BACKOFF_BASE_S = 0.5
+_BACKOFF_MULT = 3.0
+_BACKOFF_JITTER = 0.3  # +/- 30%
+_RETRY_AFTER_CAP_S = 5.0
+
+
+def compute_retry_delay(attempt: int, retry_after: float | None = None) -> float:
+    """Delay before the *next* attempt.
+
+    `attempt` is 0-indexed by retry number (0 = the delay before the first
+    retry, i.e. after the 1st attempt failed; 1 = before the 2nd retry; ...),
+    giving 0.5, 1.5, 4.5... seconds before jitter. `retry_after`, when given
+    (a 429 response's numeric `Retry-After` header), overrides the exponential
+    schedule entirely and is capped at 5s so a large value from the relay
+    can't stall a bounded retry loop.
+
+    Exposed at module level (rather than buried in the retry loop) so tests
+    can pin it and so `asyncio.sleep` can be patched around a deterministic
+    delay value.
+    """
+    if retry_after is not None:
+        return min(retry_after, _RETRY_AFTER_CAP_S)
+    base = _BACKOFF_BASE_S * (_BACKOFF_MULT**attempt)
+    jitter = random.uniform(1 - _BACKOFF_JITTER, 1 + _BACKOFF_JITTER)
+    return base * jitter
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def _exc_error(exc: BaseException) -> str:
@@ -264,8 +305,12 @@ class RelayTransport:
         base_url: str,
         *,
         client: httpx.AsyncClient | None = None,
-        timeout: float = 10.0,
+        timeout: float = 5.0,
         relay_key: str = "",
+        retry_attempts: int = 3,
+        breaker_failures: int = 3,
+        breaker_open_s: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._client = client or self._build_client(timeout)
@@ -273,6 +318,18 @@ class RelayTransport:
         self._relay_key = relay_key
         if not relay_key:
             logger.warning("push: relay_key not set — relay requests will be unauthenticated")
+
+        # -- Retry + circuit breaker (wave 2A) --
+        self._retry_attempts = retry_attempts
+        self._breaker_failures = breaker_failures
+        self._breaker_open_s = breaker_open_s
+        self._clock = clock
+        # A "failure" here is a transport exception or 5xx at the *attempt*
+        # level (429/other 4xx never count -- they mean the relay was
+        # reached and answered). Any response <500 resets this to 0.
+        self._consecutive_failures = 0
+        # Epoch (per `clock`) the breaker re-closes at; 0 means closed.
+        self._open_until = 0.0
 
     @classmethod
     def _build_client(cls, timeout: float) -> httpx.AsyncClient:
@@ -324,12 +381,7 @@ class RelayTransport:
             "apns-collapse-id": collapse_id,
         }
         url = f"{self.base_url}/v1/relay/push"
-        try:
-            resp = await self._client.post(url, json=payload, headers=self._headers())
-        except httpx.HTTPError as exc:
-            return TransportResult(ok=False, error=_exc_error(exc))
-
-        return self._result(resp)
+        return await self._send_with_retry(url, payload, kind="push", log_key=collapse_id)
 
     async def send_situation(
         self, device: Device, *, payload: dict[str, Any], collapse_id: str,
@@ -347,11 +399,7 @@ class RelayTransport:
         if apns_expiration is not None:
             body["apns_expiration"] = apns_expiration
         url = f"{self.base_url}/v1/relay/situation"
-        try:
-            resp = await self._client.post(url, json=body, headers=self._headers())
-        except httpx.HTTPError as exc:
-            return TransportResult(ok=False, error=_exc_error(exc))
-        return self._result(resp)
+        return await self._send_with_retry(url, body, kind="situation", log_key=collapse_id)
 
     async def send_live_activity(
         self, device: Device, *, token: str, payload: dict[str, Any],
@@ -373,11 +421,9 @@ class RelayTransport:
         if apns_expiration is not None:
             body["apns_expiration"] = apns_expiration
         url = f"{self.base_url}/v1/relay/liveactivity"
-        try:
-            resp = await self._client.post(url, json=body, headers=self._headers())
-        except httpx.HTTPError as exc:
-            return TransportResult(ok=False, error=_exc_error(exc))
-        return self._result(resp)
+        return await self._send_with_retry(
+            url, body, kind="liveactivity", event=event, log_key=collapse_id
+        )
 
     async def send_test(self, device: Device) -> TransportResult:
         """POST the test push to the relay's `/v1/relay/test`.
@@ -397,35 +443,194 @@ class RelayTransport:
             "environment": self._environment(device),
         }
         url = f"{self.base_url}/v1/relay/test"
-        try:
-            resp = await self._client.post(url, json=payload, headers=self._headers())
-        except httpx.HTTPError as exc:
-            return TransportResult(ok=False, error=_exc_error(exc))
-        return self._result(resp)
+        return await self._send_with_retry(
+            url, payload, kind="test", log_key=device.device_id
+        )
 
-    @staticmethod
-    def _result(resp: httpx.Response) -> TransportResult:
-        if resp.status_code == 200:
-            return TransportResult(ok=True)
-        if resp.status_code in (410, 400):
-            # 410 Unregistered / 400 BadDeviceToken (spec §5): permanent,
-            # never retried -- the caller deletes the device row.
+    # -- Retry + circuit breaker (wave 2A) ------------------------------------
+
+    def _max_attempts(self, kind: str, event: str | None) -> int:
+        """Attempts for one *logical* send, before the circuit breaker's own
+        half-open override (which always forces exactly 1)."""
+        if kind == "liveactivity":
+            # A late retried `update` can arrive after the `end` that
+            # superseded it -- the next frame already supersedes a stale one,
+            # so there is nothing a retry buys here. `start`/`end` behave
+            # like `push`.
+            return 1 if event == "update" else self._retry_attempts
+        if kind == "push":
+            return self._retry_attempts
+        # situation, test: one attempt, no supersession semantics to lean on.
+        return 1
+
+    def _breaker_skip(self) -> TransportResult | None:
+        """`TransportResult` to return immediately (no HTTP attempt) if the
+        breaker is open, else `None` to proceed (possibly as a half-open
+        probe)."""
+        now = self._clock()
+        if self._open_until and now < self._open_until:
+            logger.debug("push: relay breaker open, skipping send without an HTTP attempt")
+            STATS.incr("relay.breaker.skipped")
+            STATS.incr("relay.send.failed")
+            return TransportResult(ok=False, error="breaker open")
+        return None
+
+    def _breaker_is_open(self) -> bool:
+        """True while the breaker is open. Checked after each failed attempt
+        so a send whose own failures just tripped the breaker stops retrying
+        -- the remaining attempts would only pile onto a relay we've just
+        declared down."""
+        return bool(self._open_until) and self._clock() < self._open_until
+
+    def _is_half_open_probe(self) -> bool:
+        now = self._clock()
+        return bool(self._open_until) and now >= self._open_until
+
+    def _record_breaker_outcome(self, *, failed: bool) -> None:
+        """Update breaker state from one HTTP attempt's outcome.
+
+        `failed` = transport exception or 5xx; any other outcome (200,
+        4xx including 429) counts as a success for the breaker's purposes --
+        the relay was reached and answered, whatever it said.
+        """
+        was_open = bool(self._open_until)
+        if not failed:
+            self._consecutive_failures = 0
+            if was_open:
+                self._open_until = 0.0
+                STATS.gauge("relay.breaker.state", 0)
+                STATS.gauge("relay.breaker.open_until", 0)
+                logger.info("relay breaker closed")
+            return
+
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._breaker_failures:
+            now = self._clock()
+            self._open_until = now + self._breaker_open_s
+            STATS.incr("relay.breaker.open")
+            STATS.gauge("relay.breaker.state", 1)
+            # Wall-clock epoch, for humans reading the status page -- `now`
+            # and `_open_until` above are on the injected monotonic clock.
+            STATS.gauge("relay.breaker.open_until", time.time() + self._breaker_open_s)
             logger.warning(
-                "push: relay %s body: %s", resp.status_code, resp.text[:500],
+                "relay breaker open for %.0fs after %d consecutive failures",
+                self._breaker_open_s, self._consecutive_failures,
             )
+
+    async def _send_with_retry(
+        self,
+        url: str,
+        body: dict[str, Any],
+        *,
+        kind: str,
+        event: str | None = None,
+        log_key: str = "",
+    ) -> TransportResult:
+        skip = self._breaker_skip()
+        if skip is not None:
+            return skip
+
+        probe = self._is_half_open_probe()
+        max_attempts = 1 if probe else self._max_attempts(kind, event)
+        headers = self._headers()
+        label = kind if event is None else f"{kind} {event}"
+
+        last_error = "unknown error"
+        retry_after: float | None = None
+        for attempt in range(max_attempts):
+            STATS.incr(f"relay.send.{kind}.attempts")
+            if attempt > 0:
+                STATS.incr("relay.retry")
+                delay = compute_retry_delay(attempt - 1, retry_after)
+                retry_after = None
+                await asyncio.sleep(delay)
+
+            try:
+                resp = await self._client.post(url, json=body, headers=headers)
+            except httpx.HTTPError as exc:
+                self._record_breaker_outcome(failed=True)
+                last_error = _exc_error(exc)
+                logger.debug(
+                    "push: relay %s attempt %d/%d transport error: %s",
+                    label, attempt + 1, max_attempts, last_error,
+                )
+                if self._breaker_is_open():
+                    break
+                continue
+
+            if resp.status_code == 200:
+                self._record_breaker_outcome(failed=False)
+                STATS.incr("relay.send.ok")
+                return TransportResult(ok=True)
+
+            if resp.status_code in (410, 400):
+                # 410 Unregistered / 400 BadDeviceToken (spec §5): permanent,
+                # never retried -- the caller deletes the device row.
+                self._record_breaker_outcome(failed=False)
+                logger.warning("push: relay %s body: %s", resp.status_code, resp.text[:500])
+                STATS.incr("relay.send.unregistered")
+                return TransportResult(
+                    ok=False, unregistered=True, error=f"HTTP {resp.status_code}",
+                    status_code=resp.status_code,
+                )
+
+            if resp.status_code == 422:
+                # Relay rejected the payload shape -- never reached Apple.
+                self._record_breaker_outcome(failed=False)
+                logger.warning(
+                    "push: relay %s (rejected payload) body: %s",
+                    resp.status_code, resp.text[:500],
+                )
+                STATS.incr("relay.send.rejected")
+                return TransportResult(
+                    ok=False, error=f"HTTP 422: {resp.text[:200]}", status_code=422,
+                )
+
+            if resp.status_code == 429:
+                # Per-token rate limit -- never reached Apple, which otherwise
+                # looks identical to a delivered-but-throttled LA update.
+                self._record_breaker_outcome(failed=False)
+                retry_after = _parse_retry_after(resp.headers.get("retry-after"))
+                if attempt == max_attempts - 1:
+                    logger.warning(
+                        "push: relay %s (rate limited) body: %s",
+                        resp.status_code, resp.text[:500],
+                    )
+                    STATS.incr("relay.send.rejected")
+                    return TransportResult(
+                        ok=False, error=f"HTTP 429: {resp.text[:200]}", status_code=429,
+                    )
+                last_error = f"HTTP 429: {resp.text[:200]}"
+                logger.debug(
+                    "push: relay %s attempt %d/%d got 429, retrying",
+                    label, attempt + 1, max_attempts,
+                )
+                continue
+
+            if resp.status_code >= 500:
+                self._record_breaker_outcome(failed=True)
+                last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                logger.debug(
+                    "push: relay %s attempt %d/%d got %s",
+                    label, attempt + 1, max_attempts, resp.status_code,
+                )
+                if self._breaker_is_open():
+                    break
+                continue
+
+            # Any other 4xx: terminal, never retried.
+            self._record_breaker_outcome(failed=False)
+            STATS.incr("relay.send.failed")
             return TransportResult(
-                ok=False, unregistered=True, error=f"HTTP {resp.status_code}",
+                ok=False, error=f"HTTP {resp.status_code}: {resp.text[:200]}",
                 status_code=resp.status_code,
             )
-        if resp.status_code in (422, 429):
-            # 422: relay rejected the payload shape; 429: per-token rate
-            # limit (60/rolling hour) — both mean the push never reached
-            # Apple, which otherwise looks identical to a delivered-but-
-            # throttled LA update. Make them loud.
-            logger.warning(
-                "push: relay %s (%s) body: %s",
-                resp.status_code,
-                "rate limited" if resp.status_code == 429 else "rejected payload",
-                resp.text[:500],
-            )
-        return TransportResult(ok=False, error=f"HTTP {resp.status_code}: {resp.text[:200]}")
+
+        # Retries exhausted, the breaker tripped mid-send, or the half-open
+        # probe itself failed.
+        STATS.incr("relay.send.failed")
+        logger.warning(
+            "push: relay %s send failed key=%s attempts=%d last_error=%s",
+            label, log_key, attempt + 1, last_error,
+        )
+        return TransportResult(ok=False, error=last_error)

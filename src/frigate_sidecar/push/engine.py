@@ -41,6 +41,7 @@ from frigate_sidecar.push.situations import (
     Situation,
     TrackStore,
 )
+from frigate_sidecar.push.stats import STATS
 from frigate_sidecar.push.thumbnails import fetch_thumbnail
 from frigate_sidecar.push.transport import PushTransport, TransportResult
 
@@ -123,9 +124,24 @@ class PushEngine:
     #: 2026-09-02): ~25 push-to-start sends for one story instead of one,
     #: and the card's own resolve dying in the pile-up, leaking it open.
     #: NOT held inside `_end_activity` -- it's called from within
-    #: `sweep_activities` (already holding it) and from `delivery_wire` with
-    #: `engine=self`, so acquiring there would deadlock.
+    #: `sweep_activities` (only across that method's read and close phases;
+    #: see `_ending` below) and from `delivery_wire` with `engine=self`, so
+    #: acquiring there would deadlock. `_end_activity`'s own `await
+    #: transport.*` -- the actual network send -- always runs unlocked,
+    #: whether called from the sweep or from `delivery_wire`.
     _pipeline_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    #: Device apns_tokens whose Live Activity `sweep_activities` is currently
+    #: ending (between releasing the lock after its read phase and
+    #: reacquiring it after `_end_activity`'s network send completes). No DB
+    #: column marks this -- `push_activities` has no "ending" stage that
+    #: means what this needs -- so it's process-local: `handle_event`/
+    #: `handle_object_payload` filter these tokens out of the device list
+    #: before calling into `delivery_wire`, so a frame arriving mid-sweep
+    #: neither re-touches the row `_end_activity` is about to close nor
+    #: starts a second Live Activity for a device whose old one hasn't
+    #: actually closed yet (`store.find_activity` still returns the
+    #: not-yet-closed row for the whole duration of `_end_activity`'s send).
+    _ending: set[str] = field(default_factory=set)
 
     def _conn(self) -> sqlite3.Connection:
         from frigate_sidecar import db
@@ -154,6 +170,18 @@ class PushEngine:
         self._sub_labels.clear()
         self._last_zones.clear()
 
+    def _live_devices(self, devices: list[Device]) -> list[Device]:
+        """`devices`, minus any whose Live Activity `sweep_activities` is
+        currently ending (see `_ending`'s docstring on `_pipeline_lock`).
+        Excludes the device from card delivery too, not just the LA side --
+        `delivery_wire`'s card and LA logic share one device list per call
+        and neither module gets logic changes here, so the only lever
+        available at this layer is which devices reach it at all. The window
+        is one `_end_activity` network send, so the gap is brief."""
+        if not self._ending:
+            return devices
+        return [d for d in devices if d.apns_token not in self._ending]
+
     async def handle_object_payload(self, payload: dict[str, Any]) -> int:
         """Process one `frigate/events` message — track observation and
         delivery resolution only (Phase 5: situations pipeline retired)."""
@@ -173,7 +201,7 @@ class PushEngine:
                 async with self._pipeline_lock:
                     conn = self._conn()
                     try:
-                        devices = store.list_devices(conn)
+                        devices = self._live_devices(store.list_devices(conn))
                         await delivery_wire.handle_delivery_resolve(
                             obj.camera, obj.track_id, conn=conn, devices=devices,
                             transport=self.transport, config=self.push_config,
@@ -204,7 +232,7 @@ class PushEngine:
                 async with self._pipeline_lock:
                     conn = self._conn()
                     try:
-                        devices = store.list_devices(conn)
+                        devices = self._live_devices(store.list_devices(conn))
                         await delivery_wire.handle_zone_transition(
                             obj.camera, obj.track_id, zones_now, label=obj.label,
                             conn=conn, devices=devices, transport=self.transport,
@@ -223,7 +251,7 @@ class PushEngine:
                 async with self._pipeline_lock:
                     conn = self._conn()
                     try:
-                        devices = store.list_devices(conn)
+                        devices = self._live_devices(store.list_devices(conn))
                         await delivery_wire.handle_recognition_event(
                             obj.camera, obj.track_id, obj.sub_label,
                             conn=conn, devices=devices, transport=self.transport,
@@ -247,7 +275,7 @@ class PushEngine:
         now = time.time()
         conn = self._conn()
         try:
-            devices = store.list_devices(conn)
+            devices = self._live_devices(store.list_devices(conn))
         finally:
             conn.close()
 
@@ -356,13 +384,19 @@ class PushEngine:
         needs a sweep. Deliberately *not* a keep-alive: this only ever ends
         activities, never refreshes them, so the non-negotiable that stage
         transitions are the only thing minting an LA push still holds.
+
+        Only the read phase (this method) and the final bookkeeping phase
+        hold `_pipeline_lock`; the `_end_activity` sends themselves (each one
+        a network round trip) run outside it, so a concurrent per-frame
+        handler for an unrelated camera/device is never blocked behind a
+        sweep send -- see `_pipeline_lock`'s docstring. Each ending device's
+        apns_token sits in `self._ending` for the same window, so a frame for
+        that *same* device is excluded from delivery in the meantime (see
+        `_live_devices`) rather than racing `_end_activity`'s close.
         """
-        # Whole-body lock: the sweep reads and writes the same
-        # activity/card rows the per-frame handlers do, across `await
-        # self._end_activity(...)` (itself awaiting the transport) -- see
-        # `_pipeline_lock`'s docstring for the convoy this prevents.
+        now = time.time() if now is None else now
+        to_end: list[tuple[Device, Situation, sqlite3.Row]] = []
         async with self._pipeline_lock:
-            now = time.time() if now is None else now
             conn = self._conn()
             try:
                 stale = store.stale_activities(
@@ -385,7 +419,6 @@ class PushEngine:
                     n_stale_cards, self.card_resolution_s,
                 )
 
-            sent = 0
             for row in stale:
                 device = devices.get(row["apns_token"])
                 if device is None:
@@ -401,11 +434,35 @@ class PushEngine:
                 )
                 if situation is None:
                     situation = Situation(id=row["situation_id"], name=row["situation_id"])
-                sent += await self._end_activity(
-                    device, situation, row["camera"], row["track_id"],
-                    reason="quiet", now=now, row=row,
-                )
-            return sent
+                self._ending.add(device.apns_token)
+                to_end.append((device, situation, row))
+
+        # Outside the lock: the network sends. `_end_activity` closes each
+        # row itself (its own connection, its own commit) once its send
+        # attempt -- successful or not -- is done, matching the behaviour at
+        # the delivery_wire end site (a failed send still closes the row).
+        sent = 0
+        try:
+            for device, situation, row in to_end:
+                try:
+                    sent += await self._end_activity(
+                        device, situation, row["camera"], row["track_id"],
+                        reason="quiet", now=now, row=row,
+                    )
+                    STATS.incr("pipeline.sweep.ended")
+                except Exception:
+                    logger.exception(
+                        "push: sweep failed to end activity %s", row["activity_id"]
+                    )
+        finally:
+            # A cancelled sweep (shutdown, or the loop being torn down) must
+            # not leave tokens parked in `_ending` -- that would silently
+            # exclude those devices from every later delivery. Plain set
+            # discard, no lock needed: `_ending` is only ever read/written
+            # from the event loop.
+            for device, _situation, _row in to_end:
+                self._ending.discard(device.apns_token)
+        return sent
 
     async def prewarm_thumbnail(self, handle: str, *, camera: str, event_id: str) -> bool:
         """Fetch, shrink, and park the snapshot under `handle` (plan §4 lever 1).

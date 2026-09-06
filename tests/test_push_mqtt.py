@@ -1,18 +1,35 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
-import pytest
 
 from frigate_sidecar.config import PushSection
 from frigate_sidecar.push.engine import PushEngine
 from frigate_sidecar.push.mqtt import MqttReviewSubscriber, backfill_since, compute_backoff
+from frigate_sidecar.push.stats import STATS
 from frigate_sidecar.push.transport import LogTransport
+
+
+class _RecordingHandler(logging.Handler):
+    """Attached directly to the originating logger so the assertions don't
+    depend on root-logger propagation or on how `caplog` is configured."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+    @property
+    def text(self) -> str:
+        return "\n".join(r.getMessage() for r in self.records)
 
 
 def test_compute_backoff_grows_and_caps():
@@ -56,13 +73,13 @@ def test_on_message_malformed_json_does_not_raise(tmp_path: Path) -> None:
     sub._loop.close()
 
 
-def test_reviews_dispatch_exception_is_logged_not_swallowed(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A push that raises partway through must leave a trace -- the fire-and-
-    forget `run_coroutine_threadsafe` future is never otherwise awaited, so an
-    exception there used to vanish silently (found tracing a replay where one
-    of two matched devices logged nothing at all)."""
+async def test_reviews_dispatch_exception_is_logged_not_swallowed(tmp_path: Path) -> None:
+    """A push that raises partway through must leave a trace. Pre-Wave-2B this
+    covered the fire-and-forget `run_coroutine_threadsafe` future; the queue
+    consumer (`_consume`) now owns this contract instead -- it must log and
+    keep consuming rather than let the handler's exception vanish or kill the
+    consumer task."""
+    STATS.reset()
     sub, engine = _subscriber(tmp_path)
 
     async def _boom(payload: dict) -> int:
@@ -70,28 +87,35 @@ def test_reviews_dispatch_exception_is_logged_not_swallowed(
 
     engine.handle_review_payload = _boom  # type: ignore[method-assign]
 
-    loop = asyncio.new_event_loop()
-    sub._loop = loop
-    payload = {
-        "type": "new",
-        "after": {"id": "r1", "camera": "doorbell", "severity": "alert",
-                   "data": {"objects": ["person"], "detections": []}},
-    }
-    msg = SimpleNamespace(topic="frigate/reviews", payload=json.dumps(payload).encode())
-    with caplog.at_level(logging.ERROR, logger="frigate_sidecar.push.mqtt"):
+    sub._loop = asyncio.get_running_loop()
+    sub.start_consumer()
+    handler = _RecordingHandler()
+    mqtt_logger = logging.getLogger("frigate_sidecar.push.mqtt")
+    mqtt_logger.addHandler(handler)
+    mqtt_logger.setLevel(logging.ERROR)
+    try:
+        payload = {
+            "type": "new",
+            "after": {"id": "r1", "camera": "doorbell", "severity": "alert",
+                       "data": {"objects": ["person"], "detections": []}},
+        }
+        msg = SimpleNamespace(topic="frigate/reviews", payload=json.dumps(payload).encode())
         sub.on_message(None, None, msg)
-        loop.run_until_complete(asyncio.sleep(0.05))
-    loop.close()
-    assert "unhandled error handling frigate/reviews message" in caplog.text
-    assert "kaboom" in caplog.text
+        await sub.drain()
+    finally:
+        mqtt_logger.removeHandler(handler)
+        sub.stop()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sub._consumer_task
+    assert "mqtt consumer handler failed for reviews frame" in handler.text
+    assert any(r.exc_info and "kaboom" in str(r.exc_info[1]) for r in handler.records)
+    assert STATS.get("mqtt.consumer.errors") == 1
 
 
-def test_events_dispatch_exception_is_logged_not_swallowed(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Same fire-and-forget gap as the reviews path (`_log_task_exception` is
-    shared) -- covered separately since `frigate/events` has its own handler
-    and its own `run_coroutine_threadsafe` call site."""
+async def test_events_dispatch_exception_is_logged_not_swallowed(tmp_path: Path) -> None:
+    """Same contract as the reviews test above, for the `frigate/events`
+    frame kind."""
+    STATS.reset()
     sub, engine = _subscriber(tmp_path)
 
     async def _boom(payload: dict) -> int:
@@ -99,16 +123,25 @@ def test_events_dispatch_exception_is_logged_not_swallowed(
 
     engine.handle_object_payload = _boom  # type: ignore[method-assign]
 
-    loop = asyncio.new_event_loop()
-    sub._loop = loop
-    payload = {"after": {"camera": "doorbell", "id": "t1"}, "type": "new"}
-    msg = SimpleNamespace(topic="frigate/events", payload=json.dumps(payload).encode())
-    with caplog.at_level(logging.ERROR, logger="frigate_sidecar.push.mqtt"):
+    sub._loop = asyncio.get_running_loop()
+    sub.start_consumer()
+    handler = _RecordingHandler()
+    mqtt_logger = logging.getLogger("frigate_sidecar.push.mqtt")
+    mqtt_logger.addHandler(handler)
+    mqtt_logger.setLevel(logging.ERROR)
+    try:
+        payload = {"after": {"camera": "doorbell", "id": "t1"}, "type": "new"}
+        msg = SimpleNamespace(topic="frigate/events", payload=json.dumps(payload).encode())
         sub.on_message(None, None, msg)
-        loop.run_until_complete(asyncio.sleep(0.05))
-    loop.close()
-    assert "unhandled error handling frigate/events message" in caplog.text
-    assert "kaboom" in caplog.text
+        await sub.drain()
+    finally:
+        mqtt_logger.removeHandler(handler)
+        sub.stop()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sub._consumer_task
+    assert "mqtt consumer handler failed for events frame" in handler.text
+    assert any(r.exc_info and "kaboom" in str(r.exc_info[1]) for r in handler.records)
+    assert STATS.get("mqtt.consumer.errors") == 1
 
 
 def test_available_offline_marks_frigate_offline(tmp_path: Path) -> None:

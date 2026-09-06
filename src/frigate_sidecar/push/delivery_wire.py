@@ -734,7 +734,10 @@ async def _deliver_live_activities(
     """
     covered: set[str] = set()
     if not config.delivery_la_enabled:
-        logger.info("push: LA skipped — delivery_la_enabled=False")
+        # Fires on every mutation this function is called for while LA is
+        # configured off -- per-update cadence, not a transition. DEBUG
+        # (Wave 2B §4).
+        logger.debug("push: LA skipped — delivery_la_enabled=False")
         return covered
     card_key = card.card_key
     logger.info(
@@ -796,15 +799,21 @@ async def _deliver_live_activities(
                 tombstone = None
             else:
                 # Quiet period: no re-start on CREATE/UPDATE, including a
-                # brand-new story joining.
-                logger.info("push: LA skip device=%s reason=dismissed", device.device_id)
+                # brand-new story joining. Fires once per mutation this
+                # device is dismissed for -- per-update cadence, not a
+                # transition -- so it's DEBUG (Wave 2B §4).
+                logger.debug("push: LA skip device=%s reason=dismissed", device.device_id)
                 continue
 
         if device_row is None:
             if not eligible or not is_triggering_eligible:
                 continue
             if mutation not in (CREATE, ESCALATE) or family is None or not device.can_live_activity:
-                logger.info(
+                # Same per-update cadence as the "dismissed" skip above --
+                # fires on every non-qualifying mutation for an
+                # otherwise-eligible device (e.g. every UPDATE before the
+                # first ESCALATE). DEBUG, not INFO (Wave 2B §4).
+                logger.debug(
                     "push: LA skip device=%s reason=no_row mutation=%s family=%s"
                     " la_capable=%s pts=%s",
                     device.device_id, mutation, family, device.la_capable,
@@ -838,7 +847,11 @@ async def _deliver_live_activities(
                 collapse_id=_DEVICE_SITUATION_ID, event="start",
                 apns_priority=10, apns_expiration=int(now + 900),
             )
-            logger.info("push: LA start result ok=%s error=%s", result.ok, result.error)
+            # The intent to start is already an INFO line just above; this is
+            # the raw result echo right after it, and on a persistently
+            # failing push-to-start token it repeats on every mutation
+            # (device_row stays None) -- DEBUG (Wave 2B §4).
+            logger.debug("push: LA start result ok=%s error=%s", result.ok, result.error)
             if not result.ok:
                 continue
             covered.add(device.apns_token)
@@ -1249,9 +1262,16 @@ async def handle_delivery_event(
         # cluster-mate index for dedup adoption below.
         for _tp in _positions:
             if _tp.camera == event.camera:
-                logger.info(
-                    "push: world pos camera=%s track=%s map=(%.3f, %.3f)",
-                    _tp.camera, _tp.track_id, _tp.x, _tp.y,
+                # Unconditional per-review-event position dump, one line per
+                # tracked position on this camera -- pure per-frame/update
+                # diagnostic, not a transition. DEBUG (Wave 2B §4; the
+                # geometric_dedup lines just below stay INFO -- they're the
+                # deliberate flag-off validation breadcrumb, gated on an
+                # actual multi-member cluster, not every position).
+                logger.debug(
+                    # camera dropped -- %(push_ctx)s's cam= already names it.
+                    "push: world pos track=%s map=(%.3f, %.3f)",
+                    _tp.track_id, _tp.x, _tp.y,
                 )
         for _cl in _clusters:
             if len(_cl.members) <= 1:

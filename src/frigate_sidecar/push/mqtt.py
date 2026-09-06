@@ -18,25 +18,46 @@ before resuming live pushes (§12.6's stale/live/recovering model, reused).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
+from frigate_sidecar.push.log_context import reset_push_context, set_push_context
 from frigate_sidecar.push.models import ReviewEvent
+from frigate_sidecar.push.stats import STATS
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    import concurrent.futures
-
     import paho.mqtt.client as mqtt
 
     from frigate_sidecar.config import PushSection
     from frigate_sidecar.push.engine import PushEngine
 
 logger = logging.getLogger(__name__)
+
+#: Overflow-drop warning is rate limited module-wide (spec: "module-level
+#: last-warn timestamp"), not per-subscriber -- there is only ever one
+#: subscriber per process, and this keeps the throttle simple.
+_last_drop_warn_at = 0.0
+_dropped_since_warn = 0
+_DROP_WARN_INTERVAL_S = 30.0
+
+
+@dataclass
+class _QueueItem:
+    kind: Literal["events", "reviews", "reset"]
+    payload: dict[str, Any] | None
+    #: Never dropped on overflow: every reviews/reset item, plus an events
+    #: item whose `type` isn't "new"/"update" (i.e. "end" -- see
+    #: `_terminal_events_item`).
+    terminal: bool
+    enqueued_at: float
 
 
 def compute_backoff(attempt: int, base: float, cap: float) -> float:
@@ -147,6 +168,148 @@ class MqttReviewSubscriber:
                 capture_path = str(Path(settings.push_settings_path).parent / "mqtt-capture.jsonl")
             self._capture = MqttCapture(capture_path, max_bytes=settings.capture_max_bytes)
 
+        # Bounded queue with one ordered consumer (spec §1). A plain
+        # `collections.deque` + `asyncio.Event`, not `asyncio.Queue`: a
+        # terminal/review/reset item that arrives with the queue full must
+        # still be enqueued (evicting an oldest non-terminal item, or -- if
+        # nothing is evictable -- exceeding maxsize outright), and
+        # `asyncio.Queue.put_nowait` has no way to do either; a deque has no
+        # size limit of its own; the accounting below is what enforces
+        # `mqtt_queue_max`. Every mutation happens as a callback on the
+        # asyncio loop (via `call_soon_threadsafe` from the paho thread, or
+        # directly from `_consume`/`on_message` once already on the loop), so
+        # there is never a true data race despite the multi-threaded source.
+        self._deque: deque[_QueueItem] = deque()
+        self._wake: asyncio.Event = asyncio.Event()
+        self._consumer_task: asyncio.Task[None] | None = None
+        #: True while the consumer is inside a dispatch -- `drain()` (tests)
+        #: waits for this *and* an empty deque, so it doesn't return between
+        #: "popped the item" and "finished awaiting the handler".
+        self._dispatching = False
+
+    def _terminal_events_item(self, payload: dict[str, Any]) -> bool:
+        """Only a `new`/`update` object frame is droppable; `end` (and
+        anything else this topic might send) is treated conservatively as
+        terminal so it's never the one evicted."""
+        return payload.get("type") not in ("new", "update")
+
+    def _enqueue(self, item: _QueueItem) -> None:
+        """Runs on the event loop -- scheduled via `call_soon_threadsafe`
+        from the paho thread (or called directly once already on the loop,
+        e.g. from `on_message` in tests). See §1: drop a non-terminal
+        overflow item, or evict the oldest non-terminal item to make room for
+        a terminal one."""
+        global _last_drop_warn_at, _dropped_since_warn
+        maxsize = self.settings.mqtt_queue_max
+        if len(self._deque) >= maxsize:
+            if not item.terminal:
+                STATS.incr("mqtt.dropped.overflow")
+                _dropped_since_warn += 1
+                now = time.time()
+                if now - _last_drop_warn_at >= _DROP_WARN_INTERVAL_S:
+                    logger.warning(
+                        "push: mqtt queue full (max=%d) -- dropped %d event frame(s) "
+                        "since last warning",
+                        maxsize, _dropped_since_warn,
+                    )
+                    _last_drop_warn_at = now
+                    _dropped_since_warn = 0
+                self._update_gauges()
+                return
+            for i, existing in enumerate(self._deque):
+                if not existing.terminal:
+                    del self._deque[i]
+                    break
+            # else: nothing evictable -- enqueue anyway, deliberately
+            # exceeding maxsize by one (spec §1); a deque has no size cap of
+            # its own to fight here.
+        self._deque.append(item)
+        if item.kind == "events":
+            STATS.incr("mqtt.msg.events")
+        elif item.kind == "reviews":
+            STATS.incr("mqtt.msg.reviews")
+        self._update_gauges()
+        self._wake.set()
+
+    def _update_gauges(self) -> None:
+        depth = len(self._deque)
+        STATS.gauge("mqtt.queue.depth", depth)
+        STATS.gauge_max("mqtt.queue.high_water", depth)
+
+    async def _consume(self) -> None:
+        """The single ordered consumer (spec §1): pops items left-to-right
+        and dispatches them one at a time, so `handle_events_payload` /
+        `handle_reviews_payload` / `reset_tracks` calls stay in enqueue
+        order relative to each other."""
+        while True:
+            await self._wake.wait()
+            self._wake.clear()
+            while self._deque:
+                item = self._deque.popleft()
+                self._update_gauges()
+                self._dispatching = True
+                try:
+                    await self._dispatch(item)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "push: mqtt consumer handler failed for %s frame", item.kind
+                    )
+                    STATS.incr("mqtt.consumer.errors")
+                finally:
+                    self._dispatching = False
+
+    async def _dispatch(self, item: _QueueItem) -> None:
+        if item.kind == "reset":
+            self.engine.reset_tracks()
+            return
+        payload = item.payload or {}
+        after = payload.get("after") or {}
+        if not isinstance(after, dict):
+            after = {}
+        if item.kind == "events":
+            token = set_push_context(
+                after.get("camera"), after.get("id"), None
+            )
+            try:
+                await self.engine.handle_object_payload(payload)
+            finally:
+                reset_push_context(token)
+        elif item.kind == "reviews":
+            token = set_push_context(
+                after.get("camera"), None, after.get("id")
+            )
+            try:
+                await self.engine.handle_review_payload(payload)
+            finally:
+                reset_push_context(token)
+
+    def start_consumer(self) -> asyncio.Task[None]:
+        """Idempotent: creates the consumer task on the running loop if it
+        isn't already running. `run_forever` calls this; tests that don't go
+        through `run_forever` (no real broker) can call it directly after
+        setting `self._loop`."""
+        if self._consumer_task is None:
+            loop = self._loop or asyncio.get_running_loop()
+            self._consumer_task = loop.create_task(self._consume())
+        return self._consumer_task
+
+    async def drain(self) -> None:
+        """Test helper: await until the deque is empty and no dispatch is
+        in flight.
+
+        Always yields at least once before checking (a do-while, not a
+        while): a caller that just called `on_message`/`_enqueue` on this
+        same loop (the common test shape -- no real paho thread involved)
+        has only *scheduled* the enqueue via `call_soon_threadsafe`, which
+        hasn't run yet at the point `drain()` is entered, so checking the
+        deque first would see it as already empty and return immediately."""
+        while True:
+            await asyncio.sleep(0)
+            if not self._deque and not self._dispatching:
+                return
+
     def _handle_reviews_message(self, payload_bytes: bytes) -> None:
         self.last_seen = time.time()
         try:
@@ -159,27 +322,10 @@ class MqttReviewSubscriber:
         loop = self._loop
         if loop is None:
             return
-        future = asyncio.run_coroutine_threadsafe(
-            self.engine.handle_review_payload(payload), loop
+        item = _QueueItem(
+            kind="reviews", payload=payload, terminal=True, enqueued_at=time.time()
         )
-        # `run_coroutine_threadsafe`'s future is otherwise never awaited or
-        # inspected -- a push that raises partway through (a bad send, a
-        # locked row, anything) would vanish with no trace, which is exactly
-        # what happened tracing the muskrat replay: two devices matched, one
-        # logged its failure, the other logged nothing at all because its
-        # exception had nowhere to go.
-        future.add_done_callback(
-            lambda f: self._log_task_exception("frigate/reviews", f)
-        )
-
-    def _log_task_exception(
-        self, topic: str, future: concurrent.futures.Future[int]
-    ) -> None:
-        if future.cancelled():
-            return
-        exc = future.exception()
-        if exc is not None:
-            logger.error("push: unhandled error handling %s message", topic, exc_info=exc)
+        loop.call_soon_threadsafe(self._enqueue, item)
 
     def _handle_events_message(self, payload_bytes: bytes) -> None:
         """`frigate/events` -- dwell input only, never a push trigger.
@@ -199,12 +345,11 @@ class MqttReviewSubscriber:
         loop = self._loop
         if loop is None:
             return
-        future = asyncio.run_coroutine_threadsafe(
-            self.engine.handle_object_payload(payload), loop
+        item = _QueueItem(
+            kind="events", payload=payload,
+            terminal=self._terminal_events_item(payload), enqueued_at=time.time(),
         )
-        future.add_done_callback(
-            lambda f: self._log_task_exception("frigate/events", f)
-        )
+        loop.call_soon_threadsafe(self._enqueue, item)
 
     def _handle_available_message(self, payload_bytes: bytes) -> None:
         self.last_seen = time.time()
@@ -268,10 +413,21 @@ class MqttReviewSubscriber:
             if self.settings.dwell_source == "events":
                 c.subscribe(self.settings.mqtt_topic_events)
             self.last_seen = time.time()
+            STATS.incr("mqtt.reconnect")
             # Track ids are per-Frigate-lifetime: a disconnect may well have
             # been Frigate restarting, and held dwell state would then be
             # attributed to whatever object inherits the id (handoff item 8).
-            self.engine.reset_tracks()
+            # Enqueued (not called directly) so the reset applies in order
+            # relative to frames already queued ahead of it -- this runs on
+            # the paho thread, same as `on_message`.
+            loop = self._loop
+            if loop is not None:
+                item = _QueueItem(
+                    kind="reset", payload=None, terminal=True, enqueued_at=time.time()
+                )
+                loop.call_soon_threadsafe(self._enqueue, item)
+            else:
+                self.engine.reset_tracks()
 
         client.on_connect = _on_connect
         self._client = client
@@ -281,57 +437,73 @@ class MqttReviewSubscriber:
         """Connect, reconnecting with backoff on failure, forever (until
         `stop()`). Meant to be run as a background asyncio task."""
         self._loop = self._loop or asyncio.get_running_loop()
-        attempt = 0
-        while not self._stopped:
-            client = self.build_client()
-            try:
-                await asyncio.to_thread(
-                    client.connect, self.settings.mqtt_host, self.settings.mqtt_port
+        self.start_consumer()
+        try:
+            attempt = 0
+            while not self._stopped:
+                client = self.build_client()
+                try:
+                    await asyncio.to_thread(
+                        client.connect, self.settings.mqtt_host, self.settings.mqtt_port
+                    )
+                    client.loop_start()
+                    # CONNACK is processed on paho's network thread *after*
+                    # `connect()` returns — checking `is_connected()` immediately
+                    # is a race that a low-latency LAN usually wins and anything
+                    # slower (an ssh-tunneled broker, diagnosed 2026-08-14)
+                    # always loses, producing a silent reconnect storm. Give the
+                    # handshake a bounded moment to land first.
+                    for _ in range(100):
+                        if client.is_connected() or self._stopped:
+                            break
+                        await asyncio.sleep(0.1)
+                    attempt = 0
+                    # Idle until the connection drops or we're asked to stop.
+                    while not self._stopped and client.is_connected():
+                        await asyncio.sleep(1.0)
+                        if self.is_stale():
+                            # A bug in downstream event processing must not take
+                            # the whole subscriber down with it -- that's exactly
+                            # what happened 2026-08-11: an unhandled ValueError
+                            # from here escaped run_forever entirely and the
+                            # subscriber task died silently until the service was
+                            # restarted, 41 hours later.
+                            try:
+                                await self.resume_with_backfill()
+                            except Exception:
+                                logger.exception("push: backfill after stale window failed")
+                            self.last_seen = time.time()
+                except (OSError, ConnectionError) as exc:
+                    logger.warning("push: mqtt connect to %s:%s failed: %s",
+                                    self.settings.mqtt_host, self.settings.mqtt_port, exc)
+                finally:
+                    client.loop_stop()
+                    with contextlib.suppress(Exception):
+                        client.disconnect()
+                if self._stopped:
+                    break
+                backoff = compute_backoff(
+                    attempt, self.settings.reconnect_backoff_s,
+                    self.settings.reconnect_backoff_max_s,
                 )
-                client.loop_start()
-                # CONNACK is processed on paho's network thread *after*
-                # `connect()` returns — checking `is_connected()` immediately
-                # is a race that a low-latency LAN usually wins and anything
-                # slower (an ssh-tunneled broker, diagnosed 2026-08-14)
-                # always loses, producing a silent reconnect storm. Give the
-                # handshake a bounded moment to land first.
-                for _ in range(100):
-                    if client.is_connected() or self._stopped:
-                        break
-                    await asyncio.sleep(0.1)
-                attempt = 0
-                # Idle until the connection drops or we're asked to stop.
-                while not self._stopped and client.is_connected():
-                    await asyncio.sleep(1.0)
-                    if self.is_stale():
-                        # A bug in downstream event processing must not take
-                        # the whole subscriber down with it -- that's exactly
-                        # what happened 2026-08-11: an unhandled ValueError
-                        # from here escaped run_forever entirely and the
-                        # subscriber task died silently until the service was
-                        # restarted, 41 hours later.
-                        try:
-                            await self.resume_with_backfill()
-                        except Exception:
-                            logger.exception("push: backfill after stale window failed")
-                        self.last_seen = time.time()
-            except (OSError, ConnectionError) as exc:
-                logger.warning("push: mqtt connect to %s:%s failed: %s",
-                                self.settings.mqtt_host, self.settings.mqtt_port, exc)
-            finally:
-                client.loop_stop()
-                with __import__("contextlib").suppress(Exception):
-                    client.disconnect()
-            if self._stopped:
-                break
-            backoff = compute_backoff(
-                attempt, self.settings.reconnect_backoff_s, self.settings.reconnect_backoff_max_s
-            )
-            attempt += 1
-            await asyncio.sleep(backoff)
+                attempt += 1
+                await asyncio.sleep(backoff)
+        finally:
+            # Cancelled either because `stop()` broke the loop above (normal
+            # shutdown) or because this task itself was cancelled from
+            # outside (server.py's lifespan) -- either way the consumer must
+            # not outlive `run_forever` as an orphaned pending task (no "Task
+            # was destroyed but it is pending" warnings).
+            task, self._consumer_task = self._consumer_task, None
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     def stop(self) -> None:
         self._stopped = True
+        if self._consumer_task is not None:
+            self._consumer_task.cancel()
         if self._client is not None:
-            with __import__("contextlib").suppress(Exception):
+            with contextlib.suppress(Exception):
                 self._client.disconnect()
