@@ -22,10 +22,12 @@ def classify(mu_per_hr: float, yield_per_kmu: float) -> str:
     return "very busy" if yield_per_kmu >= 1 else "noise-dominated"
 
 
-def _aggregate(days_data: list[dict[str, Any]], since_day: str) -> dict[str, float]:
+def _aggregate(
+    days_data: list[dict[str, Any]], since_day: str, until_day: str
+) -> dict[str, float]:
     out = {"motion": 0.0, "duration": 0.0, "events": 0.0, "objects": 0.0, "hours_with_data": 0}
     for d in days_data:
-        if d["day"] < since_day:
+        if not (since_day <= d["day"] <= until_day):
             continue
         for h in d["hours"]:
             if h["duration"] <= 0:
@@ -38,13 +40,16 @@ def _aggregate(days_data: list[dict[str, Any]], since_day: str) -> dict[str, flo
     return out
 
 
-def analyze(*, frigate_base_url: str, days: int = 14) -> dict[str, Any]:
+def analyze(
+    *, frigate_base_url: str, days: int = 14, until: str | None = None
+) -> dict[str, Any]:
     with FrigateClient(frigate_base_url) as client:
         config = client.config()
         stats = client.stats()
         cameras_cfg = config.get("cameras", {})
         cam_stats = stats.get("cameras", {})
         since = (date.today() - timedelta(days=days - 1)).isoformat()
+        until_day = until or date.today().isoformat()
 
         rows: list[dict[str, Any]] = []
         for cam, ccfg in sorted(cameras_cfg.items()):
@@ -55,7 +60,7 @@ def analyze(*, frigate_base_url: str, days: int = 14) -> dict[str, Any]:
             except FrigateAPIError:
                 rows.append({"camera": cam, "error": "no recordings summary"})
                 continue
-            agg = _aggregate(days_data, since)
+            agg = _aggregate(days_data, since, until_day)
             if agg["duration"] == 0:
                 continue
             hrs = agg["duration"] / 3600.0

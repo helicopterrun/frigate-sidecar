@@ -102,7 +102,7 @@ def motion_view(
                 # `parse_range` (already used by Compare mode below) knows
                 # this vocabulary; reuse it rather than re-parsing target here.
                 try:
-                    lo, _hi = motion_compare.parse_range(target or "today")
+                    lo, hi = motion_compare.parse_range(target or "today")
                 except ValueError as exc:
                     raise HTTPException(
                         status_code=400,
@@ -110,17 +110,16 @@ def motion_view(
                             "invalid_target", f"bad target {target!r}: {exc}"
                         ),
                     ) from exc
-                # motion_active.analyze only takes a "since N days ago
-                # through now" window (no upper bound), so an explicit past
-                # range's end date still can't be enforced here the way
-                # Compare mode enforces both ends -- but the start date is
-                # now honoured instead of ignored. `max(..., 1)` guards a
-                # `target` in the future, where the subtraction would
-                # otherwise go negative.
+                # `days`/`until` bound the query on both ends: `days` counts
+                # back from today to `lo` (the start), and `until=hi` caps
+                # the end -- e.g. "yesterday" must not pick up today's
+                # partial data. `max(..., 1)` guards a `target` in the
+                # future, where the subtraction would otherwise go negative.
                 days = max((date.today() - date.fromisoformat(lo)).days + 1, 1)
                 result = motion_active.analyze(
                     frigate_base_url=settings.frigate.base_url,
                     days=days,
+                    until=hi,
                 )
                 range_labels["target"] = result.get("since", target or "today")
                 for row in result["rows"]:

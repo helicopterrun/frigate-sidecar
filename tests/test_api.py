@@ -240,15 +240,18 @@ def test_motion_error_on_unreachable_frigate(client: TestClient) -> None:
 
 
 def _stub_motion_active(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
-    """Replaces `motion_active.analyze` with one that records its `days` kwarg
-    and returns an empty result -- so single-window `/motion` parsing can be
-    checked without a live Frigate."""
+    """Replaces `motion_active.analyze` with one that records its `days` and
+    `until` kwargs and returns an empty result -- so single-window `/motion`
+    parsing can be checked without a live Frigate."""
     from frigate_sidecar.analysis import motion_active
 
     captured: dict[str, object] = {}
 
-    def fake_analyze(*, frigate_base_url: str, days: int) -> dict[str, object]:
+    def fake_analyze(
+        *, frigate_base_url: str, days: int, until: str | None = None
+    ) -> dict[str, object]:
         captured["days"] = days
+        captured["until"] = until
         return {"since": "stub", "rows": []}
 
     monkeypatch.setattr(motion_active, "analyze", fake_analyze)
@@ -258,10 +261,13 @@ def _stub_motion_active(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
 def test_motion_single_mode_today_is_one_day(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from datetime import date
+
     captured = _stub_motion_active(monkeypatch)
     r = client.get("/motion", params={"target": "today"})
     assert r.status_code == 200
     assert captured["days"] == 1
+    assert captured["until"] == date.today().isoformat()
 
 
 def test_motion_single_mode_yesterday_is_two_days_back(
@@ -269,10 +275,15 @@ def test_motion_single_mode_yesterday_is_two_days_back(
 ) -> None:
     """`target=yesterday` used to fall through the old ternary to a flat 14
     days -- silently becoming "the last 14 days" instead of yesterday."""
+    from datetime import date, timedelta
+
     captured = _stub_motion_active(monkeypatch)
     r = client.get("/motion", params={"target": "yesterday"})
     assert r.status_code == 200
     assert captured["days"] == 2
+    # Upper bound must be yesterday, not today -- otherwise today's partial
+    # data leaks into a "yesterday only" view.
+    assert captured["until"] == (date.today() - timedelta(days=1)).isoformat()
 
 
 def test_motion_single_mode_explicit_date_anchors_days_since(
@@ -285,6 +296,7 @@ def test_motion_single_mode_explicit_date_anchors_days_since(
     r = client.get("/motion", params={"target": target})
     assert r.status_code == 200
     assert captured["days"] == 6  # since = 5 days ago -> days-back = 5 + 1
+    assert captured["until"] == target  # a single date bounds both ends to it
 
 
 def test_motion_single_mode_range_anchors_on_the_start_date(
@@ -298,6 +310,7 @@ def test_motion_single_mode_range_anchors_on_the_start_date(
     r = client.get("/motion", params={"target": f"{lo}..{hi}"})
     assert r.status_code == 200
     assert captured["days"] == 11
+    assert captured["until"] == hi  # the range's end date bounds the query too
 
 
 def test_motion_single_mode_rejects_an_unparseable_target(client: TestClient) -> None:

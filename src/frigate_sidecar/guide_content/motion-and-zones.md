@@ -9,12 +9,15 @@ Two pages for understanding what your cameras are reacting to:
 
 ## [Motion](/motion)
 
-Per-camera motion activity per hour, classified by activity level. Use it to
-spot noisy cameras (wind-blown foliage, flags, shadows) that burn detector
-capacity. Add `?baseline=<date>` to switch into A/B compare mode, which
-classifies each hour against the baseline day: noise spike, real activity
-spike, quiet drop, or flat. That's the tool for answering "did my motion
-mask change actually help?"
+A form, not a set of query-string presets: pick a date range (today /
+yesterday / a date / a date range) and hit compute, or use one of the 4
+preset buttons for the common cases. Leaving the baseline field blank gives
+a single-window view — one row per camera, classified by activity level, to
+spot noisy cameras (wind-blown foliage, flags, shadows) burning detector
+capacity. Filling in a baseline range switches to A/B compare mode: it
+classifies each **camera**, not each hour, against the baseline — noise
+spike, real activity spike, quiet drop, or flat. That's the tool for
+answering "did my motion mask change actually help?"
 
 ## [Zone hits](/zone-hits)
 

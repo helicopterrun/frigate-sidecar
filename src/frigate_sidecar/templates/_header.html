@@ -52,7 +52,7 @@
     {% endif %}
   </span>
   <form class="search-form" role="search" action="/triage" method="get">
-    <input type="search" name="q" class="search-input" placeholder="Search events…" autocomplete="off" aria-label="Search events">
+    <input type="search" name="q" class="search-input" placeholder="Search events…" autocomplete="off" aria-label="Search events" value="{{ request.query_params.get('q', '') if _active == 'triage' else '' }}">
     <div class="search-drop" hidden></div>
   </form>
   <span class="header-right">
@@ -114,7 +114,7 @@
 <div class="search-sheet" id="search-sheet">
   <form class="search-form" role="search" action="/triage" method="get">
     <input type="search" name="q" class="search-input" placeholder="Search events…"
-           autocomplete="off" aria-label="Search events">
+           autocomplete="off" aria-label="Search events" value="{{ request.query_params.get('q', '') if _active == 'triage' else '' }}">
     <div class="search-drop" hidden></div>
   </form>
 </div>

@@ -24,3 +24,14 @@ presets cover common hardware.
 Rules of thumb it encodes: identification needs far more pixels than
 detection, and doubling distance quarters your pixels. Check a planned
 mounting spot here before drilling holes.
+
+Pick an already-**Deployed** camera from its selector to load a real
+camera's lens, resolution, mount height, and tilt instead of starting from a
+lens preset — handy for checking an existing mounting spot rather than
+planning a new one. The px/distance chart's **DORI legend** (below the
+chart) reads out the distance at which this setup crosses Frigate's
+identify/recognise thresholds, in feet, for the currently selected object.
+The **"Object target (editable)"** details block lets you override the
+target object's width, aspect ratio, and target pixel width directly —
+useful for sizing against something other than the built-in object presets
+(a package, a license plate) without leaving the page.
