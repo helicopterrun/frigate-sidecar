@@ -11,6 +11,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from frigate_sidecar.errors import error_detail
+from frigate_sidecar.models.wire import MapLiveResponse, MapTrackResponse
 from frigate_sidecar.push import policy_settings
 
 router = APIRouter(prefix="/v1/push", tags=["push"])
@@ -95,7 +97,11 @@ async def map_footprints(request: Request) -> dict[str, Any]:
     return {"t": _time.time(), "aspect": aspect, "footprints": footprints}
 
 
-@router.get("/map/live")
+@router.get(
+    "/map/live",
+    response_model=MapLiveResponse,
+    response_model_exclude_unset=True,
+)
 async def map_live(request: Request, debug: int = Query(default=0)) -> dict[str, Any]:
     """Current fused object positions on the floorplan map, for the /cameras
     Live overlay (polled ~1 Hz). Cross-camera sightings of the same object
@@ -148,7 +154,7 @@ async def map_live(request: Request, debug: int = Query(default=0)) -> dict[str,
     return result
 
 
-@router.get("/map/track")
+@router.get("/map/track", response_model=MapTrackResponse)
 async def map_track(
     request: Request, camera: str = Query(...), event_id: str = Query(...),
 ) -> dict[str, Any]:
@@ -169,7 +175,10 @@ async def map_track(
         not scale_ft or scale_ft <= 0 or not layout
         or layout.get("azimuth") is None or ground.camera_ground(camera) is None
     ):
-        raise HTTPException(status_code=404, detail="not_projectable")
+        raise HTTPException(
+            status_code=404,
+            detail=error_detail("not_projectable", "camera not calibrated for map projection"),
+        )
 
     path_data: list[Any] | None = None
     engine = getattr(request.app.state, "push_engine", None)
@@ -188,7 +197,10 @@ async def map_track(
                 path_data = row["points"]
                 break
     if not path_data:
-        raise HTTPException(status_code=404, detail="not_projectable")
+        raise HTTPException(
+            status_code=404,
+            detail=error_detail("not_projectable", "camera not calibrated for map projection"),
+        )
 
     aspect = ground.map_aspect(active)
     projected: list[list[float]] = []
@@ -200,7 +212,10 @@ async def map_track(
         if wp is not None:
             projected.append([round(wp[0], 4), round(wp[1], 4)])
     if len(projected) < 2:
-        raise HTTPException(status_code=404, detail="not_projectable")
+        raise HTTPException(
+            status_code=404,
+            detail=error_detail("not_projectable", "camera not calibrated for map projection"),
+        )
 
     if len(projected) > 60:  # even decimation, endpoints preserved
         stride = (len(projected) - 1) / 59
@@ -240,27 +255,43 @@ async def map_landmark_solve(request: Request) -> dict[str, Any]:
 
     body = await request.json()
     if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="body must be an object")
+        raise HTTPException(
+            status_code=400, detail=error_detail("invalid_body", "body must be an object")
+        )
     camera = body.get("camera")
     matches = body.get("matches")
     if not isinstance(camera, str) or not isinstance(matches, list):
-        raise HTTPException(status_code=400, detail="camera and matches required")
+        raise HTTPException(
+            status_code=400,
+            detail=error_detail("invalid_body", "camera and matches required"),
+        )
     if not (2 <= len(matches) <= 12):
-        raise HTTPException(status_code=400, detail="need 2-12 landmark matches")
+        raise HTTPException(
+            status_code=400,
+            detail=error_detail("invalid_matches", "need 2-12 landmark matches"),
+        )
     clean = []
     for m in matches:
         try:
             entry = {k: float(m[k]) for k in ("u", "v", "mx", "my")}
         except (TypeError, KeyError, ValueError):
             raise HTTPException(
-                status_code=400, detail="each match needs numeric u, v, mx, my",
+                status_code=400,
+                detail=error_detail(
+                    "invalid_matches", "each match needs numeric u, v, mx, my"
+                ),
             ) from None
         if not all(-0.5 <= v <= 1.5 for v in entry.values()):
-            raise HTTPException(status_code=400, detail="match coords out of range")
+            raise HTTPException(
+                status_code=400,
+                detail=error_detail("invalid_matches", "match coords out of range"),
+            )
         clean.append(entry)
     try:
         return calibrate.solve_landmarks(camera, clean, policy_settings.get_active())
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400, detail=error_detail("invalid_matches", str(exc))
+        ) from exc
 
 

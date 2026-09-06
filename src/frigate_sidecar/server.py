@@ -12,6 +12,8 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -21,6 +23,7 @@ from frigate_sidecar import __version__, fmt
 from frigate_sidecar.auth import FrigateAuthMiddleware
 from frigate_sidecar.config import Settings, load_settings
 from frigate_sidecar.db import FrigateDBMissingError
+from frigate_sidecar.errors import error_detail
 from frigate_sidecar.frigate_api import FrigateClient
 from frigate_sidecar.guide import load_guide
 from frigate_sidecar.push import delivery, delivery_wire
@@ -565,7 +568,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "frigate_db_missing.html",
                 {"page": page, "db_path": settings.frigate.db_path},
             )
-        return JSONResponse(status_code=503, content={"detail": str(exc)})
+        return JSONResponse(
+            status_code=503,
+            content={"detail": error_detail("frigate_db_missing", str(exc))},
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request: Request, exc: RequestValidationError) -> object:
+        # Additive on top of FastAPI's default {"detail": [...]} body: keeps
+        # the same {"error", "message"} envelope every other 4xx/5xx uses,
+        # while still surfacing the full per-field error list for debugging.
+        errors = exc.errors()
+        first_message = str(errors[0]["msg"]) if errors else "invalid request"
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": {
+                    **error_detail("validation", first_message),
+                    "errors": jsonable_encoder(errors),
+                }
+            },
+        )
 
     app.mount("/static", _CachedStaticFiles(directory=str(_STATIC_DIR)), name="static")
     app.include_router(health_routes.router)

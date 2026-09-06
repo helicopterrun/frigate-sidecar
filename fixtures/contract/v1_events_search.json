@@ -1,0 +1,22 @@
+{
+  "results": [
+    {
+      "camera": "doorbell",
+      "data": {
+        "score": 0.91
+      },
+      "end_time": 1785952327.704,
+      "has_clip": true,
+      "has_snapshot": true,
+      "id": "se1",
+      "label": "person",
+      "search_distance": null,
+      "search_source": "structured",
+      "start_time": 1785952322.704,
+      "sub_label": "amazon",
+      "zones": [
+        "front_door"
+      ]
+    }
+  ]
+}

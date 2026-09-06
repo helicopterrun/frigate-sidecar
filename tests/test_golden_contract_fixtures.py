@@ -26,18 +26,26 @@ import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import FrigateSection, PushSection, Settings, SidecarSection
+from frigate_sidecar.config import (
+    FrigateSection,
+    PushSection,
+    ScrubSection,
+    Settings,
+    SidecarSection,
+)
 from frigate_sidecar.push import decision_trace, live_activities, policy_settings
 from frigate_sidecar.push.cards import CREATE, ESCALATE, RESOLVE, Card
 from frigate_sidecar.push.delivery import build_card_payload
 from frigate_sidecar.push.library import sound_file
 from frigate_sidecar.server import create_app
 from tests.conftest import FRIGATE_EVENT_SCHEMA
+from tests.test_scrub import FULL_EVENT_SCHEMA, RECORDINGS_SCHEMA, REVIEWSEGMENT_SCHEMA
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "contract"
 
@@ -320,6 +328,318 @@ def _build_card_push() -> dict[str, Any]:
     )
 
 
+# ---------------------------------------------------------------------------
+# /v1 route goldens (Wave 6A-1) -- each builder spins up its own tiny
+# TestClient over a canned Frigate/sidecar DB so the fixture is fully
+# self-contained and never touches wall-clock time.
+# ---------------------------------------------------------------------------
+
+
+def _v1_client(tmp: Path, *, frigate_db: Path, sidecar_db: Path | None = None) -> TestClient:
+    fake_config = tmp / "frigate-config.yml"
+    fake_config.write_text("cameras: {}\n")
+    settings = Settings(
+        frigate=FrigateSection(
+            base_url="http://frigate.test:5000", config_path=fake_config, db_path=frigate_db,
+        ),
+        sidecar=SidecarSection(
+            db_path=sidecar_db or (tmp / "frigate-sidecar.db"),
+            bind_port=5001,
+            require_frigate_auth=False,
+        ),
+        scrub=ScrubSection(enabled=False, retention_days=4, cache_dir=tmp / "scrub"),
+        push=PushSection(enabled=False, push_settings_path=str(tmp / "push_settings.json")),
+    )
+    return TestClient(create_app(settings))
+
+
+def _build_v1_coverage() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        frigate_db = tmp / "frigate.db"
+        conn = sqlite3.connect(frigate_db)
+        conn.executescript(RECORDINGS_SCHEMA)
+        conn.execute(
+            "INSERT INTO recordings (id, camera, path, start_time, end_time, duration, "
+            "segment_size) VALUES ('s0', 'doorbell', '/x/0.mp4', ?, ?, 10.0, 5.0)",
+            (SENT_AT - 360, SENT_AT - 350),
+        )
+        conn.execute(
+            "INSERT INTO recordings (id, camera, path, start_time, end_time, duration, "
+            "segment_size) VALUES ('s1', 'doorbell', '/x/1.mp4', ?, ?, 10.0, 5.0)",
+            (SENT_AT - 350, SENT_AT - 340),
+        )
+        conn.commit()
+        conn.close()
+        client = _v1_client(tmp, frigate_db=frigate_db)
+        with mock.patch("time.time", return_value=SENT_AT):
+            resp = client.get(
+                "/v1/coverage/doorbell", params={"start": SENT_AT - 400, "end": SENT_AT},
+            )
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+
+def _build_v1_scrub_sheets() -> dict[str, Any]:
+    from frigate_sidecar import db as db_mod
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        frigate_db = tmp / "frigate.db"
+        conn = sqlite3.connect(frigate_db)
+        conn.executescript(RECORDINGS_SCHEMA)
+        conn.execute(
+            "INSERT INTO recordings (id, camera, path, start_time, end_time, duration, "
+            "segment_size) VALUES ('s0', 'doorbell', '/x/0.mp4', ?, ?, 10.0, 5.0)",
+            (SENT_AT - 40, SENT_AT - 30),
+        )
+        conn.commit()
+        conn.close()
+
+        sidecar_db = tmp / "frigate-sidecar.db"
+        sconn = db_mod.open_sidecar(sidecar_db)
+        try:
+            start = 1_785_380_400.0
+            db_mod.upsert_scrub_sheet(
+                sconn, camera="doorbell", start_ts=start, interval_s=1.0, cols=12, rows=8,
+                cell_w=320, cell_h=180, count=24, path="doorbell/1.0/x.jpg", complete=False,
+            )
+            sconn.commit()
+        finally:
+            sconn.close()
+
+        client = _v1_client(tmp, frigate_db=frigate_db, sidecar_db=sidecar_db)
+        resp = client.get(
+            "/v1/scrub/doorbell/sheets", params={"start": start, "end": start + 200},
+        )
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+
+def _build_v1_reel() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        frigate_db = tmp / "frigate.db"
+        conn = sqlite3.connect(frigate_db)
+        conn.executescript(RECORDINGS_SCHEMA)
+        conn.executescript(FULL_EVENT_SCHEMA)
+        conn.executescript(REVIEWSEGMENT_SCHEMA)
+        conn.execute(
+            "INSERT INTO recordings (id, camera, path, start_time, end_time, duration, "
+            "segment_size) VALUES ('s0', 'doorbell', '/x/0.mp4', ?, ?, 10.0, 5.0)",
+            (SENT_AT - 200, SENT_AT - 190),
+        )
+        conn.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
+            "sub_label, has_clip, has_snapshot, data) VALUES ('e1', 'doorbell', 'package', ?, "
+            "?, 0.91, '[\"front_door\"]', 'amazon', 1, 1, ?)",
+            (SENT_AT - 150, SENT_AT - 140, json.dumps({"top_score": 0.91})),
+        )
+        conn.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
+            "sub_label, has_clip, has_snapshot) VALUES ('e2', 'doorbell', 'person', ?, NULL, "
+            "0.5, '[]', NULL, 0, 1)",
+            (SENT_AT - 50,),
+        )
+        conn.execute(
+            "INSERT INTO reviewsegment (id, camera, start_time, end_time, severity, data) "
+            "VALUES ('r1', 'doorbell', ?, ?, 'alert', ?)",
+            (SENT_AT - 152, SENT_AT - 138,
+             json.dumps({"objects": ["package"], "zones": ["front_door"], "detections": ["e1"]})),
+        )
+        conn.commit()
+        conn.close()
+
+        client = _v1_client(tmp, frigate_db=frigate_db)
+
+        async def _fixed_motion(
+            request: object, camera: str, start: float, end: float, scale: float
+        ) -> tuple[list[float], bool]:
+            n = int((end - start) / scale)
+            return [0.0] * n, False
+
+        from frigate_sidecar.routes import scrub as scrub_routes
+
+        with (
+            mock.patch("time.time", return_value=SENT_AT),
+            mock.patch.object(scrub_routes, "_fetch_and_aggregate_motion", _fixed_motion),
+        ):
+            resp = client.get(
+                "/v1/reel/doorbell",
+                params={"start": SENT_AT - 300, "end": SENT_AT, "motion_scale": 10},
+            )
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+
+def _build_v1_highlights() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        frigate_db = tmp / "frigate.db"
+        conn = sqlite3.connect(frigate_db)
+        conn.executescript(RECORDINGS_SCHEMA)
+        conn.executescript(FULL_EVENT_SCHEMA)
+        conn.execute(
+            "INSERT INTO recordings (id, camera, path, start_time, end_time, duration, "
+            "segment_size) VALUES ('s0', 'doorbell', '/x/0.mp4', ?, ?, 10.0, 5.0)",
+            (SENT_AT - 400, SENT_AT - 390),
+        )
+        conn.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
+            "sub_label, has_clip, has_snapshot, data) VALUES ('h0', 'doorbell', 'person', ?, "
+            "?, NULL, '[]', NULL, 1, 1, ?)",
+            (SENT_AT - 300, SENT_AT - 295, json.dumps({"top_score": 0.91})),
+        )
+        conn.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
+            "sub_label, has_clip, has_snapshot, data) VALUES ('h1', 'doorbell', 'car', ?, "
+            "?, NULL, '[]', NULL, 1, 0, ?)",
+            (SENT_AT - 200, SENT_AT - 195, json.dumps({"top_score": 0.62})),
+        )
+        conn.commit()
+        conn.close()
+
+        client = _v1_client(tmp, frigate_db=frigate_db)
+        resp = client.get(
+            "/v1/highlights/doorbell", params={"before": SENT_AT, "limit": 50},
+        )
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+
+def _build_v1_events_search() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        frigate_db = tmp / "frigate.db"
+        conn = sqlite3.connect(frigate_db)
+        conn.executescript(FULL_EVENT_SCHEMA)
+        conn.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
+            "sub_label, has_clip, has_snapshot, data) VALUES ('se1', 'doorbell', 'person', ?, "
+            "?, NULL, '[\"front_door\"]', 'amazon', 1, 1, ?)",
+            (SENT_AT - 300, SENT_AT - 295, json.dumps({"score": 0.91})),
+        )
+        conn.commit()
+        conn.close()
+
+        client = _v1_client(tmp, frigate_db=frigate_db)
+        resp = client.get(
+            "/v1/events/search", params={"cameras": "doorbell", "labels": "person", "limit": 10},
+        )
+        assert resp.status_code == 200, resp.text
+        body: list[Any] = resp.json()
+        return {"results": body}
+
+
+def _build_v1_events_related() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        frigate_db = tmp / "frigate.db"
+        conn = sqlite3.connect(frigate_db)
+        conn.executescript(FULL_EVENT_SCHEMA)
+        conn.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
+            "sub_label, has_clip, has_snapshot, data) VALUES ('re1', 'doorbell', 'person', ?, "
+            "?, NULL, '[]', NULL, 1, 1, ?)",
+            (SENT_AT - 300, SENT_AT - 290, json.dumps({"score": 0.91})),
+        )
+        conn.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
+            "sub_label, has_clip, has_snapshot, data) VALUES ('re2', 'street', 'person', ?, "
+            "?, NULL, '[]', NULL, 1, 1, ?)",
+            (SENT_AT - 298, SENT_AT - 288, json.dumps({"score": 0.75})),
+        )
+        conn.commit()
+        conn.close()
+
+        client = _v1_client(tmp, frigate_db=frigate_db)
+        resp = client.get("/v1/events/re1/related")
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+
+def _build_v1_push_map_live() -> dict[str, Any]:
+    from frigate_sidecar.push.situations import TrackStore
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        frigate_db = tmp / "frigate.db"
+        conn = sqlite3.connect(frigate_db)
+        conn.executescript(FRIGATE_EVENT_SCHEMA)
+        conn.commit()
+        conn.close()
+
+        client = _v1_client(tmp, frigate_db=frigate_db)
+        policy_settings.reset_for_tests()
+        active = dict(policy_settings.get_active())
+        active.update({
+            "camera_optics": {"doorbell": {"hfov": 90.0, "mount_ft": 10.0, "tilt_deg": 12.0}},
+            "camera_layout": {"doorbell": {"x": 0.5, "y": 0.5, "azimuth": 0.0, "fov": 90.0}},
+            "map_scale_ft": 200.0,
+        })
+        policy_settings.apply_settings(active)
+
+        class _Engine:
+            tracks = TrackStore()
+
+        engine = _Engine()
+        engine.tracks.observe_object(
+            "doorbell", "t1", (), now=SENT_AT, path_data=((0.5, 0.7, SENT_AT),), label="person",
+        )
+        client.app.state.push_engine = engine
+
+        with mock.patch("time.time", return_value=SENT_AT):
+            resp = client.get("/v1/push/map/live", params={"debug": 1})
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+
+def _build_v1_push_map_track() -> dict[str, Any]:
+    from frigate_sidecar.push.situations import TrackStore
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        frigate_db = tmp / "frigate.db"
+        conn = sqlite3.connect(frigate_db)
+        conn.executescript(FRIGATE_EVENT_SCHEMA)
+        conn.commit()
+        conn.close()
+
+        client = _v1_client(tmp, frigate_db=frigate_db)
+        policy_settings.reset_for_tests()
+        active = dict(policy_settings.get_active())
+        active.update({
+            "camera_optics": {"doorbell": {"hfov": 90.0, "mount_ft": 10.0, "tilt_deg": 12.0}},
+            "camera_layout": {"doorbell": {"x": 0.5, "y": 0.5, "azimuth": 0.0, "fov": 90.0}},
+            "map_scale_ft": 200.0,
+            "secure_area": {"x0": 0.4, "y0": 0.4, "x1": 0.6, "y1": 0.6},
+        })
+        policy_settings.apply_settings(active)
+
+        class _Engine:
+            tracks = TrackStore()
+
+        engine = _Engine()
+        path = tuple((0.5, 0.6 + 0.05 * i, SENT_AT - (2 - i)) for i in range(3))
+        engine.tracks.observe_object(
+            "doorbell", "ev1", (), now=SENT_AT, path_data=path, label="person",
+        )
+        client.app.state.push_engine = engine
+
+        resp = client.get(
+            "/v1/push/map/track", params={"camera": "doorbell", "event_id": "ev1"},
+        )
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+
 #: fixture filename -> zero-arg builder. MANIFEST.json is derived, not built.
 FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "la_content_state.json": _build_la_content_state,
@@ -333,6 +653,14 @@ FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "push_decisions.json": _build_push_decisions,
     "capabilities.json": _build_capabilities,
     "card_push.json": _build_card_push,
+    "v1_coverage.json": _build_v1_coverage,
+    "v1_scrub_sheets.json": _build_v1_scrub_sheets,
+    "v1_reel.json": _build_v1_reel,
+    "v1_highlights.json": _build_v1_highlights,
+    "v1_events_search.json": _build_v1_events_search,
+    "v1_events_related.json": _build_v1_events_related,
+    "v1_push_map_live.json": _build_v1_push_map_live,
+    "v1_push_map_track.json": _build_v1_push_map_track,
 }
 
 MANIFEST_NAME = "MANIFEST.json"

@@ -301,7 +301,7 @@ def test_autotune_endpoint_400_on_empty_capture(
         client = _autotune_client(tmp_path, frigate_db_path, sidecar_db_path, [])
         resp = client.post("/v1/push/map/autotune")
         assert resp.status_code == 400
-        assert "cross-camera" in resp.json()["detail"]
+        assert "cross-camera" in resp.json()["detail"]["message"]
     finally:
         policy_settings.reset_for_tests()
 

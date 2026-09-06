@@ -1,0 +1,14 @@
+{
+  "event_id": "re1",
+  "related": [
+    {
+      "camera": "street",
+      "end_time": 1785952334.704,
+      "event_id": "re2",
+      "label": "person",
+      "score": 0.75,
+      "source": "overlap",
+      "start_time": 1785952324.704
+    }
+  ]
+}

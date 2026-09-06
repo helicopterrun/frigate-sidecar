@@ -215,7 +215,7 @@ def test_map_track_404s_without_calibration_or_track(
     client = _make_client(tmp_path, frigate_db_path, sidecar_db_path)
     # No map policy at all: not projectable.
     r = client.get("/v1/push/map/track?camera=cam&event_id=ev1")
-    assert r.status_code == 404 and r.json()["detail"] == "not_projectable"
+    assert r.status_code == 404 and r.json()["detail"]["error"] == "not_projectable"
     # Calibrated but the track doesn't exist anywhere.
     _apply_map_policy()
     r = client.get("/v1/push/map/track?camera=cam&event_id=ghost")

@@ -32,6 +32,13 @@ from frigate_sidecar.frigate_api import (
     get_async_client,
 )
 from frigate_sidecar.frigate_config import recording_retention_days
+from frigate_sidecar.models.wire import (
+    CapabilitiesResponse,
+    CoverageResponse,
+    HighlightsResponse,
+    ReelResponse,
+    SheetsResponse,
+)
 from frigate_sidecar.push import policy_settings
 from frigate_sidecar.scrub import grid
 from frigate_sidecar.scrub.motion import aggregate_motion, safe_fetch_scale
@@ -122,7 +129,7 @@ def _require_known_camera(request: Request, camera: str) -> None:
         )
 
 
-@router.get("/capabilities")
+@router.get("/capabilities", response_model=CapabilitiesResponse)
 async def capabilities(request: Request) -> dict[str, Any]:
     """No auth required -- this is the one `/v1` endpoint the client probes
     before it knows whether the sidecar is even reachable."""
@@ -181,7 +188,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
     }
 
 
-@router.get("/coverage/{camera}")
+@router.get("/coverage/{camera}", responses={200: {"model": CoverageResponse}})
 async def coverage(camera: str, start: float, end: float, request: Request) -> Any:
     """Recording coverage (§4.4) -- what Frigate actually recorded, read live
     from `frigate.db` so it never drifts from reality."""
@@ -210,6 +217,7 @@ async def coverage(camera: str, start: float, end: float, request: Request) -> A
     result["recording_retention_days"] = recording_retention_days(
         settings.frigate.config_path, camera
     )
+    CoverageResponse.model_validate(result)
     return _etagged(request, result)
 
 
@@ -270,7 +278,7 @@ async def scrub_coverage(camera: str, start: float, end: float, request: Request
     }
 
 
-@router.get("/scrub/{camera}/sheets")
+@router.get("/scrub/{camera}/sheets", responses={200: {"model": SheetsResponse}})
 async def scrub_sheets(
     camera: str, start: float, end: float, request: Request, interval: float | None = None
 ) -> Any:
@@ -314,7 +322,9 @@ async def scrub_sheets(
     # The index changes as sheets are published, so it isn't immutable like a
     # sheet image -- ETag it (304 on a matching If-None-Match, via the same
     # helper /v1/coverage and /v1/reel use) and mark it must-revalidate.
-    response = _etagged(request, {"sheets": sheets})
+    sheets_body = {"sheets": sheets}
+    SheetsResponse.model_validate(sheets_body)
+    response = _etagged(request, sheets_body)
     response.headers["Cache-Control"] = "no-cache"
     return response
 
@@ -699,7 +709,7 @@ def _reviews_json(
     return out
 
 
-@router.get("/reel/{camera}")
+@router.get("/reel/{camera}", responses={200: {"model": ReelResponse}})
 async def reel(
     camera: str, start: float, end: float, request: Request, motion_scale: float = 10.0
 ) -> Any:
@@ -758,6 +768,7 @@ async def reel(
     }
     if motion_unavailable:
         body["motion_unavailable"] = True
+    ReelResponse.model_validate(body)
     return _etagged(request, body)
 
 
@@ -803,7 +814,11 @@ def _cluster_highlights(
     return clusters
 
 
-@router.get("/highlights/{camera}")
+@router.get(
+    "/highlights/{camera}",
+    response_model=HighlightsResponse,
+    response_model_exclude_unset=True,
+)
 async def highlights(
     camera: str,
     request: Request,

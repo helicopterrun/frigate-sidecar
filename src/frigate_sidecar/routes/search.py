@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from frigate_sidecar.config import Settings
 from frigate_sidecar.db import open_frigate_ro, open_sidecar
+from frigate_sidecar.models.wire import RelatedResponse, SearchResultItem
 from frigate_sidecar.push import card_store
 
 router = APIRouter(prefix="/v1", tags=["search"])
@@ -139,7 +140,7 @@ def _query_search(
     return out
 
 
-@router.get("/events/search")
+@router.get("/events/search", response_model=list[SearchResultItem])
 async def events_search(
     request: Request,
     q: str = Query(default=""),
@@ -268,7 +269,7 @@ def _query_related(
         conn.close()
 
 
-@router.get("/events/{event_id}/related")
+@router.get("/events/{event_id}/related", response_model=RelatedResponse)
 async def events_related(event_id: str, request: Request) -> dict[str, Any]:
     """Other cameras that saw the same object as `event_id`: cards the push
     pipeline's cross-camera dedup already linked, unioned with same-label

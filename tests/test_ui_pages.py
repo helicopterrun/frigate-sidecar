@@ -194,7 +194,7 @@ def test_triage_degrades_without_frigate_db(db_less_client: TestClient) -> None:
 def test_analysis_api_degrades_without_frigate_db(db_less_client: TestClient) -> None:
     r = db_less_client.get("/analysis/zone-hits", params={"days": 7})
     assert r.status_code == 503
-    assert "Frigate DB not found" in r.json()["detail"]
+    assert "Frigate DB not found" in r.json()["detail"]["message"]
 
 
 def test_settings_page_unifies_surfaces(client: TestClient) -> None:

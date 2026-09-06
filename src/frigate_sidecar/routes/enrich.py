@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 from frigate_sidecar.config import Settings
 from frigate_sidecar.db import open_sidecar
+from frigate_sidecar.errors import error_detail
 from frigate_sidecar.faces import enrich
 from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient, get_async_client
 
@@ -182,15 +183,17 @@ async def cluster_thumb(event_id: str, request: Request) -> Response:
     # Only ids we enriched are proxied — the path param never becomes a free
     # fetch against the unauthenticated origin.
     if row is None:
-        raise HTTPException(status_code=404, detail="unknown event")
+        raise HTTPException(status_code=404, detail=error_detail("unknown_event", "unknown event"))
     client = get_async_client(request.app)
     url = f"{s.frigate.base_url}/api/events/{event_id}/thumbnail.jpg"
     try:
         r = await client.get(url, timeout=10.0)
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail="frigate unreachable") from exc
+        raise HTTPException(
+            status_code=502, detail=error_detail("upstream_unavailable", "frigate unreachable")
+        ) from exc
     if r.status_code != 200:
-        raise HTTPException(status_code=404, detail="no thumbnail")
+        raise HTTPException(status_code=404, detail=error_detail("not_found", "no thumbnail"))
     return Response(
         content=r.content,
         media_type="image/jpeg",
@@ -238,7 +241,9 @@ class NamePayload(BaseModel):
 def cluster_name(cluster_id: int, payload: NamePayload, request: Request) -> JSONResponse:
     name = payload.name.strip()
     if not name or len(name) > 100:
-        raise HTTPException(status_code=400, detail="name must be 1-100 chars")
+        raise HTTPException(
+            status_code=400, detail=error_detail("invalid_name", "name must be 1-100 chars")
+        )
     s = _settings(request)
     conn = open_sidecar(s.sidecar.db_path)
     try:
@@ -246,7 +251,10 @@ def cluster_name(cluster_id: int, payload: NamePayload, request: Request) -> JSO
             "UPDATE face_clusters SET name = ? WHERE cluster_id = ?", (name, cluster_id)
         )
         if not cur.rowcount:
-            raise HTTPException(status_code=404, detail="cluster not found")
+            raise HTTPException(
+                status_code=404,
+                detail=error_detail("cluster_not_found", "cluster not found"),
+            )
         enrich.rebuild_centroid(conn, cluster_id)
         relabeled = _retro_label(conn, s, cluster_id, name)
         conn.commit()
@@ -262,7 +270,12 @@ class MergePayload(BaseModel):
 @router.post("/enrich/clusters/{cluster_id}/merge")
 def cluster_merge(cluster_id: int, payload: MergePayload, request: Request) -> JSONResponse:
     if payload.into == cluster_id:
-        raise HTTPException(status_code=400, detail="cannot merge a cluster into itself")
+        raise HTTPException(
+                status_code=400,
+                detail=error_detail(
+                    "invalid_merge", "cannot merge a cluster into itself"
+                ),
+            )
     s = _settings(request)
     conn = open_sidecar(s.sidecar.db_path)
     try:
@@ -270,7 +283,10 @@ def cluster_merge(cluster_id: int, payload: MergePayload, request: Request) -> J
             if not conn.execute(
                 "SELECT 1 FROM face_clusters WHERE cluster_id = ?", (cid,)
             ).fetchone():
-                raise HTTPException(status_code=404, detail=f"cluster {cid} not found")
+                raise HTTPException(
+                    status_code=404,
+                    detail=error_detail("cluster_not_found", f"cluster {cid} not found"),
+                )
         conn.execute(
             "UPDATE face_enrichments SET cluster_id = ? WHERE cluster_id = ?",
             (payload.into, cluster_id),
@@ -296,7 +312,10 @@ def cluster_delete(cluster_id: int, request: Request) -> JSONResponse:
         cur = conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (cluster_id,))
         conn.commit()
         if not cur.rowcount:
-            raise HTTPException(status_code=404, detail="cluster not found")
+            raise HTTPException(
+                status_code=404,
+                detail=error_detail("cluster_not_found", "cluster not found"),
+            )
         return JSONResponse({"ok": True})
     finally:
         conn.close()
@@ -318,7 +337,10 @@ def sighting_remove(event_id: str, request: Request) -> JSONResponse:
             "SELECT cluster_id FROM face_enrichments WHERE event_id = ?", (event_id,)
         ).fetchone()
         if row is None or row["cluster_id"] is None:
-            raise HTTPException(status_code=404, detail="sighting not in a cluster")
+            raise HTTPException(
+                status_code=404,
+                detail=error_detail("not_found", "sighting not in a cluster"),
+            )
         cluster_id = int(row["cluster_id"])
         conn.execute(
             "UPDATE face_enrichments SET cluster_id = NULL, embedding = NULL "

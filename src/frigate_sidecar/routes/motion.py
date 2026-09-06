@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from frigate_sidecar.analysis import motion_active, motion_compare
+from frigate_sidecar.errors import error_detail
 from frigate_sidecar.frigate_api import FrigateAPIError
 from frigate_sidecar.routes._cache import ttl_page_cache
 
@@ -105,7 +106,9 @@ def motion_view(
                 except ValueError as exc:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"bad target {target!r}: {exc}",
+                        detail=error_detail(
+                            "invalid_target", f"bad target {target!r}: {exc}"
+                        ),
                     ) from exc
                 # motion_active.analyze only takes a "since N days ago
                 # through now" window (no upper bound), so an explicit past

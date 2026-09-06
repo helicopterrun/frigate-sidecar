@@ -60,6 +60,41 @@ The `scrub:` config section:
   disk. The defaults follow the design spec and rarely need touching;
   retention pruning runs automatically.
 - `preserve_source_aspect` / `format` control how cells are rendered.
+- `min_free_bytes` — free-space floor on the cache filesystem; a tick is
+  skipped rather than grinding out ENOSPC below it (default 2GiB).
+- `recent_interval_s` / `aged_interval_s` — cadence of the two decode
+  tiers, finest to coarsest (default 1.0s / 5.0s).
+- `match_keyframe_cadence` — generate a camera at its own keyframe cadence
+  when coarser than `recent_interval_s`, instead of full-decoding (default
+  on).
+- `derived_intervals_s` — extra cadences cheaply re-tiled from an existing
+  decode tier (default `[60, 300, 900, 3600]`).
+- `aged_after_h` — footage age (hours) at which the aged tier's cadence
+  takes over from the recent tier's (default 24).
+- `retention_days` — how long generated sprite sheets are kept before
+  pruning (default 4).
+- `cell_w` — sprite-sheet cell width in pixels (default 320); `cell_h` is
+  the fallback height used only when the source aspect can't be measured or
+  `preserve_source_aspect` is off (default 180).
+- `sheet_cols` / `sheet_rows` — sprite-sheet grid size (default 12 × 8).
+- `generate_interval_s` — ceiling on the generation loop's tick length
+  (default 60s).
+- `live_edge_interval_s` — how often the trailing-window (live-edge) pass
+  runs; the floor on how stale the newest cell can be (default 20s).
+- `sheet_version_grace_s` — how long a superseded still-filling sheet
+  version stays servable after a larger version publishes (default 900s).
+- `prune_interval_s` — retention-sweep cadence for the in-process generator
+  (default 3600s).
+- `ffmpeg_concurrency` — cap on concurrent ffmpeg/ffprobe children (default
+  3).
+- `backfill_segments_per_cycle` / `backfill_time_budget_s` — segment and
+  wall-clock caps on the backfill phase per cycle (default 120 / 22s).
+- `live_edge_segments` / `live_edge_lookback_s` — cap on the live-edge pass
+  per camera per cycle, and how far back it resumes from before jumping
+  forward to the edge (default 90 / 900s).
+- `derive_time_reserve_s` — wall-clock carved out of
+  `backfill_time_budget_s` for the derived-tier decimation pass (default
+  5s).
 
 ## If it goes wrong
 
