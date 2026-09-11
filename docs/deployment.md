@@ -64,6 +64,30 @@ for read-only WAL clients on your SQLite build — extend the ACL to `rwX` on
 
 It is opt-in and independent of the main server.
 
+### Self-heal healthcheck timer (recommended in prod)
+
+`contrib/frigate-sidecar-healthcheck.{sh,service,timer}` poll `/healthz`
+every 60s and `systemctl restart frigate-sidecar` after **three consecutive**
+failures -- a second line of defense alongside the main unit's own
+`Restart=on-failure`, for the case where the process is alive but wedged
+(event loop stuck, upstream pool exhausted) rather than crashed. A single
+503 never restarts: `/healthz` also reports MQTT reconnects and late scrub
+cycles, which clear on their own. The script reads `bind_host`/`bind_port`
+from the config (prod binds a LAN address, not loopback). Install and enable
+it on prod:
+
+```sh
+sudo install -m 0755 contrib/frigate-sidecar-healthcheck.sh /usr/local/bin/frigate-sidecar-healthcheck
+sudo install -m 0644 contrib/frigate-sidecar-healthcheck.service \
+                     contrib/frigate-sidecar-healthcheck.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now frigate-sidecar-healthcheck.timer
+```
+
+Watch it with `journalctl -u frigate-sidecar-healthcheck`. Override the
+config path with `Environment=FRIGATE_SIDECAR_CONFIG=...` in the unit if it
+lives elsewhere.
+
 ## Networking
 
 `network_mode: host` is the default because the sidecar needs to reach

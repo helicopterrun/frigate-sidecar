@@ -127,16 +127,19 @@ def test_healthz_degraded_when_mqtt_disconnected(client: TestClient) -> None:
 def test_healthz_reports_frigate_ok_without_gating_status(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import httpx
+
+    from frigate_sidecar.routes import health as health_mod
+
     calls = []
 
-    class _Resp:
-        status_code = 200
-
-    def _fake_get(url: str, timeout: float) -> _Resp:
+    async def _fake_get(
+        self: object, url: str, timeout: object = None
+    ) -> httpx.Response:
         calls.append(url)
-        return _Resp()
+        return httpx.Response(200, request=httpx.Request("GET", url))
 
-    monkeypatch.setattr("frigate_sidecar.routes.health.httpx.get", _fake_get)
+    monkeypatch.setattr(health_mod.httpx.AsyncClient, "get", _fake_get)
     r = client.get("/healthz")
     assert r.status_code == 200
     body = r.json()
@@ -144,19 +147,24 @@ def test_healthz_reports_frigate_ok_without_gating_status(
     assert calls == ["http://frigate.test:5000/api/version"]
 
 
-def test_healthz_frigate_unreachable_is_degraded_but_not_503(
+def test_healthz_frigate_unreachable_is_degraded(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Frigate being down must NOT flip /healthz's status code: watchdog.py
-    already restarts the Frigate container directly, and restarting the
-    sidecar (via a 503 here) would fix nothing while duplicating that
-    recovery path. It should still be visible in `checks`, though."""
+    """Frigate being unreachable is still informational (2026-09-10 gating
+    fix): watchdog.py restarts the Frigate container directly, and only the
+    sidecar's *own* pool being wedged (`pool_exhausted`) gates /healthz --
+    an ordinary connect failure to Frigate itself must not flip the sidecar
+    to 503."""
     import httpx
 
-    def _fake_get(url: str, timeout: float) -> None:
+    from frigate_sidecar.routes import health as health_mod
+
+    async def _fake_get(
+        self: object, url: str, timeout: object = None
+    ) -> httpx.Response:
         raise httpx.ConnectError("boom")
 
-    monkeypatch.setattr("frigate_sidecar.routes.health.httpx.get", _fake_get)
+    monkeypatch.setattr(health_mod.httpx.AsyncClient, "get", _fake_get)
     r = client.get("/healthz")
     assert r.status_code == 200
     body = r.json()
@@ -164,19 +172,74 @@ def test_healthz_frigate_unreachable_is_degraded_but_not_503(
     assert body["checks"]["frigate"] == "unreachable"
 
 
+def test_healthz_frigate_pool_exhausted_is_degraded(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`httpx.PoolTimeout` through the stream-client pool is the one frigate
+    outcome that gates /healthz: it means the sidecar's own proxy pool is
+    wedged and no proxied request can get an upstream connection (the
+    2026-09-10 incident), which a restart fixes."""
+    import httpx
+
+    class _FakeStreamClient:
+        is_closed = False
+
+        async def get(self, url: str, timeout: object = None) -> httpx.Response:
+            raise httpx.PoolTimeout("pool")
+
+    client.app.state.stream_http_client = _FakeStreamClient()
+    r = client.get("/healthz")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["frigate"] == "pool_exhausted"
+
+
+def test_healthz_upstream_pool_saturated_is_degraded(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+
+    from frigate_sidecar import frigate_api
+
+    class _FakeClient:
+        is_closed = False
+
+        async def get(self, url: str, timeout: object = None) -> httpx.Response:
+            return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(
+        "frigate_sidecar.routes.health.pool_stats",
+        lambda c: {
+            "connections": frigate_api._STREAM_LIMITS.max_connections,
+            "active": frigate_api._STREAM_LIMITS.max_connections,
+            "idle": 0,
+        },
+    )
+    client.app.state.stream_http_client = _FakeClient()
+    r = client.get("/healthz")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["upstream_pool"]["idle"] == 0
+
+
 def test_healthz_frigate_probe_is_cached_within_window(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import httpx
+
+    from frigate_sidecar.routes import health as health_mod
+
     calls = []
 
-    class _Resp:
-        status_code = 200
-
-    def _fake_get(url: str, timeout: float) -> _Resp:
+    async def _fake_get(
+        self: object, url: str, timeout: object = None
+    ) -> httpx.Response:
         calls.append(url)
-        return _Resp()
+        return httpx.Response(200, request=httpx.Request("GET", url))
 
-    monkeypatch.setattr("frigate_sidecar.routes.health.httpx.get", _fake_get)
+    monkeypatch.setattr(health_mod.httpx.AsyncClient, "get", _fake_get)
     client.get("/healthz")
     client.get("/healthz")
     assert len(calls) == 1  # second call served from the cached verdict

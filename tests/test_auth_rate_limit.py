@@ -38,7 +38,11 @@ def _build(
         proxy=ProxySection(enabled=True),
     )
     app = create_app(settings)
+    # /api/login goes through the proxy catch-all, which uses the separate
+    # stream client since the 2026-09-10 pool-separation fix -- pre-seed both
+    # so nothing touches the network.
     app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app.state.stream_http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return TestClient(app)
 
 

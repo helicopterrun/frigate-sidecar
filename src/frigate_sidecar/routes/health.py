@@ -6,12 +6,17 @@ static "ok" healthcheck kept reporting healthy (server.py `_push_subscriber_loop
 docstring). A degraded check returns 503 so the Docker/compose healthchecks
 (which treat any non-2xx as unhealthy) and plain `curl -f` both notice.
 
-Frigate reachability is checked too (`checks["frigate"]`), but -- unlike
-mqtt/db/scrub/face_enrich -- it never flips the status code. `watchdog.py`
-already probes Frigate directly and restarts *that* container when it hangs;
-a 503 here would instead get the *sidecar* restarted by systemd/Docker,
-which fixes nothing and duplicates recovery logic in the wrong process. See
-`_probe_frigate` for detail.
+Frigate reachability (`checks["frigate"]`) is still informational -- a
+Frigate outage must not restart the *sidecar* (`watchdog.py` restarts the
+Frigate container; a sidecar restart loop would only drop push/MQTT state).
+What DOES gate the status code, since the 2026-09-10 incident, is the
+sidecar's *own* ability to reach Frigate through the proxy's stream-client
+pool: the probe now goes through that pool (frigate_api.get_stream_client)
+and reports `pool_exhausted` on `httpx.PoolTimeout`. That day every
+Frigate-backed route hung/502'd for hours while `/healthz` stayed 200,
+because the probe used its own fresh connection and never saw the wedged
+pool. `checks["upstream_pool"]` additionally reports pool stats and flips
+to degraded when the pool is at `max_connections` with nothing idle.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from frigate_sidecar import __version__, db
+from frigate_sidecar.frigate_api import _STREAM_LIMITS, pool_stats
 
 router = APIRouter(tags=["meta"])
 
@@ -39,25 +45,32 @@ _FRIGATE_PROBE_INTERVAL_S = 30.0
 _FRIGATE_PROBE_TIMEOUT_S = 3.0
 
 
-def _probe_frigate(app: Any, settings: Any, now: float) -> str:
-    """Cheap `/api/version` reachability check, rate-limited per app instance.
+async def _probe_frigate(app: Any, settings: Any, now: float) -> str:
+    """Cheap `/api/version` check through the proxy's stream-client pool,
+    rate-limited per app instance.
 
-    Deliberately does NOT feed into /healthz's overall `ok`/status code.
-    `watchdog.py` already probes Frigate directly and restarts the Frigate
-    container itself when it hangs; that is the correct recovery action.
-    Flipping /healthz to 503 here would instead prompt systemd/Docker to
-    restart the *sidecar*, which does nothing to fix Frigate and just adds a
-    second, redundant (and wrong) recovery path. This check exists so a
-    Frigate outage is visible in the sidecar's own health output, not to
-    trigger sidecar restarts.
+    Returns `ok` / `error` (non-200) / `unreachable` (connect/read failure)
+    -- all informational, see module docstring -- or `pool_exhausted`, the
+    one outcome that gates /healthz: it means the sidecar's own pool is
+    wedged and no proxied request can get an upstream connection, which a
+    restart fixes. Falls back to a standalone request when the app has no
+    stream client (tests, bare create_app).
     """
     cache = getattr(app.state, "_frigate_health_cache", None)
     if cache is not None and (now - cache[0]) < _FRIGATE_PROBE_INTERVAL_S:
         return cache[1]  # type: ignore[no-any-return]
     url = settings.frigate.base_url.rstrip("/") + "/api/version"
+    timeout = httpx.Timeout(_FRIGATE_PROBE_TIMEOUT_S, pool=_FRIGATE_PROBE_TIMEOUT_S)
+    stream_client = getattr(app.state, "stream_http_client", None)
     try:
-        resp = httpx.get(url, timeout=_FRIGATE_PROBE_TIMEOUT_S)
+        if stream_client is not None:
+            resp = await stream_client.get(url, timeout=timeout)
+        else:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, timeout=timeout)
         status = "ok" if resp.status_code == 200 else "error"
+    except httpx.PoolTimeout:
+        status = "pool_exhausted"
     except httpx.HTTPError:
         status = "unreachable"
     app.state._frigate_health_cache = (now, status)
@@ -65,16 +78,30 @@ def _probe_frigate(app: Any, settings: Any, now: float) -> str:
 
 
 @router.get("/healthz")
-def healthz(request: Request) -> JSONResponse:
+async def healthz(request: Request) -> JSONResponse:
     app = request.app
     settings = app.state.settings
     now = time.time()
     checks: dict[str, Any] = {}
     ok = True
 
-    # Informational only -- see `_probe_frigate` docstring for why this does
-    # not gate the status code.
-    checks["frigate"] = _probe_frigate(app, settings, now)
+    checks["frigate"] = await _probe_frigate(app, settings, now)
+    if checks["frigate"] == "pool_exhausted":
+        ok = False
+
+    stream_client = getattr(app.state, "stream_http_client", None)
+    if stream_client is not None:
+        stats = pool_stats(stream_client)
+        if stats:
+            checks["upstream_pool"] = stats
+            max_connections = _STREAM_LIMITS.max_connections
+            saturated = (
+                max_connections is not None
+                and stats.get("connections", 0) >= max_connections
+                and stats.get("idle", 0) == 0
+            )
+            if saturated:
+                ok = False
 
     # `push_subscriber` is set by the lifespan when push starts; its absence
     # means the lifespan hasn't run (tests, bare create_app under another

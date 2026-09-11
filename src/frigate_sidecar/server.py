@@ -513,6 +513,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         client = getattr(app.state, "http_client", None)
         if client is not None:
             await client.aclose()
+        stream_client = getattr(app.state, "stream_http_client", None)
+        if stream_client is not None:
+            await stream_client.aclose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

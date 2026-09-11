@@ -34,9 +34,10 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
+from starlette.types import Send
 
 from frigate_sidecar.errors import error_detail
-from frigate_sidecar.frigate_api import get_async_client
+from frigate_sidecar.frigate_api import get_stream_client, pool_stats
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +66,87 @@ _WS_SUBPROTOCOL_HEADER = "sec-websocket-protocol"
 # streams the user pauses and seeks, so the client's own (now finite) default
 # timeout would cut them off mid-view. Scoped to this one request rather than
 # the shared client's default -- see frigate_api._DEFAULT_TIMEOUT.
-_UPSTREAM_TIMEOUT = httpx.Timeout(30.0, read=None)
+_UPSTREAM_TIMEOUT = httpx.Timeout(30.0, read=None, pool=5.0)
 
 # `read=None` above means httpx itself will wait forever on a stalled chunk;
 # this is what actually bounds that -- a chunk that doesn't arrive within this
 # many idle seconds ends the response instead of holding the connection (and
 # the client's wait) open indefinitely.
 _IDLE_CHUNK_TIMEOUT_S = 30.0
+
+# The idle-chunk watchdog above only bounds a stalled *upstream*. It does
+# nothing for a client that stopped reading (a paused player): the `send()`
+# call in `_BoundedStreamingResponse.stream_response` then blocks forever on
+# backpressure while still holding the upstream connection open underneath it
+# -- exactly what pinned the shared pool on 2026-09-10 and 502'd every other
+# Frigate-backed route for 30s at a time. `_CLIENT_STALL_TIMEOUT_S` bounds
+# each individual `send()`; `_STREAM_MAX_DURATION_S` bounds the whole
+# response regardless of how promptly the client keeps reading (HLS
+# segments/vod chunks are seconds long and playlists are tiny, so a real
+# response finishes in a small fraction of this).
+_CLIENT_STALL_TIMEOUT_S = 30.0
+_STREAM_MAX_DURATION_S = 600.0
+
+
+class _BoundedStreamingResponse(StreamingResponse):
+    """StreamingResponse that also bounds the client side and the total
+    duration of the response, not just a stalled upstream chunk.
+
+    Ending the response here (rather than letting `send()` hang, or raising
+    into uvicorn) makes the `stream_body()` generator's `finally: await
+    resp.aclose()` run via an explicit `aclose()` on the body iterator, so the
+    upstream connection is always released back to the pool.
+    """
+
+    def __init__(self, *args: Any, log_path: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._log_path = log_path
+
+    async def stream_response(self, send: Send) -> None:
+        await send(
+            {"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers}
+        )
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + _STREAM_MAX_DURATION_S
+        bytes_sent = 0
+        reason: str | None = None
+        async for chunk in self.body_iterator:
+            if not isinstance(chunk, (bytes, memoryview)):
+                chunk = chunk.encode(self.charset)
+            if loop.time() >= deadline:
+                reason = "max_duration"
+                break
+            try:
+                await asyncio.wait_for(
+                    send({"type": "http.response.body", "body": chunk, "more_body": True}),
+                    timeout=_CLIENT_STALL_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                reason = "client_stall"
+                break
+            bytes_sent += len(chunk)
+
+        if reason is not None:
+            logger.warning(
+                "proxy: stream aborted path=%s reason=%s bytes=%d",
+                self._log_path,
+                reason,
+                bytes_sent,
+            )
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
+
+        # Best-effort close frame either way: a normal end-of-stream needs it
+        # to terminate the response cleanly; on a stall/deadline abort the
+        # client is presumably not reading anyway, so a failure here is
+        # expected and harmless.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                send({"type": "http.response.body", "body": b"", "more_body": False}),
+                timeout=_CLIENT_STALL_TIMEOUT_S,
+            )
 
 
 def _upstream_url(settings: Any, path: str, query: str, *, scheme_ws: bool = False) -> str:
@@ -128,7 +203,7 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
 
     body = await request.body()
 
-    client = get_async_client(request.app)
+    client = get_stream_client(request.app)
     try:
         req = client.build_request(
             request.method,
@@ -138,6 +213,15 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
             timeout=_UPSTREAM_TIMEOUT,
         )
         resp = await client.send(req, stream=True)
+    except httpx.PoolTimeout as exc:
+        stats = pool_stats(client)
+        logger.warning(
+            "proxy: pool exhausted streaming %s pool_stats=%s", upstream, stats
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=error_detail("upstream_busy", "upstream connection pool exhausted"),
+        ) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=error_detail("upstream_unavailable", f"upstream error: {exc}")
@@ -176,13 +260,20 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
                         break
                     yield chunk
         finally:
-            await resp.aclose()
+            # A cancelled `__anext__` (e.g. from `_BoundedStreamingResponse`'s
+            # own stall/duration watchdog reaching in and closing this
+            # generator) must never skip releasing the upstream connection.
+            try:
+                await resp.aclose()
+            except Exception:
+                logger.debug("proxy: resp.aclose() raised closing %s", upstream, exc_info=True)
 
-    response = StreamingResponse(
+    response = _BoundedStreamingResponse(
         stream_body(),
         status_code=resp.status_code,
         headers=headers,
         media_type=resp.headers.get("content-type"),
+        log_path=path,
     )
     # Set-Cookie is the one header Frigate can legitimately send more than once
     # (login sets both the session and its refresh companion); reading it off

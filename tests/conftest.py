@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import types
 from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 import pytest
 
 # Approximation of Frigate's `event` table — enough columns for our queries.
@@ -100,3 +102,52 @@ def _reset_ladder_policy() -> Iterator[None]:
     ladder_policy.set_zone_overrides(original_overrides)
     ladder_policy.set_off_cells(original_off_cells)
     policy_settings.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _default_frigate_reachable(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Default `/healthz`'s frigate probe to reachable ("ok").
+
+    `_probe_frigate` (routes/health.py) is async and, since the
+    stream-client-pool fix, goes through `app.state.stream_http_client` when
+    present and falls back to a throwaway `httpx.AsyncClient` otherwise.
+    Only `pool_exhausted` gates `/healthz` to 503; without this default a
+    test that hits `/healthz` incidentally would make a real connect attempt
+    to the fixture's fake `frigate.test:5000` host and see "unreachable"
+    every time (informational now, but still noise).
+
+    Patching `httpx.AsyncClient.get` process-wide would be wrong here --
+    plenty of *other* tests (test_frigate_api, test_push_mqtt, test_auth,
+    ...) construct their own real `httpx.AsyncClient` with a mock transport
+    and expect its `.get`/request methods to actually run. So this replaces
+    only the `httpx` name bound inside `routes.health`'s own module
+    namespace with a stand-in whose `AsyncClient` always answers 200 for the
+    fallback path -- every other module's `import httpx` is untouched. That
+    stand-in is also assigned onto `app.state.stream_http_client` by the
+    `client` fixtures indirectly by having Settings/create_app leave that
+    attribute unset in bare `create_app()` calls, so the fallback path is
+    what most tests hit; tests that set a custom fake/real stream client
+    override its `get` themselves, which wins over this default.
+    """
+
+    class _FakeResponse:
+        status_code = 200
+
+    class _FakeAsyncClient:
+        async def __aenter__(self) -> _FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        async def get(self, url: str, *args: object, **kwargs: object) -> _FakeResponse:
+            return _FakeResponse()
+
+    fake_httpx = types.SimpleNamespace(
+        AsyncClient=_FakeAsyncClient,
+        Timeout=httpx.Timeout,
+        PoolTimeout=httpx.PoolTimeout,
+        HTTPError=httpx.HTTPError,
+    )
+    monkeypatch.setattr("frigate_sidecar.routes.health.httpx", fake_httpx)
+    yield
