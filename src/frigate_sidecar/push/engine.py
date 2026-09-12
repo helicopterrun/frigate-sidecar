@@ -153,7 +153,12 @@ class PushEngine:
         life so a match doesn't pay connection setup to Frigate on the
         interrupt path."""
         if self._http is None or self._http.is_closed:
-            self._http = httpx.AsyncClient(timeout=self.thumbnail_timeout_s)
+            self._http = httpx.AsyncClient(
+                timeout=self.thumbnail_timeout_s,
+                limits=httpx.Limits(
+                    max_connections=20, max_keepalive_connections=10, keepalive_expiry=15.0
+                ),
+            )
         return self._http
 
     async def aclose(self) -> None:

@@ -68,6 +68,19 @@ _WS_SUBPROTOCOL_HEADER = "sec-websocket-protocol"
 # the shared client's default -- see frigate_api._DEFAULT_TIMEOUT.
 _UPSTREAM_TIMEOUT = httpx.Timeout(30.0, read=None, pool=5.0)
 
+# Bounds how long we'll wait for the upstream's response headers to arrive
+# (the `client.send(req, stream=True)` call below). `_UPSTREAM_TIMEOUT`'s
+# `read=None` is scoped to the body stream, not header arrival -- an upstream
+# that accepts the connection but never sends a status line/headers (Frigate's
+# nginx half-closing a keepalive socket) would otherwise hang this call
+# indefinitely with nothing to show for it at `/healthz`.
+_HEADER_WAIT_TIMEOUT_S = 10.0
+
+# A `client.send` that takes longer than this to return (but still succeeds)
+# is worth a log line even though it didn't time out -- an early signal that
+# the pool is under pressure before it actually wedges.
+_SLOW_ACQUIRE_LOG_THRESHOLD_S = 1.0
+
 # `read=None` above means httpx itself will wait forever on a stalled chunk;
 # this is what actually bounds that -- a chunk that doesn't arrive within this
 # many idle seconds ends the response instead of holding the connection (and
@@ -103,28 +116,44 @@ class _BoundedStreamingResponse(StreamingResponse):
         self._log_path = log_path
 
     async def stream_response(self, send: Send) -> None:
-        await send(
-            {"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers}
-        )
         loop = asyncio.get_event_loop()
         deadline = loop.time() + _STREAM_MAX_DURATION_S
         bytes_sent = 0
         reason: str | None = None
-        async for chunk in self.body_iterator:
-            if not isinstance(chunk, (bytes, memoryview)):
-                chunk = chunk.encode(self.charset)
-            if loop.time() >= deadline:
-                reason = "max_duration"
-                break
-            try:
-                await asyncio.wait_for(
-                    send({"type": "http.response.body", "body": chunk, "more_body": True}),
-                    timeout=_CLIENT_STALL_TIMEOUT_S,
-                )
-            except asyncio.TimeoutError:
-                reason = "client_stall"
-                break
-            bytes_sent += len(chunk)
+        try:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": self.status_code,
+                    "headers": self.raw_headers,
+                }
+            )
+            async for chunk in self.body_iterator:
+                if not isinstance(chunk, (bytes, memoryview)):
+                    chunk = chunk.encode(self.charset)
+                if loop.time() >= deadline:
+                    reason = "max_duration"
+                    break
+                try:
+                    await asyncio.wait_for(
+                        send({"type": "http.response.body", "body": chunk, "more_body": True}),
+                        timeout=_CLIENT_STALL_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    reason = "client_stall"
+                    break
+                bytes_sent += len(chunk)
+        finally:
+            # Always release the upstream connection regardless of how the
+            # loop above ended -- client disconnect, any exception raised out
+            # of `send`/iteration, or a normal fall-through -- not just the
+            # stall/deadline paths. This is what actually returns the
+            # connection to the pool; skipping it on an unexpected exception
+            # is exactly what let CLOSE-WAIT sockets pile up.
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
 
         if reason is not None:
             logger.warning(
@@ -133,10 +162,6 @@ class _BoundedStreamingResponse(StreamingResponse):
                 reason,
                 bytes_sent,
             )
-            aclose = getattr(self.body_iterator, "aclose", None)
-            if aclose is not None:
-                with contextlib.suppress(Exception):
-                    await aclose()
 
         # Best-effort close frame either way: a normal end-of-stream needs it
         # to terminate the response cleanly; on a stall/deadline abort the
@@ -212,7 +237,30 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
             content=body or None,
             timeout=_UPSTREAM_TIMEOUT,
         )
-        resp = await client.send(req, stream=True)
+        send_start = asyncio.get_event_loop().time()
+        try:
+            resp = await asyncio.wait_for(
+                client.send(req, stream=True), timeout=_HEADER_WAIT_TIMEOUT_S
+            )
+        except asyncio.TimeoutError as exc:
+            logger.warning(
+                "proxy: header wait timed out (%.0fs) streaming %s pool_stats=%s",
+                _HEADER_WAIT_TIMEOUT_S,
+                upstream,
+                pool_stats(client),
+            )
+            raise HTTPException(
+                status_code=504,
+                detail=error_detail("upstream_timeout", "timed out waiting for upstream headers"),
+            ) from exc
+        send_elapsed = asyncio.get_event_loop().time() - send_start
+        if send_elapsed > _SLOW_ACQUIRE_LOG_THRESHOLD_S:
+            logger.warning(
+                "proxy: slow upstream acquire path=%s secs=%.1f pool_stats=%s",
+                path,
+                send_elapsed,
+                pool_stats(client),
+            )
     except httpx.PoolTimeout as exc:
         stats = pool_stats(client)
         logger.warning(

@@ -10,13 +10,16 @@ Frigate reachability (`checks["frigate"]`) is still informational -- a
 Frigate outage must not restart the *sidecar* (`watchdog.py` restarts the
 Frigate container; a sidecar restart loop would only drop push/MQTT state).
 What DOES gate the status code, since the 2026-09-10 incident, is the
-sidecar's *own* ability to reach Frigate through the proxy's stream-client
-pool: the probe now goes through that pool (frigate_api.get_stream_client)
-and reports `pool_exhausted` on `httpx.PoolTimeout`. That day every
-Frigate-backed route hung/502'd for hours while `/healthz` stayed 200,
-because the probe used its own fresh connection and never saw the wedged
-pool. `checks["upstream_pool"]` additionally reports pool stats and flips
-to degraded when the pool is at `max_connections` with nothing idle.
+sidecar's *own* ability to reach Frigate through the proxy's own path: the
+probe hits `settings.frigate.proxy_base_url` through the same stream-client
+pool `routes/proxy.py` uses (frigate_api.get_stream_client) and reports
+`proxy_stalled` on a timeout or pool error, with `reason: proxy_stalled` in
+the body. That day every Frigate-backed route hung/502'd for hours while
+`/healthz` stayed 200, because the probe used its own fresh connection
+against a different origin and never saw the wedged proxy. `checks
+["upstream_pool"]` and `checks["api_pool"]` additionally report pool stats
+for both pools and flip to degraded when a pool is at `max_connections` with
+nothing idle.
 """
 
 from __future__ import annotations
@@ -29,7 +32,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from frigate_sidecar import __version__, db
-from frigate_sidecar.frigate_api import _STREAM_LIMITS, pool_stats
+from frigate_sidecar.frigate_api import (
+    _DEFAULT_LIMITS,
+    _STREAM_LIMITS,
+    get_stream_client,
+    pool_stats,
+)
 
 router = APIRouter(tags=["meta"])
 
@@ -41,40 +49,54 @@ _SCRUB_STALE_TICKS = 10
 # Frigate reachability probe: cached at app-state level so /healthz polls
 # (Docker/systemd hit this every few seconds) don't hammer Frigate with an
 # extra request on top of everything else already probing it.
-_FRIGATE_PROBE_INTERVAL_S = 30.0
+#
+# Shortened from 30s: the proxy-path probe below (2026-09-12) is what
+# actually catches a wedged proxy (CLOSE-WAIT pile-up on Frigate's nginx
+# half-closing keepalive sockets while /healthz kept reporting ok) -- a 30s
+# cache let that condition go undetected for up to half a minute per poll.
+_FRIGATE_PROBE_INTERVAL_S = 10.0
 _FRIGATE_PROBE_TIMEOUT_S = 3.0
 
+# The proxy-path probe below has its own tighter total budget: it exists
+# specifically to catch a wedged proxy fast, so it shouldn't itself wait as
+# long as the plain reachability probe above.
+_PROXY_PROBE_TIMEOUT_S = 2.0
 
-async def _probe_frigate(app: Any, settings: Any, now: float) -> str:
-    """Cheap `/api/version` check through the proxy's stream-client pool,
-    rate-limited per app instance.
 
-    Returns `ok` / `error` (non-200) / `unreachable` (connect/read failure)
-    -- all informational, see module docstring -- or `pool_exhausted`, the
-    one outcome that gates /healthz: it means the sidecar's own pool is
-    wedged and no proxied request can get an upstream connection, which a
-    restart fixes. Falls back to a standalone request when the app has no
-    stream client (tests, bare create_app).
+async def _probe_frigate(app: Any, settings: Any, now: float) -> tuple[str, str | None]:
+    """Cheap `/api/version` check through the proxy's own base URL and
+    stream-client pool, rate-limited per app instance.
+
+    Goes through `settings.frigate.proxy_base_url` -- the same origin
+    routes/proxy.py forwards `/api/*` to -- and `get_stream_client()`, the
+    same pool the proxy uses, so this probe sees exactly what a real proxied
+    request would see. The 2026-09-10 incident showed `/api/version` against
+    `frigate.base_url` on a throwaway client staying "ok" for hours while the
+    proxy's own pool was wedged; probing the proxy's own path/pool is what
+    catches that.
+
+    Returns `(status, reason)`. `status` is `ok` / `error` (non-200) /
+    `unreachable` (connect/read failure) -- all informational, see module
+    docstring -- or `proxy_stalled`, the one outcome that gates /healthz: a
+    timeout or pool error on the proxy's own path means the sidecar's proxy
+    is wedged and no proxied request can get through, which a restart fixes.
     """
     cache = getattr(app.state, "_frigate_health_cache", None)
     if cache is not None and (now - cache[0]) < _FRIGATE_PROBE_INTERVAL_S:
         return cache[1]  # type: ignore[no-any-return]
-    url = settings.frigate.base_url.rstrip("/") + "/api/version"
-    timeout = httpx.Timeout(_FRIGATE_PROBE_TIMEOUT_S, pool=_FRIGATE_PROBE_TIMEOUT_S)
-    stream_client = getattr(app.state, "stream_http_client", None)
+    url = settings.frigate.proxy_base_url.rstrip("/") + "/api/version"
+    timeout = httpx.Timeout(_PROXY_PROBE_TIMEOUT_S, pool=_PROXY_PROBE_TIMEOUT_S)
+    result: tuple[str, str | None]
     try:
-        if stream_client is not None:
-            resp = await stream_client.get(url, timeout=timeout)
-        else:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(url, timeout=timeout)
-        status = "ok" if resp.status_code == 200 else "error"
-    except httpx.PoolTimeout:
-        status = "pool_exhausted"
+        stream_client = get_stream_client(app)
+        resp = await stream_client.get(url, timeout=timeout)
+        result = ("ok" if resp.status_code == 200 else "error", None)
+    except (httpx.PoolTimeout, httpx.TimeoutException):
+        result = ("proxy_stalled", "proxy_stalled")
     except httpx.HTTPError:
-        status = "unreachable"
-    app.state._frigate_health_cache = (now, status)
-    return status
+        result = ("unreachable", None)
+    app.state._frigate_health_cache = (now, result)
+    return result
 
 
 @router.get("/healthz")
@@ -85,9 +107,12 @@ async def healthz(request: Request) -> JSONResponse:
     checks: dict[str, Any] = {}
     ok = True
 
-    checks["frigate"] = await _probe_frigate(app, settings, now)
-    if checks["frigate"] == "pool_exhausted":
+    frigate_status, frigate_reason = await _probe_frigate(app, settings, now)
+    checks["frigate"] = frigate_status
+    reason: str | None = None
+    if frigate_status == "proxy_stalled":
         ok = False
+        reason = frigate_reason
 
     stream_client = getattr(app.state, "stream_http_client", None)
     if stream_client is not None:
@@ -95,6 +120,20 @@ async def healthz(request: Request) -> JSONResponse:
         if stats:
             checks["upstream_pool"] = stats
             max_connections = _STREAM_LIMITS.max_connections
+            saturated = (
+                max_connections is not None
+                and stats.get("connections", 0) >= max_connections
+                and stats.get("idle", 0) == 0
+            )
+            if saturated:
+                ok = False
+
+    http_client = getattr(app.state, "http_client", None)
+    if http_client is not None:
+        stats = pool_stats(http_client)
+        if stats:
+            checks["api_pool"] = stats
+            max_connections = _DEFAULT_LIMITS.max_connections
             saturated = (
                 max_connections is not None
                 and stats.get("connections", 0) >= max_connections
@@ -177,6 +216,8 @@ async def healthz(request: Request) -> JSONResponse:
             checks["face_enrich"] = "starting"
 
     body: dict[str, Any] = {"status": "ok" if ok else "degraded", "checks": checks}
+    if reason is not None:
+        body["reason"] = reason
     if scrub_low_disk is not None:
         body["scrub_low_disk"] = scrub_low_disk
     return JSONResponse(body, status_code=200 if ok else 503)

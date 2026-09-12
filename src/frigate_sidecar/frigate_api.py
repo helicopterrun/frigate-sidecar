@@ -33,7 +33,9 @@ class FrigateAPIError(RuntimeError):
 # the full pool timeout before 502ing (2026-09-10 incident). Long-lived
 # proxied streams now go through `get_stream_client()`'s separate pool
 # instead; this one is API-calls-only and can stay small and short-timeout.
-_DEFAULT_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+_DEFAULT_LIMITS = httpx.Limits(
+    max_connections=20, max_keepalive_connections=10, keepalive_expiry=15.0
+)
 _DEFAULT_TIMEOUT = httpx.Timeout(15.0, pool=5.0)
 
 # The passthrough proxy's pool (routes/proxy.py): sized for several concurrent
@@ -42,7 +44,9 @@ _DEFAULT_TIMEOUT = httpx.Timeout(15.0, pool=5.0)
 # `pool=5.0` so a request that can't get a connection fails fast with
 # `httpx.PoolTimeout` (mapped to a 503) instead of piling up behind the 30s
 # default pool wait.
-_STREAM_LIMITS = httpx.Limits(max_connections=64, max_keepalive_connections=16)
+_STREAM_LIMITS = httpx.Limits(
+    max_connections=64, max_keepalive_connections=16, keepalive_expiry=15.0
+)
 _STREAM_TIMEOUT = httpx.Timeout(30.0, read=None, pool=5.0)
 
 
@@ -137,7 +141,12 @@ class FrigateClient:
         self.base_url = base_url.rstrip("/")
         # Plus uploads can be slow (snapshot read + remote POST to plus.frigate.video),
         # so allow a longer timeout for those specifically.
-        self._client = httpx.Client(timeout=timeout)
+        self._client = httpx.Client(
+            timeout=timeout,
+            limits=httpx.Limits(
+                max_connections=20, max_keepalive_connections=10, keepalive_expiry=15.0
+            ),
+        )
         self._plus_client = httpx.Client(timeout=30.0)
 
     def __enter__(self) -> FrigateClient:

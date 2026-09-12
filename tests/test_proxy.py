@@ -342,6 +342,75 @@ def test_pool_timeout_maps_to_503(
     assert r.json()["detail"]["error"] == "upstream_busy"
 
 
+def test_header_wait_timeout_maps_to_504(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `client.send` that never returns (Frigate's nginx half-closing a
+    keepalive socket before sending headers) must 504 rather than hang the
+    whole route, and must not leak a response (none was ever created)."""
+    from frigate_sidecar.routes import proxy as proxy_module
+
+    monkeypatch.setattr(proxy_module, "_HEADER_WAIT_TIMEOUT_S", 0.05)
+
+    async def _never_returning_send(self: Any, req: Any, stream: bool = False) -> Any:
+        await asyncio.Event().wait()  # never set
+
+    monkeypatch.setattr(_StubAsyncClient, "send", _never_returning_send)
+    r = client.get("/vod/doorbell/index.m3u8")
+    assert r.status_code == 504
+    assert r.json()["detail"]["error"] == "upstream_timeout"
+
+
+def test_slow_acquire_is_logged(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from frigate_sidecar.routes import proxy as proxy_module
+
+    monkeypatch.setattr(proxy_module, "_SLOW_ACQUIRE_LOG_THRESHOLD_S", 0.0)
+
+    async def _slow_send(self: Any, req: Any, stream: bool = False) -> Any:
+        await asyncio.sleep(0.02)
+        assert _StubAsyncClient.next_response is not None
+        return _StubAsyncClient.next_response
+
+    monkeypatch.setattr(_StubAsyncClient, "send", _slow_send)
+    _StubAsyncClient.next_response = _StubResponse(200, {"content-type": "video/mp4"}, b"x")
+    with caplog.at_level("WARNING", logger="frigate_sidecar.routes.proxy"):
+        r = client.get("/vod/doorbell/index.m3u8")
+    assert r.status_code == 200
+    assert any("slow upstream acquire" in rec.message for rec in caplog.records)
+
+
+def test_stream_response_acloses_iterator_when_send_raises() -> None:
+    """`send()` raising mid-stream (a client disconnect surfaced by ASGI) must
+    still release the upstream connection via `body_iterator.aclose()`."""
+    from frigate_sidecar.routes import proxy as proxy_module
+
+    closed = {"value": False}
+
+    async def body() -> Any:
+        try:
+            yield b"a"
+            yield b"b"
+        finally:
+            closed["value"] = True
+
+    async def raising_send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.body" and message.get("more_body"):
+            raise RuntimeError("client disconnected")
+
+    response = proxy_module._BoundedStreamingResponse(
+        body(), status_code=200, headers={}, log_path="vod/doorbell/index.m3u8"
+    )
+
+    async def run() -> None:
+        await response.stream_response(raising_send)
+
+    with pytest.raises(RuntimeError, match="client disconnected"):
+        asyncio.run(run())
+    assert closed["value"] is True
+
+
 def test_resp_aclose_raising_is_swallowed(client: TestClient) -> None:
     class _BadCloseResponse(_StubResponse):
         async def aclose(self) -> None:

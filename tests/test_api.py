@@ -129,22 +129,23 @@ def test_healthz_reports_frigate_ok_without_gating_status(
 ) -> None:
     import httpx
 
-    from frigate_sidecar.routes import health as health_mod
+    calls: list[str] = []
 
-    calls = []
+    class _FakeStreamClient:
+        is_closed = False
 
-    async def _fake_get(
-        self: object, url: str, timeout: object = None
-    ) -> httpx.Response:
-        calls.append(url)
-        return httpx.Response(200, request=httpx.Request("GET", url))
+        async def get(self, url: str, timeout: object = None) -> httpx.Response:
+            calls.append(url)
+            return httpx.Response(200, request=httpx.Request("GET", url))
 
-    monkeypatch.setattr(health_mod.httpx.AsyncClient, "get", _fake_get)
+    client.app.state.stream_http_client = _FakeStreamClient()
     r = client.get("/healthz")
     assert r.status_code == 200
     body = r.json()
     assert body["checks"]["frigate"] == "ok"
-    assert calls == ["http://frigate.test:5000/api/version"]
+    # Probed through `frigate.proxy_base_url` (the proxy's own origin), not
+    # `frigate.base_url` -- see the 2026-09-12 proxy-stall gating change.
+    assert calls == ["http://frigate.lan:8971/api/version"]
 
 
 def test_healthz_frigate_unreachable_is_degraded(
@@ -157,14 +158,13 @@ def test_healthz_frigate_unreachable_is_degraded(
     to 503."""
     import httpx
 
-    from frigate_sidecar.routes import health as health_mod
+    class _FakeStreamClient:
+        is_closed = False
 
-    async def _fake_get(
-        self: object, url: str, timeout: object = None
-    ) -> httpx.Response:
-        raise httpx.ConnectError("boom")
+        async def get(self, url: str, timeout: object = None) -> httpx.Response:
+            raise httpx.ConnectError("boom")
 
-    monkeypatch.setattr(health_mod.httpx.AsyncClient, "get", _fake_get)
+    client.app.state.stream_http_client = _FakeStreamClient()
     r = client.get("/healthz")
     assert r.status_code == 200
     body = r.json()
@@ -175,10 +175,10 @@ def test_healthz_frigate_unreachable_is_degraded(
 def test_healthz_frigate_pool_exhausted_is_degraded(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`httpx.PoolTimeout` through the stream-client pool is the one frigate
-    outcome that gates /healthz: it means the sidecar's own proxy pool is
-    wedged and no proxied request can get an upstream connection (the
-    2026-09-10 incident), which a restart fixes."""
+    """A timeout or `httpx.PoolTimeout` on the proxy-path probe is the one
+    frigate outcome that gates /healthz: it means the sidecar's own proxy is
+    wedged and no proxied request can get through (the 2026-09-10 /
+    2026-09-12 incidents), which a restart fixes."""
     import httpx
 
     class _FakeStreamClient:
@@ -192,7 +192,8 @@ def test_healthz_frigate_pool_exhausted_is_degraded(
     assert r.status_code == 503
     body = r.json()
     assert body["status"] == "degraded"
-    assert body["checks"]["frigate"] == "pool_exhausted"
+    assert body["checks"]["frigate"] == "proxy_stalled"
+    assert body["reason"] == "proxy_stalled"
 
 
 def test_healthz_upstream_pool_saturated_is_degraded(
@@ -229,17 +230,16 @@ def test_healthz_frigate_probe_is_cached_within_window(
 ) -> None:
     import httpx
 
-    from frigate_sidecar.routes import health as health_mod
+    calls: list[str] = []
 
-    calls = []
+    class _FakeStreamClient:
+        is_closed = False
 
-    async def _fake_get(
-        self: object, url: str, timeout: object = None
-    ) -> httpx.Response:
-        calls.append(url)
-        return httpx.Response(200, request=httpx.Request("GET", url))
+        async def get(self, url: str, timeout: object = None) -> httpx.Response:
+            calls.append(url)
+            return httpx.Response(200, request=httpx.Request("GET", url))
 
-    monkeypatch.setattr(health_mod.httpx.AsyncClient, "get", _fake_get)
+    client.app.state.stream_http_client = _FakeStreamClient()
     client.get("/healthz")
     client.get("/healthz")
     assert len(calls) == 1  # second call served from the cached verdict

@@ -13,14 +13,17 @@ routes: ["/debug", "/toybox", "/login"]
   (`locked` means another process — a restarting predecessor or a concurrent
   `fsc scrub` invocation — holds the cache lock, distinct from a wedged
   loop); `face_enrich` is ok/starting/stale the same way. `frigate` is
-  ok/error/unreachable/pool_exhausted and is informational except for
-  `pool_exhausted`: `watchdog.py` restarts the *Frigate* container directly
+  ok/error/unreachable/proxy_stalled and is informational except for
+  `proxy_stalled`: `watchdog.py` restarts the *Frigate* container directly
   when it hangs, so an ordinary Frigate outage (`error`/`unreachable`) is
-  surfaced but doesn't flip the sidecar's own status. `pool_exhausted` means
-  the sidecar's *own* proxy connection pool is wedged (an `httpx.PoolTimeout`
-  probing through it) and no proxied request can get an upstream connection
-  -- that DOES flip /healthz to degraded, since only a sidecar restart fixes
-  it. `upstream_pool` reports the media-proxy's connection pool
+  surfaced but doesn't flip the sidecar's own status. `proxy_stalled` means
+  the probe -- sent along the media proxy's own path and connection pool,
+  with a 2 s budget -- timed out or couldn't get a connection, i.e. the
+  sidecar's *own* proxy is wedged and no proxied request can get through.
+  That DOES flip /healthz to degraded (body carries `reason:
+  proxy_stalled`), since only a sidecar restart fixes it; the probe result
+  is cached 10 s. `upstream_pool` and `api_pool` report the two connection
+  pools
   (connections/active/idle); saturated (at its max with nothing idle) is
   also degraded, since the next proxied stream would otherwise fail with a
   slow pool timeout instead of a fast 503. Any check going bad returns
