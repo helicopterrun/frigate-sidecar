@@ -49,8 +49,11 @@ def _build(
         proxy=ProxySection(enabled=True),
     )
     app = create_app(settings)
-    # Pre-seed the pooled client so nothing touches the network.
+    # Pre-seed the pooled clients so nothing touches the network. The proxy
+    # catch-all (routes/proxy.py) uses the separate stream client, not the
+    # API one, since the 2026-09-10 pool-separation fix.
     app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app.state.stream_http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return TestClient(app)
 
 
@@ -135,7 +138,11 @@ def test_probe_endpoints_stay_open(
     assert client.get("/healthz").status_code == 200
     assert client.get("/version").status_code == 200
     assert client.get("/v1/capabilities").status_code == 200
-    assert not upstream_calls
+    # /healthz probes Frigate through the proxy's stream pool by design
+    # (routes/health.py); that is the only upstream traffic these endpoints
+    # generate, and it never forwards a client cookie.
+    assert [(r.method, r.url.path) for r in upstream_calls] == [("GET", "/api/version")]
+    assert "cookie" not in upstream_calls[0].headers
 
 
 def test_proxy_catch_all_is_not_gated(

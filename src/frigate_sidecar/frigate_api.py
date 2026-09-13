@@ -23,29 +23,39 @@ class FrigateAPIError(RuntimeError):
 # Finite default for the shared client -- every current caller (the `/v1`
 # motion fetch, the session check, the config-refresh and thumbnail proxies)
 # already passes its own short `timeout=` per request, so this is only a
-# backstop for a caller that forgets to. It used to be `read=None` (unbounded)
-# for every request through the client, which meant a stalled Frigate
-# connection on ANY of those callers hung forever, not just the media proxy
-# that actually needs a long-lived read. The proxy route (routes/proxy.py)
-# passes its own long `timeout=` on the one request that legitimately streams
-# VOD/live media, plus its own idle-read watchdog per chunk -- see there.
-_DEFAULT_TIMEOUT = httpx.Timeout(15.0)
+# backstop for a caller that forgets to.
+#
+# Sized for a single-household LAN NVR: a handful of simultaneous API calls
+# (motion fetch, session check, config refresh). No `httpx.Limits` before this
+# meant an unbounded connection pool. Streaming media (VOD/live) used to share
+# this same pool -- a handful of paused live-view tabs pinned every socket in
+# it, and every other Frigate-backed route (login, /api/version) then hung for
+# the full pool timeout before 502ing (2026-09-10 incident). Long-lived
+# proxied streams now go through `get_stream_client()`'s separate pool
+# instead; this one is API-calls-only and can stay small and short-timeout.
+_DEFAULT_LIMITS = httpx.Limits(
+    max_connections=20, max_keepalive_connections=10, keepalive_expiry=15.0
+)
+_DEFAULT_TIMEOUT = httpx.Timeout(15.0, pool=5.0)
 
-# Sized for a single-household LAN NVR: a handful of simultaneous VOD/live
-# viewers plus the sidecar's own polling (motion fetch, session check). No
-# `httpx.Limits` before this meant an unbounded connection pool -- a client
-# left on a live view for a while, or several browser tabs proxying media
-# concurrently, had nothing capping how many sockets piled up against
-# Frigate.
-_DEFAULT_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+# The passthrough proxy's pool (routes/proxy.py): sized for several concurrent
+# VOD/live viewers. `read=None` because a stalled chunk is bounded by the
+# proxy's own idle-chunk watchdog and stall/duration timeouts, not by httpx;
+# `pool=5.0` so a request that can't get a connection fails fast with
+# `httpx.PoolTimeout` (mapped to a 503) instead of piling up behind the 30s
+# default pool wait.
+_STREAM_LIMITS = httpx.Limits(
+    max_connections=64, max_keepalive_connections=16, keepalive_expiry=15.0
+)
+_STREAM_TIMEOUT = httpx.Timeout(30.0, read=None, pool=5.0)
 
 
 def get_async_client(app: FastAPI) -> httpx.AsyncClient:
     """One pooled AsyncClient per app, created lazily and closed on shutdown.
 
-    Used by the reverse proxy, the `/v1` motion fetch and the session check.
-    A fresh client per request threw away keep-alive to Frigate and paid a new
-    connection setup on every proxied media range request.
+    Used by the `/v1` motion fetch, the session check, and other short
+    Frigate API calls. A fresh client per request threw away keep-alive to
+    Frigate and paid a new connection setup on every call.
     """
     client = getattr(app.state, "http_client", None)
     if client is None or getattr(client, "is_closed", False):
@@ -54,6 +64,39 @@ def get_async_client(app: FastAPI) -> httpx.AsyncClient:
         )
         app.state.http_client = client
     return client
+
+
+def get_stream_client(app: FastAPI) -> httpx.AsyncClient:
+    """The separate pooled AsyncClient for the passthrough media proxy.
+
+    Kept apart from `get_async_client()`'s pool so long-lived VOD/live
+    streams (held open for as long as a paused player keeps them, previously
+    hours) can never starve the short API calls that share a client with
+    login and health checks -- see the module docstring above.
+    """
+    client = getattr(app.state, "stream_http_client", None)
+    if client is None or getattr(client, "is_closed", False):
+        client = httpx.AsyncClient(
+            timeout=_STREAM_TIMEOUT, limits=_STREAM_LIMITS, follow_redirects=False
+        )
+        app.state.stream_http_client = client
+    return client
+
+
+def pool_stats(client: httpx.AsyncClient) -> dict[str, int]:
+    """Best-effort connection-pool counts for diagnostics (503 logs, healthz).
+
+    Reaches into httpx's private transport internals, so any shape change on
+    an httpx upgrade just degrades this to `{}` rather than breaking the
+    caller.
+    """
+    try:
+        connections = client._transport._pool.connections  # type: ignore[attr-defined]
+        total = len(connections)
+        idle = sum(1 for c in connections if c.is_idle())
+        return {"connections": total, "active": total - idle, "idle": idle}
+    except Exception:
+        return {}
 
 
 async def async_activity_motion(
@@ -98,7 +141,12 @@ class FrigateClient:
         self.base_url = base_url.rstrip("/")
         # Plus uploads can be slow (snapshot read + remote POST to plus.frigate.video),
         # so allow a longer timeout for those specifically.
-        self._client = httpx.Client(timeout=timeout)
+        self._client = httpx.Client(
+            timeout=timeout,
+            limits=httpx.Limits(
+                max_connections=20, max_keepalive_connections=10, keepalive_expiry=15.0
+            ),
+        )
         self._plus_client = httpx.Client(timeout=30.0)
 
     def __enter__(self) -> FrigateClient:

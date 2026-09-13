@@ -100,3 +100,46 @@ def _reset_ladder_policy() -> Iterator[None]:
     ladder_policy.set_zone_overrides(original_overrides)
     ladder_policy.set_off_cells(original_off_cells)
     policy_settings.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _default_frigate_reachable(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Default `/healthz`'s frigate probe to reachable ("ok").
+
+    `_probe_frigate` (routes/health.py) is async and goes through
+    `get_stream_client(app)` (the same pool `routes/proxy.py` uses against
+    `settings.frigate.proxy_base_url`). Without this default, a test that
+    hits `/healthz` incidentally would make a real connect attempt to the
+    fixture's fake `frigate.test:*` host and see "unreachable" every time
+    (informational now, but still noise, and slow).
+
+    Patching `httpx.AsyncClient` process-wide would be wrong here -- plenty
+    of *other* tests (test_frigate_api, test_push_mqtt, test_auth, ...)
+    construct their own real `httpx.AsyncClient` with a mock transport and
+    expect its `.get`/request methods to actually run. So this replaces only
+    `get_stream_client` as imported into `routes.health`'s own module
+    namespace with a stand-in that always answers 200. Tests that set a
+    custom fake/real `app.state.stream_http_client` and expect
+    `get_stream_client` to return it should instead monkeypatch this same
+    name, or set `app.state.stream_http_client` *and* monkeypatch
+    `frigate_sidecar.routes.health.get_stream_client` to read it -- see
+    test_api.py / test_health.py for the pattern.
+    """
+
+    class _FakeResponse:
+        status_code = 200
+
+    class _FakeAsyncClient:
+        async def get(self, url: str, *args: object, **kwargs: object) -> _FakeResponse:
+            return _FakeResponse()
+
+    _fake_client = _FakeAsyncClient()
+
+    def _fake_get_stream_client(app: object) -> _FakeAsyncClient:
+        stream_client = getattr(getattr(app, "state", None), "stream_http_client", None)
+        return stream_client if stream_client is not None else _fake_client
+
+    monkeypatch.setattr(
+        "frigate_sidecar.routes.health.get_stream_client", _fake_get_stream_client
+    )
+    yield

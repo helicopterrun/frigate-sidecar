@@ -268,3 +268,157 @@ def test_idle_chunk_watchdog_ends_a_stalled_stream(
     # raising -- the client sees the bytes that did arrive, and nothing more.
     assert r.content == b"first-chunk"
     assert hanging.aclosed is True
+
+
+def test_client_stall_ends_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client that stopped reading (a paused player) must not hold the
+    upstream connection open forever -- see the 2026-09-10 pool-exhaustion
+    incident in routes/proxy.py. Exercises `_BoundedStreamingResponse`
+    directly: `send()` never returns, simulating a stalled client."""
+    from frigate_sidecar.routes import proxy as proxy_module
+
+    monkeypatch.setattr(proxy_module, "_CLIENT_STALL_TIMEOUT_S", 0.05)
+    closed = {"value": False}
+
+    async def body() -> Any:
+        try:
+            yield b"a"
+            yield b"b"
+        finally:
+            closed["value"] = True
+
+    async def never_returning_send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.body" and message.get("more_body"):
+            await asyncio.Event().wait()  # never set -- simulates a stalled client
+
+    response = proxy_module._BoundedStreamingResponse(
+        body(), status_code=200, headers={}, log_path="vod/doorbell/index.m3u8"
+    )
+
+    async def run() -> None:
+        await response.stream_response(never_returning_send)
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2.0))
+    assert closed["value"] is True
+
+
+def test_max_duration_ends_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    from frigate_sidecar.routes import proxy as proxy_module
+
+    monkeypatch.setattr(proxy_module, "_STREAM_MAX_DURATION_S", 0.0)
+    closed = {"value": False}
+
+    async def body() -> Any:
+        try:
+            yield b"a"
+            yield b"b"
+        finally:
+            closed["value"] = True
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    response = proxy_module._BoundedStreamingResponse(
+        body(), status_code=200, headers={}, log_path="vod/doorbell/index.m3u8"
+    )
+    asyncio.run(response.stream_response(send))
+    assert closed["value"] is True
+    # The deadline is already past before the first chunk, so no body bytes
+    # made it out -- only the response start and the final close frame.
+    assert all(m.get("body", b"") == b"" for m in sent if m["type"] == "http.response.body")
+
+
+def test_pool_timeout_maps_to_503(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _raise_pool_timeout(self: Any, req: Any, stream: bool = False) -> Any:
+        raise httpx.PoolTimeout("pool exhausted")
+
+    monkeypatch.setattr(_StubAsyncClient, "send", _raise_pool_timeout)
+    r = client.get("/vod/doorbell/index.m3u8")
+    assert r.status_code == 503
+    assert r.json()["detail"]["error"] == "upstream_busy"
+
+
+def test_header_wait_timeout_maps_to_504(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `client.send` that never returns (Frigate's nginx half-closing a
+    keepalive socket before sending headers) must 504 rather than hang the
+    whole route, and must not leak a response (none was ever created)."""
+    from frigate_sidecar.routes import proxy as proxy_module
+
+    monkeypatch.setattr(proxy_module, "_HEADER_WAIT_TIMEOUT_S", 0.05)
+
+    async def _never_returning_send(self: Any, req: Any, stream: bool = False) -> Any:
+        await asyncio.Event().wait()  # never set
+
+    monkeypatch.setattr(_StubAsyncClient, "send", _never_returning_send)
+    r = client.get("/vod/doorbell/index.m3u8")
+    assert r.status_code == 504
+    assert r.json()["detail"]["error"] == "upstream_timeout"
+
+
+def test_slow_acquire_is_logged(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from frigate_sidecar.routes import proxy as proxy_module
+
+    monkeypatch.setattr(proxy_module, "_SLOW_ACQUIRE_LOG_THRESHOLD_S", 0.0)
+
+    async def _slow_send(self: Any, req: Any, stream: bool = False) -> Any:
+        await asyncio.sleep(0.02)
+        assert _StubAsyncClient.next_response is not None
+        return _StubAsyncClient.next_response
+
+    monkeypatch.setattr(_StubAsyncClient, "send", _slow_send)
+    _StubAsyncClient.next_response = _StubResponse(200, {"content-type": "video/mp4"}, b"x")
+    with caplog.at_level("WARNING", logger="frigate_sidecar.routes.proxy"):
+        r = client.get("/vod/doorbell/index.m3u8")
+    assert r.status_code == 200
+    assert any("slow upstream acquire" in rec.message for rec in caplog.records)
+
+
+def test_stream_response_acloses_iterator_when_send_raises() -> None:
+    """`send()` raising mid-stream (a client disconnect surfaced by ASGI) must
+    still release the upstream connection via `body_iterator.aclose()`."""
+    from frigate_sidecar.routes import proxy as proxy_module
+
+    closed = {"value": False}
+
+    async def body() -> Any:
+        try:
+            yield b"a"
+            yield b"b"
+        finally:
+            closed["value"] = True
+
+    async def raising_send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.body" and message.get("more_body"):
+            raise RuntimeError("client disconnected")
+
+    response = proxy_module._BoundedStreamingResponse(
+        body(), status_code=200, headers={}, log_path="vod/doorbell/index.m3u8"
+    )
+
+    async def run() -> None:
+        await response.stream_response(raising_send)
+
+    with pytest.raises(RuntimeError, match="client disconnected"):
+        asyncio.run(run())
+    assert closed["value"] is True
+
+
+def test_resp_aclose_raising_is_swallowed(client: TestClient) -> None:
+    class _BadCloseResponse(_StubResponse):
+        async def aclose(self) -> None:
+            raise RuntimeError("boom")
+
+    _StubAsyncClient.next_response = _BadCloseResponse(
+        200, {"content-type": "video/mp4"}, b"x"
+    )
+    r = client.get("/vod/doorbell/index.m3u8")
+    assert r.status_code == 200
+    assert r.content == b"x"
