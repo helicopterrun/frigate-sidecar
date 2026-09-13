@@ -90,7 +90,11 @@ async def _probe_frigate(app: Any, settings: Any, now: float) -> tuple[str, str 
     try:
         stream_client = get_stream_client(app)
         resp = await stream_client.get(url, timeout=timeout)
-        result = ("ok" if resp.status_code == 200 else "error", None)
+        # The proxy origin is Frigate's authenticated port, so `/api/version`
+        # answers 401 here -- any HTTP answer at all proves the proxy path
+        # and pool are alive, which is what this probe is for. Only a 5xx
+        # (Frigate up but broken) reads as `error`.
+        result = ("ok" if resp.status_code < 500 else "error", None)
     except (httpx.PoolTimeout, httpx.TimeoutException):
         result = ("proxy_stalled", "proxy_stalled")
     except httpx.HTTPError:
