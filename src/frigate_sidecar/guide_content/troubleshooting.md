@@ -13,7 +13,8 @@ routes: ["/debug", "/toybox", "/login"]
   (`locked` means another process — a restarting predecessor or a concurrent
   `fsc scrub` invocation — holds the cache lock, distinct from a wedged
   loop); `face_enrich` is ok/starting/stale the same way. `frigate` is
-  ok/error/unreachable/proxy_stalled and is informational except for
+  ok (any HTTP answer, 401 included -- the proxy origin is authenticated)
+  /error (5xx)/unreachable/proxy_stalled and is informational except for
   `proxy_stalled`: `watchdog.py` restarts the *Frigate* container directly
   when it hangs, so an ordinary Frigate outage (`error`/`unreachable`) is
   surfaced but doesn't flip the sidecar's own status. `proxy_stalled` means
