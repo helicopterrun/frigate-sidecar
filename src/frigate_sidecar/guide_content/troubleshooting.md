@@ -27,8 +27,11 @@ routes: ["/debug", "/toybox", "/login"]
   pools
   (connections/active/idle); saturated (at its max with nothing idle) is
   also degraded, since the next proxied stream would otherwise fail with a
-  slow pool timeout instead of a fast 503. Any check going bad returns
-  HTTP 503 instead of 200.
+  slow pool timeout instead of a fast 503. If the media pool stays saturated
+  across probes for 30 s straight, the sidecar recycles its own stream
+  client automatically and logs a warning — a restart is no longer required
+  to clear a wedged pool. Any check going bad returns HTTP 503 instead of
+  200.
 - [Status](/) — the same picture, visually, with sizes and probes.
 - [Debug](/debug) — version, the live capability probe (the same payload
   the iOS client reads), and a link to the interactive OpenAPI docs. Check

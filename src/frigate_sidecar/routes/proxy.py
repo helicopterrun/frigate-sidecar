@@ -61,12 +61,17 @@ _RESP_PASS = (
 
 _WS_SUBPROTOCOL_HEADER = "sec-websocket-protocol"
 
-# This is the one route through the shared client (frigate_api.get_async_client)
-# that legitimately needs an unbounded read: VOD/live media are long-lived
-# streams the user pauses and seeks, so the client's own (now finite) default
-# timeout would cut them off mid-view. Scoped to this one request rather than
-# the shared client's default -- see frigate_api._DEFAULT_TIMEOUT.
-_UPSTREAM_TIMEOUT = httpx.Timeout(30.0, read=None, pool=5.0)
+# `read=` here is deliberately *not* None even though VOD/live media are
+# long-lived streams the user pauses and seeks: the body path is already
+# bounded by `_IDLE_CHUNK_TIMEOUT_S` (30 s), which always fires first, so this
+# never cuts a stream off mid-view. What it does bound is the header phase of
+# a *shielded* `client.send` (see `proxy_passthrough`) -- an upstream that
+# accepts the connection but never sends a status line would otherwise hold
+# that connection ACTIVE forever, since nothing outside httpcore can cancel
+# the send without leaking it. At 60 s httpcore raises `ReadTimeout` from
+# inside the pool and reclaims the connection itself.
+_LATE_HEADER_ABANDON_S = 60.0
+_UPSTREAM_TIMEOUT = httpx.Timeout(30.0, read=_LATE_HEADER_ABANDON_S, pool=5.0)
 
 # Bounds how long we'll wait for the upstream's response headers to arrive
 # (the `client.send(req, stream=True)` call below). `_UPSTREAM_TIMEOUT`'s
@@ -81,11 +86,12 @@ _HEADER_WAIT_TIMEOUT_S = 10.0
 # the pool is under pressure before it actually wedges.
 _SLOW_ACQUIRE_LOG_THRESHOLD_S = 1.0
 
-# `read=None` above means httpx itself will wait forever on a stalled chunk;
-# this is what actually bounds that -- a chunk that doesn't arrive within this
-# many idle seconds ends the response instead of holding the connection (and
-# the client's wait) open indefinitely.
+# What actually bounds a stalled body chunk -- a chunk that doesn't arrive
+# within this many idle seconds ends the response instead of holding the
+# connection (and the client's wait) open indefinitely. Must stay below
+# `_LATE_HEADER_ABANDON_S` so httpx's own read timeout never reaches the body.
 _IDLE_CHUNK_TIMEOUT_S = 30.0
+assert _IDLE_CHUNK_TIMEOUT_S < _LATE_HEADER_ABANDON_S
 
 # The idle-chunk watchdog above only bounds a stalled *upstream*. It does
 # nothing for a client that stopped reading (a paused player): the `send()`
@@ -185,6 +191,38 @@ def _upstream_url(settings: Any, path: str, query: str, *, scheme_ws: bool = Fal
     return f"{url}?{query}" if query else url
 
 
+def _reap_late_send(send_task: asyncio.Task[httpx.Response], upstream: str) -> None:
+    """Close a `client.send()` that finally lands after its 504 was returned.
+
+    We already gave up and answered the client, but the send itself was only
+    *shielded* from that timeout, not cancelled -- see the comment above its
+    call site. If it eventually succeeds, its response holds a real upstream
+    connection open forever unless something reads or closes it; nothing else
+    is going to, so this does. If it raises, there's nothing to close.
+    """
+
+    def _on_done(task: asyncio.Task[httpx.Response]) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.debug(
+                "proxy: late send after header-wait timeout failed for %s: %r",
+                upstream,
+                exc,
+            )
+            return
+        late_resp = task.result()
+
+        async def _close() -> None:
+            with contextlib.suppress(Exception):
+                await late_resp.aclose()
+
+        asyncio.ensure_future(_close())
+
+    send_task.add_done_callback(_on_done)
+
+
 def _reject_reserved(path: str) -> None:
     # `/v1` is a namespace reserved entirely for the sidecar's own endpoints
     # (docs/scrub-cache-and-proxy-spec.md §4.0) -- an unmatched /v1/* path
@@ -238,17 +276,33 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
             timeout=_UPSTREAM_TIMEOUT,
         )
         send_start = asyncio.get_event_loop().time()
+        # `client.send(req, stream=True)` is wrapped in a real Task and only
+        # *shielded* from the timeout below, never cancelled by it. httpx has
+        # no per-request read timeout that bounds header arrival without also
+        # bounding every subsequent body chunk read (httpcore's http11
+        # connection keys both off the same `extensions["timeout"]["read"]`),
+        # so a `read=` timeout here would fight `_IDLE_CHUNK_TIMEOUT_S` below.
+        # Cancelling the send from outside instead of shielding it is exactly
+        # what caused the 2026-09 pool-exhaustion incident: a cancelled send
+        # is torn out of httpcore's `AsyncConnectionPool` mid-flight, but the
+        # `AsyncHTTP11Connection` underneath it can be left ACTIVE forever
+        # (never idle, never expired, never reaped) -- see the module-level
+        # incident note. Shielding lets the send keep running to a real
+        # conclusion (success or its own error) so httpcore always gets to
+        # put the connection back to IDLE/CLOSED itself; `_reap_late_send`
+        # below just closes the response if one shows up after we've already
+        # given up and returned a 504.
+        send_task = asyncio.ensure_future(client.send(req, stream=True))
         try:
-            resp = await asyncio.wait_for(
-                client.send(req, stream=True), timeout=_HEADER_WAIT_TIMEOUT_S
-            )
-        except asyncio.TimeoutError as exc:
+            resp = await asyncio.wait_for(asyncio.shield(send_task), timeout=_HEADER_WAIT_TIMEOUT_S)
+        except (asyncio.TimeoutError, httpx.ReadTimeout) as exc:
             logger.warning(
                 "proxy: header wait timed out (%.0fs) streaming %s pool_stats=%s",
                 _HEADER_WAIT_TIMEOUT_S,
                 upstream,
                 pool_stats(client),
             )
+            _reap_late_send(send_task, upstream)
             raise HTTPException(
                 status_code=504,
                 detail=error_detail("upstream_timeout", "timed out waiting for upstream headers"),
@@ -263,9 +317,7 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
             )
     except httpx.PoolTimeout as exc:
         stats = pool_stats(client)
-        logger.warning(
-            "proxy: pool exhausted streaming %s pool_stats=%s", upstream, stats
-        )
+        logger.warning("proxy: pool exhausted streaming %s pool_stats=%s", upstream, stats)
         raise HTTPException(
             status_code=503,
             detail=error_detail("upstream_busy", "upstream connection pool exhausted"),
@@ -365,9 +417,7 @@ def _ws_connector() -> Any:
             _connect: Any = connect,
             _kw: str = headers_kw,
         ) -> Any:
-            return await _connect(
-                url, **{_kw: headers}, subprotocols=subs or None, open_timeout=10
-            )
+            return await _connect(url, **{_kw: headers}, subprotocols=subs or None, open_timeout=10)
 
         return _connect
     return None
