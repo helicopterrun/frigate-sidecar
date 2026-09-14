@@ -24,6 +24,9 @@ nothing idle.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import logging
 import time
 from typing import Any
 
@@ -39,7 +42,64 @@ from frigate_sidecar.frigate_api import (
     pool_stats,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["meta"])
+
+# How long the stream pool has to stay wedged (all connections active, none
+# idle -- see routes/proxy.py's incident note on why a cancelled header-wait
+# could leave a connection stuck ACTIVE forever) before /healthz gives up
+# waiting for it to clear on its own and recycles the client. Long enough
+# that a real, brief burst of concurrent viewers isn't mistaken for a wedge;
+# short enough that a genuine wedge (previously: a restart, by hand) clears
+# within a couple of probe intervals.
+_STALLED_POOL_RECYCLE_S = 30.0
+
+
+def _note_stalled_pool(app: Any, now: float) -> None:
+    """Record when the stream pool was first observed saturated.
+
+    Idempotent across repeated saturated probes: only the first observation
+    sets the timestamp, so `_STALLED_POOL_RECYCLE_S` measures how long the
+    condition has *persisted*, not just that it was seen once.
+    """
+    if getattr(app.state, "_stalled_pool_since", None) is None:
+        app.state._stalled_pool_since = now
+
+
+def _recycle_stream_client(app: Any) -> None:
+    """Swap in a fresh stream client and retire the wedged one in the background.
+
+    The old client's transport may hang closing the wedged connections (that
+    is the whole problem), so it must never be awaited inline here -- this
+    function runs from inside the `/healthz` request path.
+    """
+    old = getattr(app.state, "stream_http_client", None)
+    logger.warning(
+        "healthz: stream pool wedged for >=%.0fs, recycling stream client",
+        _STALLED_POOL_RECYCLE_S,
+    )
+    get_stream_client_forced_fresh(app)
+    app.state._stalled_pool_since = None
+    if old is not None:
+
+        async def _close_old() -> None:
+            with contextlib.suppress(Exception):
+                await old.aclose()
+
+        asyncio.ensure_future(_close_old())
+
+
+def get_stream_client_forced_fresh(app: Any) -> httpx.AsyncClient:
+    """Build a brand-new stream client via the same factory `get_stream_client` uses.
+
+    `get_stream_client()` reuses `app.state.stream_http_client` if it's set
+    and open, so recycling has to build the replacement before installing it
+    rather than calling that function directly against the still-wedged one.
+    """
+    app.state.stream_http_client = None
+    return get_stream_client(app)
+
 
 # A scrub cycle that hasn't finished in this many ticks is stuck, not slow --
 # the loop is deadline-based, so healthy cycles land every tick even when the
@@ -131,6 +191,12 @@ async def healthz(request: Request) -> JSONResponse:
             )
             if saturated:
                 ok = False
+                _note_stalled_pool(app, now)
+                since = app.state._stalled_pool_since
+                if since is not None and now - since >= _STALLED_POOL_RECYCLE_S:
+                    _recycle_stream_client(app)
+            else:
+                app.state._stalled_pool_since = None
 
     http_client = getattr(app.state, "http_client", None)
     if http_client is not None:

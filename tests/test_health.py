@@ -81,9 +81,7 @@ def client(frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path) -> Test
             config_path=fake_config,
             db_path=frigate_db_path,
         ),
-        sidecar=SidecarSection(
-            db_path=sidecar_db_path, bind_port=5001, require_frigate_auth=False
-        ),
+        sidecar=SidecarSection(db_path=sidecar_db_path, bind_port=5001, require_frigate_auth=False),
         proxy=ProxySection(enabled=True),
     )
     app = create_app(settings)
@@ -148,6 +146,70 @@ def test_healthz_probe_result_is_cached(client: TestClient) -> None:
     client.app.state._frigate_health_cache = (cache_ts - 3600, verdict)
     r3 = client.get("/healthz")
     assert r3.json()["checks"]["frigate"] == "proxy_stalled"
+
+
+def test_healthz_recycles_stream_client_after_pool_wedged_30s(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stream pool reported saturated (`active == max_connections`, `idle
+    == 0`) that stays that way for >=30s must be recycled -- see
+    routes/proxy.py's incident note on why a wedged connection can otherwise
+    sit ACTIVE forever. A single saturated probe must NOT recycle yet (a
+    brief real burst of viewers looks the same for one probe); rather than
+    mocking the wall clock (patching the process-global `time.time` would
+    also perturb everything else `/healthz` and the app touch), the second
+    probe backdates the real first-seen timestamp `/healthz` itself
+    recorded, the same way `test_healthz_probe_result_is_cached` above
+    backdates the frigate-probe cache."""
+    from frigate_sidecar import frigate_api
+
+    saturated = {
+        "connections": frigate_api._STREAM_LIMITS.max_connections,
+        "active": frigate_api._STREAM_LIMITS.max_connections,
+        "idle": 0,
+    }
+    monkeypatch.setattr("frigate_sidecar.routes.health.pool_stats", lambda c: saturated)
+
+    old_client = client.app.state.stream_http_client
+
+    r1 = client.get("/healthz")
+    assert r1.status_code == 503
+    assert client.app.state.stream_http_client is old_client  # not recycled yet
+    assert client.app.state._stalled_pool_since is not None
+
+    client.app.state._stalled_pool_since -= 31  # pretend 31s have passed
+
+    r2 = client.get("/healthz")
+    assert r2.status_code == 503
+    assert client.app.state.stream_http_client is not old_client  # recycled
+
+
+def test_healthz_resets_stall_timer_on_recovery(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from frigate_sidecar import frigate_api
+
+    saturated = {
+        "connections": frigate_api._STREAM_LIMITS.max_connections,
+        "active": frigate_api._STREAM_LIMITS.max_connections,
+        "idle": 0,
+    }
+    recovered = {"connections": 1, "active": 0, "idle": 1}
+    # `pool_stats` is called twice per /healthz (upstream_pool, api_pool), so
+    # each request below needs two matching entries in this sequence.
+    stats_sequence = iter([saturated, saturated, recovered, recovered, saturated, saturated])
+    monkeypatch.setattr("frigate_sidecar.routes.health.pool_stats", lambda c: next(stats_sequence))
+
+    old_client = client.app.state.stream_http_client
+    client.get("/healthz")  # saturated -- stall timer starts
+    assert client.app.state._stalled_pool_since is not None
+    client.app.state._stalled_pool_since -= 31  # pretend 31s have passed
+    client.get("/healthz")  # recovered -- stall timer resets despite the age
+    assert client.app.state._stalled_pool_since is None
+
+    r3 = client.get("/healthz")  # saturated again, but the timer just reset
+    assert r3.status_code == 503
+    assert client.app.state.stream_http_client is old_client  # not recycled
 
 
 def test_pool_stats_is_called_for_both_pools(
