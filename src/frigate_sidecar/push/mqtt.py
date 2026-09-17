@@ -154,6 +154,7 @@ class MqttReviewSubscriber:
         self.frigate_base_url = frigate_base_url
         self._loop = loop
         self.last_seen: float = time.time()
+        self.last_review_at: float | None = None
         self.frigate_online: bool = True
         self._client: mqtt.Client | None = None
         self._stopped = False
@@ -163,6 +164,7 @@ class MqttReviewSubscriber:
         self._capture: MqttCapture | None = None
         if settings.capture_enabled:
             from frigate_sidecar.push.capture import MqttCapture
+
             capture_path = settings.capture_path or ""
             if not capture_path:
                 capture_path = str(Path(settings.push_settings_path).parent / "mqtt-capture.jsonl")
@@ -210,7 +212,8 @@ class MqttReviewSubscriber:
                     logger.warning(
                         "push: mqtt queue full (max=%d) -- dropped %d event frame(s) "
                         "since last warning",
-                        maxsize, _dropped_since_warn,
+                        maxsize,
+                        _dropped_since_warn,
                     )
                     _last_drop_warn_at = now
                     _dropped_since_warn = 0
@@ -253,9 +256,7 @@ class MqttReviewSubscriber:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    logger.exception(
-                        "push: mqtt consumer handler failed for %s frame", item.kind
-                    )
+                    logger.exception("push: mqtt consumer handler failed for %s frame", item.kind)
                     STATS.incr("mqtt.consumer.errors")
                 finally:
                     self._dispatching = False
@@ -269,17 +270,13 @@ class MqttReviewSubscriber:
         if not isinstance(after, dict):
             after = {}
         if item.kind == "events":
-            token = set_push_context(
-                after.get("camera"), after.get("id"), None
-            )
+            token = set_push_context(after.get("camera"), after.get("id"), None)
             try:
                 await self.engine.handle_object_payload(payload)
             finally:
                 reset_push_context(token)
         elif item.kind == "reviews":
-            token = set_push_context(
-                after.get("camera"), None, after.get("id")
-            )
+            token = set_push_context(after.get("camera"), None, after.get("id"))
             try:
                 await self.engine.handle_review_payload(payload)
             finally:
@@ -312,6 +309,7 @@ class MqttReviewSubscriber:
 
     def _handle_reviews_message(self, payload_bytes: bytes) -> None:
         self.last_seen = time.time()
+        self.last_review_at = self.last_seen
         try:
             payload = json.loads(payload_bytes)
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -322,9 +320,7 @@ class MqttReviewSubscriber:
         loop = self._loop
         if loop is None:
             return
-        item = _QueueItem(
-            kind="reviews", payload=payload, terminal=True, enqueued_at=time.time()
-        )
+        item = _QueueItem(kind="reviews", payload=payload, terminal=True, enqueued_at=time.time())
         loop.call_soon_threadsafe(self._enqueue, item)
 
     def _handle_events_message(self, payload_bytes: bytes) -> None:
@@ -346,8 +342,10 @@ class MqttReviewSubscriber:
         if loop is None:
             return
         item = _QueueItem(
-            kind="events", payload=payload,
-            terminal=self._terminal_events_item(payload), enqueued_at=time.time(),
+            kind="events",
+            payload=payload,
+            terminal=self._terminal_events_item(payload),
+            enqueued_at=time.time(),
         )
         loop.call_soon_threadsafe(self._enqueue, item)
 
@@ -392,7 +390,9 @@ class MqttReviewSubscriber:
         the gap before treating live pushes as caught up."""
         after = self.last_seen - self.settings.backfill_lookback_s
         return await backfill_since(
-            self.engine, frigate_base_url=self.frigate_base_url, after=after,
+            self.engine,
+            frigate_base_url=self.frigate_base_url,
+            after=after,
             staleness_s=self.settings.delivery_backfill_staleness_s,
         )
 
@@ -474,8 +474,12 @@ class MqttReviewSubscriber:
                                 logger.exception("push: backfill after stale window failed")
                             self.last_seen = time.time()
                 except (OSError, ConnectionError) as exc:
-                    logger.warning("push: mqtt connect to %s:%s failed: %s",
-                                    self.settings.mqtt_host, self.settings.mqtt_port, exc)
+                    logger.warning(
+                        "push: mqtt connect to %s:%s failed: %s",
+                        self.settings.mqtt_host,
+                        self.settings.mqtt_port,
+                        exc,
+                    )
                 finally:
                     client.loop_stop()
                     with contextlib.suppress(Exception):
@@ -483,7 +487,8 @@ class MqttReviewSubscriber:
                 if self._stopped:
                     break
                 backoff = compute_backoff(
-                    attempt, self.settings.reconnect_backoff_s,
+                    attempt,
+                    self.settings.reconnect_backoff_s,
                     self.settings.reconnect_backoff_max_s,
                 )
                 attempt += 1
