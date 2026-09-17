@@ -2,6 +2,7 @@
   "decisions": [
     {
       "camera": "street",
+      "card_key": "",
       "event_id": "1755550002.654321-def456",
       "family": "activity",
       "id": "dec-00000002",
@@ -9,18 +10,26 @@
       "la_started": false,
       "label": "car",
       "level": "log",
+      "modifiers": [],
+      "mutation": "",
       "place": "street",
       "reasons": [
         "outcomes[vehicle][street]=log"
       ],
+      "sent": 0,
+      "silenced": null,
+      "sound": false,
+      "stage": "table",
       "subject": "vehicle",
       "ts": "2026-08-19T20:37:41Z",
+      "zone": "",
       "zones": [
         "nw_49th_st"
       ]
     },
     {
       "camera": "doorbell",
+      "card_key": "doorbell:package:t_1755550001-abc123",
       "event_id": "1755550001.123456-abc123",
       "family": "package",
       "id": "dec-00000001",
@@ -28,12 +37,25 @@
       "la_started": true,
       "label": "package",
       "level": "notify",
+      "modifiers": [
+        "nudge_up"
+      ],
+      "mutation": "create",
       "place": "doors",
       "reasons": [
         "outcomes[package][doors]=notify"
       ],
+      "sent": 1,
+      "silenced": {
+        "level": "quiet",
+        "subject": "package",
+        "zone": "front_door"
+      },
+      "sound": true,
+      "stage": "table",
       "subject": "package",
       "ts": "2026-08-19T20:37:02Z",
+      "zone": "front_door",
       "zones": [
         "front_door"
       ]

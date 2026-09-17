@@ -428,6 +428,52 @@ CREATE TABLE IF NOT EXISTS face_enrichments (
 );
 CREATE INDEX IF NOT EXISTS idx_face_enrich_cluster ON face_enrichments(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_face_enrich_age     ON face_enrichments(event_start_ts);
+
+-- Durable routing decision log (alerts-slice1 §A). Replaces the old
+-- in-memory ring buffer -- one row per event decision (pre-fanout), plus
+-- the Live Activity annotation columns patched in after the fact by
+-- `decision_trace.annotate`. `id` is derived from the SQLite rowid so it
+-- survives a restart (dec-%08d). 30-day retention, pruned opportunistically
+-- from `append` (at most once/hour).
+CREATE TABLE IF NOT EXISTS push_decisions (
+    ts            TEXT NOT NULL,
+    camera        TEXT NOT NULL,
+    label         TEXT NOT NULL,
+    subject       TEXT NOT NULL,
+    zones_csv     TEXT NOT NULL DEFAULT '',
+    place         TEXT NOT NULL,
+    level         TEXT NOT NULL,
+    reasons_csv   TEXT NOT NULL DEFAULT '',
+    event_id      TEXT NOT NULL,
+    stage         TEXT NOT NULL DEFAULT '',
+    modifiers_csv TEXT NOT NULL DEFAULT '',
+    card_key      TEXT NOT NULL DEFAULT '',
+    mutation      TEXT NOT NULL DEFAULT '',
+    zone          TEXT NOT NULL DEFAULT '',
+    sound         INTEGER NOT NULL DEFAULT 0,
+    sent          INTEGER NOT NULL DEFAULT 0,
+    family        TEXT,
+    la_started    INTEGER,
+    la_reason     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_push_decisions_ts       ON push_decisions(ts);
+CREATE INDEX IF NOT EXISTS idx_push_decisions_card_key ON push_decisions(card_key);
+
+-- Silences applied via POST /v1/push/silence and PUT /v1/push/overrides
+-- (alerts-slice1 §C). Audit trail only -- the live effect is the
+-- push_settings.json write through the same path PUT /v1/push/settings uses.
+CREATE TABLE IF NOT EXISTS push_silences (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        TEXT NOT NULL,
+    card_key  TEXT NOT NULL DEFAULT '',
+    kind      TEXT NOT NULL,
+    zone      TEXT NOT NULL DEFAULT '',
+    subject   TEXT NOT NULL DEFAULT '',
+    place     TEXT NOT NULL DEFAULT '',
+    previous  TEXT,
+    applied   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_silences_ts ON push_silences(ts);
 """
 
 # Columns added to `push_devices` / `push_handles` after those tables first
@@ -617,9 +663,7 @@ class DBLockedError(RuntimeError):
     """
 
 
-def read_with_retry(
-    fn: Callable[[], T], *, attempts: int = 3, backoff: float = 0.3
-) -> T:
+def read_with_retry(fn: Callable[[], T], *, attempts: int = 3, backoff: float = 0.3) -> T:
     """Call `fn` (a full read: open connection, query, fetch, close), retrying
     briefly if it raises `sqlite3.OperationalError` for `database is locked` /
     `database table is locked`.

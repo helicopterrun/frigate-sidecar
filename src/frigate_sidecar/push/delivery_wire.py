@@ -52,7 +52,12 @@ from frigate_sidecar.push.delivery import (
     sound_name_for_card,
 )
 from frigate_sidecar.push.delivery import advance_card as _advance_card
-from frigate_sidecar.push.ladder import SUPPRESSED, Snapshot, evaluate_ladder
+from frigate_sidecar.push.ladder import (
+    SUPPRESSED,
+    Snapshot,
+    evaluate_ladder,
+    evaluate_ladder_explained,
+)
 from frigate_sidecar.push.models import ReviewEvent
 from frigate_sidecar.push.payload import pretty_label
 
@@ -1323,7 +1328,10 @@ async def handle_delivery_event(
         snapshot, approaching_secure=approaching_secure,
         leaving_scene=leaving_scene, moving_fast=moving_fast,
     )
-    level = evaluate_ladder(snapshot)
+    ladder_result = evaluate_ladder_explained(snapshot)
+    level = ladder_result.level
+    decision_stage = ladder_result.stage
+    decision_modifiers = list(ladder_result.modifiers)
 
     # Quiet hours: cap_quiet caps level at quiet (urgent exempt). SUPPRESSED
     # is not in ladder_policy.LEVELS -- a muted/suppressed snapshot has
@@ -1336,6 +1344,7 @@ async def handle_delivery_event(
         if level_idx > quiet_idx:
             level = "quiet"
             qh_capped = True
+            decision_modifiers.append("quiet_hours_cap")
     zone_name = event.zones[0] if event.zones else ""
     track_ids = event.track_ids or (event.event_id,)
 
@@ -1377,8 +1386,12 @@ async def handle_delivery_event(
         if via_geo and "geo_dedup" not in trace_reasons:
             trace_reasons.append("geo_dedup")
 
+        mutation_name = {
+            CREATE: "create", ESCALATE: "escalate", DEESCALATE: "deescalate",
+        }.get(mutation, "")
         if mutation in (CREATE, ESCALATE, DEESCALATE):
             decision_trace.append(
+                conn,
                 camera=event.camera,
                 label=snapshot.label,
                 subject=subject_kind,
@@ -1387,6 +1400,12 @@ async def handle_delivery_event(
                 level=card.level,
                 reasons=list(trace_reasons),
                 event_id=event.event_id,
+                stage=decision_stage,
+                modifiers=tuple(decision_modifiers),
+                card_key=card_key,
+                mutation=mutation_name,
+                zone=snapshot.zone,
+                sound=sound,
             )
         elif (
             mutation == SUPPRESSED_MUTATION
@@ -1402,6 +1421,7 @@ async def handle_delivery_event(
             # OFF_CELLS check -- muting everything shouldn't flood the
             # trace.
             decision_trace.append(
+                conn,
                 camera=event.camera,
                 label=snapshot.label,
                 subject=subject_kind,
@@ -1410,6 +1430,12 @@ async def handle_delivery_event(
                 level="off",
                 reasons=["routing_table", "suppressed"],
                 event_id=event.event_id,
+                stage="off_cell",
+                modifiers=(),
+                card_key=card_key,
+                mutation="suppressed",
+                zone=snapshot.zone,
+                sound=False,
             )
 
         # RESOLVE copy shows the story duration (matches the LA's frozen
@@ -1570,7 +1596,7 @@ async def handle_delivery_event(
                 else:
                     la_reason = "cell_below_glance"
                 decision_trace.annotate(
-                    event.event_id, la_started=False, la_reason=la_reason,
+                    conn, event.event_id, la_started=False, la_reason=la_reason,
                 )
             else:
                 started = bool(la_covered)
@@ -1581,7 +1607,7 @@ async def handle_delivery_event(
                 else:
                     la_reason = "started"
                 decision_trace.annotate(
-                    event.event_id, family=family, la_started=started,
+                    conn, event.event_id, family=family, la_started=started,
                     la_reason=la_reason,
                 )
         # la_first demotion: if the delivery mode is la_first and this is
@@ -1626,7 +1652,7 @@ async def handle_delivery_event(
                 la_active=la_only, escalation_sound=escalation_sound,
             )
 
-        await send_card_mutation(
+        sent_count = await send_card_mutation(
             conn, transport, devices, card, mutation, payload,
             subject_kind=subject_kind, place_class=place_class,
             camera=owning_camera, zone_name=zone_name,
@@ -1635,6 +1661,11 @@ async def handle_delivery_event(
             demote_tokens=demote_tokens,
             suppress_demoted=delivery_mode == "la_first" and not la_only,
         )
+        if mutation in (CREATE, ESCALATE, DEESCALATE):
+            decision_trace.annotate(
+                conn, event.event_id, sent=sent_count,
+                sound=bool(sound and not la_only and sent_count > 0),
+            )
         if warm_task is not None:
             # Runs concurrently with the sends above, not in series (plan §4
             # lever 4's rule, reused here): the push already carries the
@@ -1934,6 +1965,7 @@ async def handle_recognition_event(
     context = card_store.get_card_context(conn, card_key) or {}
 
     decision_trace.append(
+        conn,
         camera=camera,
         label=label,
         subject=subject_kind,
@@ -1942,6 +1974,12 @@ async def handle_recognition_event(
         level=card.level,
         reasons=["recognition_relax"],
         event_id=f"{camera}:{track_id}",
+        stage="table",
+        modifiers=("nudge_down",),
+        card_key=card_key,
+        mutation="deescalate",
+        zone=context.get("zone_name", ""),
+        sound=False,
     )
     zone_name = context.get("zone_name", "")
     place_class = context.get("place_class", "")

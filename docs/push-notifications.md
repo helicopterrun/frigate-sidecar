@@ -331,18 +331,63 @@ settings-backed `camera_optics` table under its historical name.
 
 ## Decision trace and the tuning loop
 
-`GET /v1/push/decisions` serves `push/decision_trace.py`: an in-memory ring
-buffer (500 entries, 200 served max) of routing decisions, one per event
-pre-fanout, newest first. Each entry: `id`, `ts`, `camera`, `label`,
-`subject`, `zones`, `place`, `level`, `reasons`, `event_id`. Append never
-raises and losing the buffer on restart is acceptable. This feeds the app's
-Recent Decisions screen — the tuning loop is: see a decision you disagree
-with, see which cell/override/reason produced it, change that cell, and the
-next evaluation uses the new policy. Events silenced by an `off` cell are
-traced too (level `"off"`, reason `suppressed`, once per track) — otherwise
-the feed goes dark for exactly the cells the user silenced and there is no
-evidence trail to dial one back up. `POST /v1/push/feedback` logs a
-per-card verdict (tuning trace only; no routing changes yet).
+`GET /v1/push/decisions` serves `push/decision_trace.py`: a durable log in
+the sidecar SQLite DB (`push_decisions`, 30-day retention, 200 served max
+per page, `before`/`card_key` cursor+filter) of routing decisions, one per
+event pre-fanout, newest first — a restart no longer loses the trail. Each
+entry: `id`, `ts`, `camera`, `label`, `subject`, `zones`, `place`, `level`,
+`reasons`, `event_id`, plus `stage`, `modifiers`, `card_key`, `mutation`,
+`zone`, `sound`, `sent` (and, once annotated, `family`/`la_started`/
+`la_reason`) and a `silenced` field computed at read time against
+`push_silences`. `stage` names which rule produced the level and
+`modifiers` are the nudges/caps applied on top:
+
+| stage/modifier | plain English |
+|---|---|
+| `muted` | Alerts were paused |
+| `system` | Server notice |
+| `safety` | Safety exception: always urgent |
+| `zone_override` | Your rule for {subject} in {zone} |
+| `off_cell` | {subject} in {place} is set to Off |
+| `table` | {subject} in {place} is set to {level} |
+| `nudge_up` | raised one step (nobody home / night / approaching …) |
+| `nudge_down` | lowered one step (known / leaving …) |
+| `child_hazard_floor` | at least Notify: child-hazard zone |
+| `street_cap` | capped at Quiet: street |
+| `unconfirmed_cap` | capped at Quiet: detector unconfirmed |
+| `quiet_hours_cap` | capped at Quiet: quiet hours |
+| `reclass_dangerous_animal` | treated as a person: dangerous animal |
+
+Append never raises and a write failure is
+logged and swallowed rather than dropping the notification it's describing.
+This feeds the app's Recent Decisions screen — the tuning loop is: see a
+decision you disagree with, see which cell/override/reason produced it,
+change that cell (or one-tap **Quiet this** via `POST /v1/push/silence`),
+and the next evaluation uses the new policy. Events silenced by an `off`
+cell are traced too (level `"off"`, reason `suppressed`, once per track) —
+otherwise the feed goes dark for exactly the cells the user silenced and
+there is no evidence trail to dial one back up. `POST /v1/push/feedback`
+logs a per-card verdict (tuning trace only; no routing changes yet).
+
+### Status, silence, and overrides
+
+- `GET /v1/push/status` — one-glance health: `frigate_available` /
+  `mqtt_connected` from the live MQTT subscriber, `last_review_at` /
+  `last_decision_at` / `last_sent_at` (+ level/card_key) and
+  `decisions_since_last_sent` from `push_decisions`, `quiet_hours_active`,
+  `devices` registered. Cheap — one or two SQL queries plus in-memory flags,
+  no Frigate HTTP round-trip. `paused_until` is always `null`: there is no
+  global timed-mute concept, only the per-cell/per-zone silences below.
+- `POST /v1/push/silence` — `{"card_key": ...}` drops the cell that card
+  routed through (its zone override, or its outcomes-table cell if it has no
+  zone) to `quiet`, through the same validate → normalize → save → apply
+  path as `PUT /settings`, and records a `push_silences` audit row. 404
+  `card_not_found` for an unknown key.
+- `PUT /v1/push/overrides` — the fine-grained editor: set or clear one
+  `zone_override` cell (`level: null` removes it), or set one `outcome_cell`
+  directly (`level` may not be `null` there — an outcomes cell always has a
+  current value). 422 for a bad `kind`/`level` enum or missing required
+  fields for the given `kind`.
 
 ## HTTP surface (`routes/push.py`)
 
@@ -377,6 +422,8 @@ being opaque, unguessable, and short-lived — the NSE holds no session.
   pre-warmed snapshot bytes; handle → `{camera, event_id, snapshot_url}`.
 - `GET /v1/push/decisions`, `GET`/`PUT /v1/push/settings`,
   `POST /v1/push/feedback` — see above.
+- `GET /v1/push/status`, `POST /v1/push/silence`, `PUT /v1/push/overrides`
+  — see "Status, silence, and overrides" above.
 
 ## Privacy model and the relay
 
@@ -429,9 +476,14 @@ id.
 - A `410`/`400` from the transport is a permanent dead token: the device
   row is pruned immediately (`push/engine.py`), never retried. This is the
   primary cleanup path — the app can't promise to DELETE before uninstall.
-- Any other transport/network error is logged and left for the next live
-  event — no retry queue; the system degrades to no notifications, not a
-  crash.
+- A retryable relay failure (network error, 5xx, 429) gets bounded in-request
+  retries with exponential backoff and jitter (`transport.py:40-68`,
+  `compute_retry_delay` — 0.5s/1.5s/4.5s... capped, or the relay's own
+  `Retry-After` capped at 5s) up to `relay_retry_attempts` (default 3) before
+  giving up on that one send. There is still no *durable* retry queue behind
+  it: once those in-request attempts are exhausted the send is abandoned and
+  left for the next live event, not persisted for a later replay — the
+  system degrades to no notifications, not a crash.
 - A missing/corrupt settings file falls back to defaults, never a failed
   evaluation.
 - Every thumbnail failure path costs the notification its image, never its

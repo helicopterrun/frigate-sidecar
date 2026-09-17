@@ -160,7 +160,7 @@ async def test_decision_trace_carries_la_side_of_the_decision(sidecar_db_path: P
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     entry = next(
-        e for e in decision_trace.recent(limit=200)
+        e for e in decision_trace.recent(conn, limit=200)
         if e["event_id"] == "trkD"  # event_id defaults to the first track id
     )
     assert entry["subject"] == "package"

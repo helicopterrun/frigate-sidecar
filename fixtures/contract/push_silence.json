@@ -1,0 +1,10 @@
+{
+  "applied": "quiet",
+  "previous": "glance",
+  "scope": {
+    "camera": "doorbell",
+    "kind": "outcome_cell",
+    "place": "doors",
+    "subject": "package"
+  }
+}

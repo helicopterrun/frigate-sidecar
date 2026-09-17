@@ -69,46 +69,74 @@ OUTCOMES = ("off", "log", "glance", "notify", "alarm")
 #: level -- it is enforced as suppression before evaluation).
 LEVEL_TO_OUTCOME = {"log": "log", "quiet": "glance", "notify": "notify", "urgent": "alarm"}
 OUTCOME_TO_LEVEL = {
-    "off": "log", "log": "log", "glance": "quiet", "notify": "notify", "alarm": "urgent",
+    "off": "log",
+    "log": "log",
+    "glance": "quiet",
+    "notify": "notify",
+    "alarm": "urgent",
 }
 
 #: The routing table a freshly onboarded settings file starts the user at
 #: (design doc §1, "match the v3 brief's §1.4 table exactly").
 DEFAULT_ROUTING_TABLE: dict[str, dict[str, str]] = {
     "stranger": {
-        "street": "log", "yard": "quiet", "doors": "notify",
-        "private": "notify", "off_limits": "urgent",
+        "street": "log",
+        "yard": "quiet",
+        "doors": "notify",
+        "private": "notify",
+        "off_limits": "urgent",
     },
     "known": {
-        "street": "log", "yard": "log", "doors": "quiet",
-        "private": "quiet", "off_limits": "quiet",
+        "street": "log",
+        "yard": "log",
+        "doors": "quiet",
+        "private": "quiet",
+        "off_limits": "quiet",
     },
     "animal": {
-        "street": "log", "yard": "quiet", "doors": "quiet",
-        "private": "quiet", "off_limits": "quiet",
+        "street": "log",
+        "yard": "quiet",
+        "doors": "quiet",
+        "private": "quiet",
+        "off_limits": "quiet",
     },
     "thing": {
-        "street": "log", "yard": "log", "doors": "log",
-        "private": "log", "off_limits": "quiet",
+        "street": "log",
+        "yard": "log",
+        "doors": "log",
+        "private": "log",
+        "off_limits": "quiet",
     },
 }
 
 DEFAULT_ROUTING_TABLE_V2: dict[str, dict[str, str]] = {
     "person": {
-        "street": "log", "yard": "quiet", "doors": "notify",
-        "private": "notify", "off_limits": "urgent",
+        "street": "log",
+        "yard": "quiet",
+        "doors": "notify",
+        "private": "notify",
+        "off_limits": "urgent",
     },
     "vehicle": {
-        "street": "log", "yard": "quiet", "doors": "quiet",
-        "private": "quiet", "off_limits": "notify",
+        "street": "log",
+        "yard": "quiet",
+        "doors": "quiet",
+        "private": "quiet",
+        "off_limits": "notify",
     },
     "animal": {
-        "street": "log", "yard": "quiet", "doors": "quiet",
-        "private": "quiet", "off_limits": "quiet",
+        "street": "log",
+        "yard": "quiet",
+        "doors": "quiet",
+        "private": "quiet",
+        "off_limits": "quiet",
     },
     "thing": {
-        "street": "log", "yard": "log", "doors": "log",
-        "private": "log", "off_limits": "quiet",
+        "street": "log",
+        "yard": "log",
+        "doors": "log",
+        "private": "log",
+        "off_limits": "quiet",
     },
 }
 
@@ -121,16 +149,25 @@ DEFAULT_ROUTING_TABLE_V2: dict[str, dict[str, str]] = {
 #: rows are derived via `OUTCOME_TO_LEVEL` like every other lockstep row.
 DEFAULT_EXTRA_OUTCOMES: dict[str, dict[str, str]] = {
     "package": {
-        "street": "log", "yard": "glance", "doors": "glance",
-        "private": "glance", "off_limits": "notify",
+        "street": "log",
+        "yard": "glance",
+        "doors": "glance",
+        "private": "glance",
+        "off_limits": "notify",
     },
     "bin": {
-        "street": "glance", "yard": "glance", "doors": "glance",
-        "private": "log", "off_limits": "notify",
+        "street": "glance",
+        "yard": "glance",
+        "doors": "glance",
+        "private": "log",
+        "off_limits": "notify",
     },
     "opening": {
-        "street": "log", "yard": "glance", "doors": "glance",
-        "private": "glance", "off_limits": "notify",
+        "street": "log",
+        "yard": "glance",
+        "doors": "glance",
+        "private": "glance",
+        "off_limits": "notify",
     },
 }
 
@@ -163,8 +200,22 @@ _OPENING_NAME_HINTS = ("door", "gate", "garage", "entry", "entrance")
 
 #: 16-point compass rose for `camera_optics.faces`.
 COMPASS_POINTS = (
-    "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
-    "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
+    "N",
+    "NNE",
+    "NE",
+    "ENE",
+    "E",
+    "ESE",
+    "SE",
+    "SSE",
+    "S",
+    "SSW",
+    "SW",
+    "WSW",
+    "W",
+    "WNW",
+    "NW",
+    "NNW",
 )
 
 
@@ -229,7 +280,8 @@ def default_settings() -> dict[str, Any]:
         "routing_table": {subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE.items()},
         "routing_table_v2": {
             subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE_V2.items()
-        } | {
+        }
+        | {
             subject: {place: OUTCOME_TO_LEVEL[outcome] for place, outcome in row.items()}
             for subject, row in DEFAULT_EXTRA_OUTCOMES.items()
         },
@@ -237,14 +289,16 @@ def default_settings() -> dict[str, Any]:
         "outcomes": {
             subject: {place: LEVEL_TO_OUTCOME[level] for place, level in row.items()}
             for subject, row in DEFAULT_ROUTING_TABLE_V2.items()
-        } | {subject: dict(row) for subject, row in DEFAULT_EXTRA_OUTCOMES.items()},
+        }
+        | {subject: dict(row) for subject, row in DEFAULT_EXTRA_OUTCOMES.items()},
         "zone_classes": {},
         # zone key -> human display name for notification copy ("back_critter"
         # -> "the back walkway"). Wins over Frigate's friendly_name. Edited on
         # the /zones page; empty string clears.
         "zone_names": {},
         "zone_overrides": {},
-        "live_activities": {family: True for family in FAMILIES} | {
+        "live_activities": {family: True for family in FAMILIES}
+        | {
             "opening_picks": [],
             "delivery": "la_first",
             "alert_all_changes": False,
@@ -464,9 +518,7 @@ def validate_settings(data: Any) -> list[str]:
                 errors.append("live_activities.la_only must be a boolean")
             delivery = live_activities.get("delivery")
             if delivery is not None and delivery not in ("la_first", "notifications"):
-                errors.append(
-                    "live_activities.delivery must be 'la_first' or 'notifications'"
-                )
+                errors.append("live_activities.delivery must be 'la_first' or 'notifications'")
 
     mute_sounds = data.get("mute_sounds")
     if mute_sounds is not None and not isinstance(mute_sounds, bool):
@@ -500,9 +552,7 @@ def validate_settings(data: Any) -> list[str]:
                 if not isinstance(neighbors, list) or not all(
                     isinstance(n, str) for n in neighbors
                 ):
-                    errors.append(
-                        f"camera_neighbors[{cam!r}] must be a list of camera names"
-                    )
+                    errors.append(f"camera_neighbors[{cam!r}] must be a list of camera names")
 
     camera_headings = data.get("camera_headings")
     if camera_headings is not None:
@@ -514,13 +564,12 @@ def validate_settings(data: Any) -> list[str]:
                     isinstance(vec, dict)
                     and isinstance(vec.get("dx"), (int, float))
                     and isinstance(vec.get("dy"), (int, float))
-                    and math.isfinite(vec["dx"]) and math.isfinite(vec["dy"])
+                    and math.isfinite(vec["dx"])
+                    and math.isfinite(vec["dy"])
                     and (vec["dx"] or vec["dy"])
                 )
                 if not ok:
-                    errors.append(
-                        f"camera_headings[{cam!r}] must be a non-zero {{dx, dy}} vector"
-                    )
+                    errors.append(f"camera_headings[{cam!r}] must be a non-zero {{dx, dy}} vector")
 
     camera_layout = data.get("camera_layout")
     if camera_layout is not None:
@@ -532,18 +581,13 @@ def validate_settings(data: Any) -> list[str]:
                     isinstance(pos, dict)
                     and isinstance(pos.get("x"), (int, float))
                     and isinstance(pos.get("y"), (int, float))
-                    and 0.0 <= pos["x"] <= 1.0 and 0.0 <= pos["y"] <= 1.0
+                    and 0.0 <= pos["x"] <= 1.0
+                    and 0.0 <= pos["y"] <= 1.0
                 )
                 if ok and "azimuth" in pos:
-                    ok = (
-                        isinstance(pos["azimuth"], (int, float))
-                        and math.isfinite(pos["azimuth"])
-                    )
+                    ok = isinstance(pos["azimuth"], (int, float)) and math.isfinite(pos["azimuth"])
                 if ok and "fov" in pos:
-                    ok = (
-                        isinstance(pos["fov"], (int, float))
-                        and 10.0 <= pos["fov"] <= 360.0
-                    )
+                    ok = isinstance(pos["fov"], (int, float)) and 10.0 <= pos["fov"] <= 360.0
                 if not ok:
                     errors.append(
                         f"camera_layout[{cam!r}] must be {{x, y}} within 0..1 "
@@ -611,17 +655,18 @@ def validate_settings(data: Any) -> list[str]:
                 if not (isinstance(v, int) and 0 < v <= 20000):
                     errors.append(f"floorplan.{dim} must be a positive pixel count")
             rot = floorplan.get("rotation_deg")
-            if rot is not None and not (
-                isinstance(rot, (int, float)) and -360 <= rot <= 360
-            ):
+            if rot is not None and not (isinstance(rot, (int, float)) and -360 <= rot <= 360):
                 errors.append("floorplan.rotation_deg must be a number in -360..360")
             cal = floorplan.get("calibration")
             if cal is not None:
-                ok = isinstance(cal, dict) and all(
-                    isinstance(cal.get(k), (int, float)) and 0.0 <= cal[k] <= 1.0
-                    for k in ("x0", "y0", "x1", "y1")
-                ) and isinstance(cal.get("length_ft"), (int, float)) and (
-                    0 < cal.get("length_ft", 0) <= 100000
+                ok = (
+                    isinstance(cal, dict)
+                    and all(
+                        isinstance(cal.get(k), (int, float)) and 0.0 <= cal[k] <= 1.0
+                        for k in ("x0", "y0", "x1", "y1")
+                    )
+                    and isinstance(cal.get("length_ft"), (int, float))
+                    and (0 < cal.get("length_ft", 0) <= 100000)
                 )
                 if not ok:
                     errors.append(
@@ -638,6 +683,7 @@ def _derived_family_booleans(outcomes: dict[str, dict[str, str]]) -> dict[str, A
     what the ladder actually does (a fully-off row reads as family off),
     and `alert_all_changes` is permanently False -- per-cell outcomes
     replaced it (glance updates stay silent, notify+ pops)."""
+
     def alive(subject: str) -> bool:
         row = outcomes.get(subject, {})
         return any(cell != "off" for cell in row.values()) if row else True
@@ -737,7 +783,8 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
     zone_names = data.get("zone_names")
     if isinstance(zone_names, dict):
         merged["zone_names"] = {
-            str(zone): str(name) for zone, name in zone_names.items()
+            str(zone): str(name)
+            for zone, name in zone_names.items()
             if isinstance(name, str) and name.strip()
         }
 
@@ -821,15 +868,18 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
                 continue
             dx, dy = vec.get("dx"), vec.get("dy")
             if not (
-                isinstance(dx, (int, float)) and isinstance(dy, (int, float))
-                and math.isfinite(dx) and math.isfinite(dy)
+                isinstance(dx, (int, float))
+                and isinstance(dy, (int, float))
+                and math.isfinite(dx)
+                and math.isfinite(dy)
             ):
                 continue
             length = math.hypot(dx, dy)
             if length < 1e-6:
                 continue
             cleaned_headings[str(cam)] = {
-                "dx": round(dx / length, 4), "dy": round(dy / length, 4),
+                "dx": round(dx / length, 4),
+                "dy": round(dy / length, 4),
             }
         merged["camera_headings"] = cleaned_headings
 
@@ -841,8 +891,10 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
                 continue
             x, y = pos.get("x"), pos.get("y")
             if not (
-                isinstance(x, (int, float)) and isinstance(y, (int, float))
-                and 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0
+                isinstance(x, (int, float))
+                and isinstance(y, (int, float))
+                and 0.0 <= x <= 1.0
+                and 0.0 <= y <= 1.0
             ):
                 continue
             entry: dict[str, Any] = {"x": round(float(x), 4), "y": round(float(y), 4)}
@@ -889,9 +941,12 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
                 continue
             hfov, mount, tilt = facts.get("hfov"), facts.get("mount_ft"), facts.get("tilt_deg")
             if not (
-                isinstance(hfov, (int, float)) and 10.0 < hfov <= 360.0
-                and isinstance(mount, (int, float)) and 0.0 < mount <= 500.0
-                and isinstance(tilt, (int, float)) and -90.0 <= tilt <= 90.0
+                isinstance(hfov, (int, float))
+                and 10.0 < hfov <= 360.0
+                and isinstance(mount, (int, float))
+                and 0.0 < mount <= 500.0
+                and isinstance(tilt, (int, float))
+                and -90.0 <= tilt <= 90.0
             ):
                 continue
             entry = {
@@ -916,9 +971,12 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
         ext = floorplan.get("ext")
         w, h = floorplan.get("w"), floorplan.get("h")
         if (
-            isinstance(ext, str) and ext
-            and isinstance(w, int) and 0 < w <= 20000
-            and isinstance(h, int) and 0 < h <= 20000
+            isinstance(ext, str)
+            and ext
+            and isinstance(w, int)
+            and 0 < w <= 20000
+            and isinstance(h, int)
+            and 0 < h <= 20000
         ):
             fp: dict[str, Any] = {"ext": ext, "w": w, "h": h, "calibration": None}
             uploaded_at = floorplan.get("uploaded_at")
@@ -930,7 +988,8 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
             cal = floorplan.get("calibration")
             if isinstance(cal, dict):
                 vals = {
-                    k: float(cal[k]) for k in ("x0", "y0", "x1", "y1")
+                    k: float(cal[k])
+                    for k in ("x0", "y0", "x1", "y1")
                     if isinstance(cal.get(k), (int, float)) and 0.0 <= cal[k] <= 1.0
                 }
                 cal_len = cal.get("length_ft")
@@ -947,7 +1006,8 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def derived_camera_heading(
-    camera: str, settings: dict[str, Any] | None = None,
+    camera: str,
+    settings: dict[str, Any] | None = None,
 ) -> dict[str, float] | None:
     """The "toward home" image-space unit vector derived from world
     geometry: camera position + pie azimuth (camera_layout) and the
@@ -1016,8 +1076,11 @@ def camera_neighbor_set(camera: str, settings: dict[str, Any] | None = None) -> 
     if not isinstance(table, dict):
         return frozenset()
     out = {str(n) for n in table.get(camera, []) if n}
-    out |= {str(cam) for cam, neighbors in table.items()
-            if isinstance(neighbors, list) and camera in neighbors}
+    out |= {
+        str(cam)
+        for cam, neighbors in table.items()
+        if isinstance(neighbors, list) and camera in neighbors
+    }
     out.discard(camera)
     return frozenset(out)
 
@@ -1103,11 +1166,15 @@ def apply_settings(settings: dict[str, Any]) -> None:
     table = settings.get("routing_table_v2") or settings["routing_table"]
     ladder_policy.set_table({s: dict(row) for s, row in table.items()})
     outcomes = settings.get("outcomes", {})
-    ladder_policy.set_off_cells({
-        (subject, place)
-        for subject, row in outcomes.items() if isinstance(row, dict)
-        for place, outcome in row.items() if outcome == "off"
-    })
+    ladder_policy.set_off_cells(
+        {
+            (subject, place)
+            for subject, row in outcomes.items()
+            if isinstance(row, dict)
+            for place, outcome in row.items()
+            if outcome == "off"
+        }
+    )
     ladder_policy.set_zone_overrides(
         {zone: dict(row) for zone, row in settings.get("zone_overrides", {}).items()}
     )
@@ -1133,6 +1200,38 @@ def get_active() -> dict[str, Any]:
     if _active is None:
         return default_settings()
     return _active
+
+
+def save_and_apply(path: str | Path, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Normalize, apply the sticky/nullable-key rules, persist, and make
+    live -- the exact sequence `PUT /v1/push/settings` runs, factored out so
+    the silence/override endpoints (alerts-slice1 §C) go through the same
+    single save path rather than reimplementing it. Callers must run
+    `validate_settings(body)` themselves first (this never validates) --
+    same division of labor as the route it was extracted from.
+    """
+    merged = normalize_settings(body)
+    la_body = body.get("live_activities") if isinstance(body, dict) else None
+    active_la = get_active().get("live_activities", {})
+    if not (isinstance(la_body, dict) and isinstance(la_body.get("la_only"), bool)):
+        merged["live_activities"]["la_only"] = bool(active_la.get("la_only", False))
+    if not (isinstance(la_body, dict) and la_body.get("delivery") in ("la_first", "notifications")):
+        merged["live_activities"]["delivery"] = active_la.get("delivery", "la_first")
+    for sticky_key in (
+        "camera_neighbors",
+        "camera_headings",
+        "camera_layout",
+        "zone_names",
+        "camera_optics",
+    ):
+        if not isinstance(body.get(sticky_key), dict):
+            merged[sticky_key] = get_active().get(sticky_key, {})
+    for nullable_key in ("secure_area", "map_scale_ft", "floorplan"):
+        if nullable_key not in body:
+            merged[nullable_key] = get_active().get(nullable_key)
+    new_rev = save_settings(path, merged)
+    apply_settings(merged)
+    return merged, new_rev
 
 
 def startup(path: str | Path) -> dict[str, Any]:
@@ -1180,7 +1279,9 @@ def startup(path: str | Path) -> dict[str, Any]:
         stored_la = stored_la if isinstance(stored_la, dict) else {}
         alert_all = stored_la.get("alert_all_changes") is True
         for bool_key, subject in (
-            ("package", "package"), ("bins", "bin"), ("openings", "opening"),
+            ("package", "package"),
+            ("bins", "bin"),
+            ("openings", "opening"),
         ):
             if stored_la.get(bool_key) is False:
                 row = {place: "off" for place in PLACES}
@@ -1202,8 +1303,10 @@ def startup(path: str | Path) -> dict[str, Any]:
         logging.getLogger(__name__).info(
             "outcomes v3 seeding: package/bin/opening rows from booleans "
             "(package=%s bins=%s openings=%s alert_all=%s)",
-            stored_la.get("package", True), stored_la.get("bins", True),
-            stored_la.get("openings", True), alert_all,
+            stored_la.get("package", True),
+            stored_la.get("bins", True),
+            stored_la.get("openings", True),
+            alert_all,
         )
         save_settings(path, settings)
 

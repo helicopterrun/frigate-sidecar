@@ -11,6 +11,7 @@ opaque, unguessable, and short-lived instead.
 
 from __future__ import annotations
 
+import datetime as _datetime
 import logging
 from typing import Annotated, Any, Literal
 
@@ -18,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from frigate_sidecar import db
-from frigate_sidecar.push import card_store, decision_trace, library, store
+from frigate_sidecar.push import card_store, decision_trace, library, policy_settings, store
 from frigate_sidecar.push.situations import Situation
 
 logger = logging.getLogger(__name__)
@@ -169,7 +170,8 @@ async def register_device(
         logger.info(
             "push: registration for %s carried field(s) this sidecar does not "
             "know: %s -- accepted and dropped",
-            store.device_id_for_token(apns_token), ", ".join(extras),
+            store.device_id_for_token(apns_token),
+            ", ".join(extras),
         )
     situations = [s for s in body.situations if isinstance(s, dict)]
     parsed = [s for s in (Situation.from_dict(s) for s in situations) if s is not None]
@@ -215,7 +217,9 @@ async def register_device(
     logger.info(
         "push: registration apns_token=%s schema_version=%s uses_situations=%s "
         "(situations stored for back-compat; card pipeline is the alert path)",
-        apns_token[:8], schema_version, uses_situations,
+        apns_token[:8],
+        schema_version,
+        uses_situations,
     )
     if previous is not None and previous.uses_situations != uses_situations:
         # The edge that actually matters: a device silently flipping mode
@@ -224,7 +228,9 @@ async def register_device(
         # would have caught it in seconds instead of a four-hour trace.
         logger.info(
             "push: registration apns_token=%s transitioned uses_situations %s -> %s",
-            apns_token[:8], previous.uses_situations, uses_situations,
+            apns_token[:8],
+            previous.uses_situations,
+            uses_situations,
         )
 
     # Echo back what the sidecar will actually do with this device, including
@@ -356,7 +362,8 @@ async def create_snooze(body: SnoozeRequest, request: Request) -> dict[str, Any]
     """
     logger.warning(
         "push: deprecated POST /v1/push/snooze called for device %s -- "
-        "use registration.snoozes instead", body.apns_token,
+        "use registration.snoozes instead",
+        body.apns_token,
     )
     scope = _validate_scope(body.scope)
     settings = request.app.state.settings
@@ -394,7 +401,9 @@ async def delete_snooze(
     """
     logger.warning(
         "push: deprecated DELETE /v1/push/snooze/%s called for device %s -- "
-        "use registration.snoozes instead", scope, apns_token,
+        "use registration.snoozes instead",
+        scope,
+        apns_token,
     )
     settings = request.app.state.settings
 
@@ -472,9 +481,7 @@ async def test_situation_push(
 
 
 @router.post("/activity/token")
-async def upload_activity_token(
-    body: ActivityTokenUpload, request: Request
-) -> dict[str, Any]:
+async def upload_activity_token(body: ActivityTokenUpload, request: Request) -> dict[str, Any]:
     """The app hands over a Live Activity's own push token (Phase 2).
 
     iOS mints this token *after* creating the activity from the start push, so
@@ -525,7 +532,10 @@ async def upload_activity_token(
             conn = db.open_sidecar(settings.sidecar.db_path)
             try:
                 await end_activity_if_card_closed(
-                    conn, device, engine.transport, token=body.token,
+                    conn,
+                    device,
+                    engine.transport,
+                    token=body.token,
                 )
                 conn.commit()
             finally:
@@ -636,16 +646,21 @@ async def card_for_event(
     """
     settings = request.app.state.settings
 
-    def _lookup(conn: Any) -> tuple[Any, str] | None:
+    def _lookup(conn: Any) -> tuple[Any, str, list[str]] | None:
         row = card_store.find_card_row_by_event_suffix(conn, event_id)
-        if row is not None:
-            return row, "card_key"
-        alias_key = card_store.find_track_alias_card_key(conn, event_id)
-        if alias_key is not None:
-            aliased_row = card_store.get_card_row(conn, alias_key)
-            if aliased_row is not None:
-                return aliased_row, "alias"
-        return None
+        matched_via = "card_key"
+        if row is None:
+            alias_key = card_store.find_track_alias_card_key(conn, event_id)
+            if alias_key is not None:
+                row = card_store.get_card_row(conn, alias_key)
+                matched_via = "alias"
+        if row is None:
+            return None
+        # Best-effort only (docstring on `decision_trace.reasons_for`): the
+        # durable log may not have a row for anything but a very recent
+        # event, so the client must treat this as optional.
+        reasons = decision_trace.reasons_for(conn, event_id)
+        return row, matched_via, reasons
 
     found = await db.with_sidecar(settings.sidecar.db_path, _lookup)
     if found is None:
@@ -656,14 +671,9 @@ async def card_for_event(
                 "message": "no push card found for that event id",
             },
         )
-    row, matched_via = found
+    row, matched_via, reasons = found
     zones_csv = row["zones_csv"] or ""
     zones = [z for z in zones_csv.split(",") if z]
-
-    # Best-effort only (docstring on `decision_trace.reasons_for`): the ring
-    # buffer is in-memory and bounded, so this is commonly `[]` for anything
-    # but a very recent event -- the client must treat it as optional.
-    reasons = decision_trace.reasons_for(event_id)
 
     return {
         "card_key": row["card_key"],
@@ -689,10 +699,60 @@ async def card_for_event(
 
 
 @router.get("/decisions")
-async def get_decisions(limit: int = Query(default=50, ge=1)) -> dict[str, Any]:
-    """Recent routing decisions, newest first (spec §7)."""
-    return {"decisions": decision_trace.recent(limit)}
+async def get_decisions(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    before: str | None = Query(default=None),
+    card_key: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Recent routing decisions, newest first (alerts-slice1 §A). Durable
+    (SQLite, 30-day retention) -- not lost on restart."""
+    settings = request.app.state.settings
+    decisions = await db.with_sidecar(
+        settings.sidecar.db_path,
+        lambda conn: decision_trace.recent(conn, limit, before=before, card_key=card_key),
+    )
+    return {"decisions": decisions}
 
+
+@router.get("/status")
+async def get_push_status(request: Request) -> dict[str, Any]:
+    """One-glance push health (alerts-slice1 §B): MQTT/Frigate liveness plus
+    the newest decision/send from the durable log. Cheap -- a couple of
+    `push_decisions` queries and in-memory flags, no Frigate HTTP round-trip.
+    """
+    settings = request.app.state.settings
+    subscriber = getattr(request.app.state, "push_subscriber", None)
+
+    def _last_review_iso() -> str | None:
+        if subscriber is None or subscriber.last_review_at is None:
+            return None
+        return _datetime.datetime.fromtimestamp(
+            subscriber.last_review_at, tz=_datetime.timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _query(conn: Any) -> tuple[dict[str, Any], int]:
+        return decision_trace.status(conn), len(store.list_devices(conn))
+
+    trace_status, devices = await db.with_sidecar(settings.sidecar.db_path, _query)
+
+    policy = policy_settings.get_active()
+    local_now = _datetime.datetime.now()
+    now_minutes = local_now.hour * 60 + local_now.minute
+    quiet_hours_active, _qh_mode = policy_settings.is_quiet_hours(policy, now_minutes)
+
+    return {
+        "now": _datetime.datetime.now(_datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "frigate_available": bool(subscriber.frigate_online) if subscriber else False,
+        "mqtt_connected": bool(subscriber.connected) if subscriber else False,
+        "last_review_at": _last_review_iso(),
+        **trace_status,
+        "quiet_hours_active": quiet_hours_active,
+        # No global timed-mute concept exists (spec is scoped to per-cell/
+        # per-zone silence, `push_silences`) -- resolved as always null.
+        "paused_until": None,
+        "devices": devices,
+    }
 
 
 @router.post("/feedback")
@@ -710,6 +770,8 @@ async def post_feedback(request: Request) -> dict[str, Any]:
         )
     logger.info(
         "push-feedback: card_key=%s event_id=%s verdict=%s",
-        body["card_key"], body.get("event_id", ""), body["verdict"],
+        body["card_key"],
+        body.get("event_id", ""),
+        body["verdict"],
     )
     return {"ok": True}

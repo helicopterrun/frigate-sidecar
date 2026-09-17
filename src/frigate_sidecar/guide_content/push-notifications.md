@@ -37,6 +37,38 @@ configure the ladder in the Elsinore app (Settings → Alerts) and the app's
 choices sync to the sidecar. See your live matrix in
 [Settings → Push](/settings#push).
 
+## Recent Decisions and quieting a cell
+
+Every routing decision is logged (`GET /v1/push/decisions`) with a `stage`
+(which rule produced the level) and any `modifiers` that nudged or capped it:
+
+| stage/modifier | plain English |
+|---|---|
+| `muted` | Alerts were paused |
+| `system` | Server notice |
+| `safety` | Safety exception: always urgent |
+| `zone_override` | Your rule for {subject} in {zone} |
+| `off_cell` | {subject} in {place} is set to Off |
+| `table` | {subject} in {place} is set to {level} |
+| `nudge_up` | raised one step (nobody home / night / approaching …) |
+| `nudge_down` | lowered one step (known / leaving …) |
+| `child_hazard_floor` | at least Notify: child-hazard zone |
+| `street_cap` | capped at Quiet: street |
+| `unconfirmed_cap` | capped at Quiet: detector unconfirmed |
+| `quiet_hours_cap` | capped at Quiet: quiet hours |
+| `reclass_dangerous_animal` | treated as a person: dangerous animal |
+
+From a card's detail screen, **Quiet this** (`POST /v1/push/silence`) drops
+the cell it routed through — the per-zone override or the outcomes-table
+cell — to `quiet`, and the decisions feed marks every affected entry
+`silenced`. `PUT /v1/push/overrides` is the fine-grained version for the
+settings screen: set or clear one zone-override cell, or set one
+outcomes-table cell directly, without needing a card to point at.
+
+`GET /v1/push/status` is the one-glance health check: MQTT/Frigate liveness,
+the last review/decision/send timestamps, quiet-hours state, and registered
+device count — used by the Status page and the app's own health strip.
+
 ## Configuration
 
 The `push:` config section:
