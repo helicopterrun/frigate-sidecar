@@ -193,6 +193,32 @@ class TestSilence:
         active = policy_settings.get_active()
         assert active["outcomes"]["animal"]["yard"] == "glance"
 
+    def test_silence_preserves_other_outcome_cells(self, client: TestClient, sidecar_conn):
+        """Regression: silencing one outcome cell must not reset every other
+        tuned cell to defaults (normalize_settings merges a partial
+        `outcomes` doc over `default_settings()`, so a body that only
+        contains the one silenced cell would wipe the rest)."""
+        # Tune cell A (person/street) to a non-default level first.
+        put = client.put(
+            "/v1/push/settings",
+            json={"outcomes": {"person": {"street": "alarm"}}},
+        )
+        assert put.status_code == 200
+        assert policy_settings.get_active()["outcomes"]["person"]["street"] == "alarm"
+
+        # Silence a different, no-zone card landing on cell B.
+        _make_outcome_cell_card(sidecar_conn)
+        resp = client.post("/v1/push/silence", json={"card_key": CARD_KEY_CELL})
+        assert resp.status_code == 200
+
+        active = policy_settings.get_active()
+        assert active["outcomes"]["animal"]["yard"] == "glance"  # cell B silenced
+        assert active["outcomes"]["person"]["street"] == "alarm"  # cell A untouched
+        # normalize_settings derives routing_table_v2 from outcomes -- confirm
+        # it stayed in sync with both cells rather than reflecting only B.
+        assert active["routing_table_v2"]["animal"]["yard"] == "quiet"
+        assert active["routing_table_v2"]["person"]["street"] == "urgent"
+
 
 class TestOverrides:
     def test_bad_kind_enum_422(self, client: TestClient):
@@ -235,6 +261,27 @@ class TestOverrides:
         assert put2.json()["applied"] is None
         assert put2.json()["previous"] == "quiet"
         assert "front_door" not in policy_settings.get_active().get("zone_overrides", {})
+
+    def test_outcome_cell_override_preserves_other_cells(self, client: TestClient):
+        """Regression: PUT /overrides on one outcome cell must not reset
+        every other tuned cell to defaults (same normalize_settings merge
+        hazard as /silence)."""
+        put = client.put(
+            "/v1/push/settings",
+            json={"outcomes": {"person": {"street": "alarm"}}},
+        )
+        assert put.status_code == 200
+
+        resp = client.put(
+            "/v1/push/overrides",
+            json={"kind": "outcome_cell", "subject": "animal", "place": "yard", "level": "quiet"},
+        )
+        assert resp.status_code == 200
+
+        active = policy_settings.get_active()
+        assert active["outcomes"]["animal"]["yard"] == "glance"
+        assert active["outcomes"]["person"]["street"] == "alarm"
+        assert active["routing_table_v2"]["person"]["street"] == "urgent"
 
     def test_idempotent_same_value_twice(self, client: TestClient):
         body = {

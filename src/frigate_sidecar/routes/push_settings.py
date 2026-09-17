@@ -325,11 +325,15 @@ async def silence_card(body: SilenceRequest, request: Request) -> dict[str, Any]
     else:
         previous = active.get("outcomes", {}).get(subject, {}).get(place)
         # "quiet" is a *level* word; the outcomes table speaks a different
-        # vocabulary (`OUTCOMES`) where its equivalent is "glance".
-        full_body = {
-            **active,
-            "outcomes": {subject: {place: policy_settings.LEVEL_TO_OUTCOME["quiet"]}},
-        }
+        # vocabulary (`OUTCOMES`) where its equivalent is "glance". Deep-copy
+        # every subject's row (not just this cell) -- `normalize_settings`
+        # merges a partial `outcomes` document over `default_settings()`, so
+        # sending only `{subject: {place: ...}}` would reset every other
+        # tuned cell (including this subject's other places) to defaults.
+        outcomes = {s: dict(row_) for s, row_ in active.get("outcomes", {}).items()}
+        outcomes.setdefault(subject, {})
+        outcomes[subject][place] = policy_settings.LEVEL_TO_OUTCOME["quiet"]
+        full_body = {**active, "outcomes": outcomes}
 
     errors = policy_settings.validate_settings(full_body)
     if errors:
@@ -452,7 +456,13 @@ async def put_override(body: OverrideRequest, request: Request) -> dict[str, Any
         assert body.level is not None  # validated above
         level_value: str = body.level
         outcome = policy_settings.LEVEL_TO_OUTCOME.get(level_value, level_value)
-        full_body = {**active, "outcomes": {subject: {place: outcome}}}
+        # Deep-copy every subject's row -- see the matching comment in
+        # `/silence` above for why a bare `{subject: {place: ...}}` would
+        # reset every other tuned outcome cell to defaults.
+        outcomes = {s: dict(row_) for s, row_ in active.get("outcomes", {}).items()}
+        outcomes.setdefault(subject, {})
+        outcomes[subject][place] = outcome
+        full_body = {**active, "outcomes": outcomes}
         scope = {"kind": kind, "subject": subject, "place": place}
 
     errors = policy_settings.validate_settings(full_body)
