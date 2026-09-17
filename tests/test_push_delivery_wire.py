@@ -691,10 +691,10 @@ async def test_off_cell_suppression_still_traced_once(sidecar_db_path: Path):
     back up."""
     from frigate_sidecar.push import decision_trace, ladder_policy
 
-    decision_trace.reset_for_tests()
+    conn = db.open_sidecar(sidecar_db_path)
+    decision_trace.reset_for_tests(conn)
     ladder_policy.set_off_cells({("person", "street")})
 
-    conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     engine = PushEngine(db_path=str(sidecar_db_path), transport=transport, server_id="s_test")
     config = PushSection(delivery_enabled=True, external_base_url=EXTERNAL_BASE_URL)
@@ -709,7 +709,7 @@ async def test_off_cell_suppression_still_traced_once(sidecar_db_path: Path):
     )
 
     assert transport.sent == []  # suppressed: nothing on the wire
-    entries = decision_trace.recent()
+    entries = decision_trace.recent(conn)
     assert len(entries) == 1
     assert entries[0]["level"] == "off"
     assert entries[0]["subject"] == "person"
@@ -723,7 +723,7 @@ async def test_off_cell_suppression_still_traced_once(sidecar_db_path: Path):
         config=config, engine=engine, now=10.0,
     )
     assert transport.sent == []
-    assert len(decision_trace.recent()) == 1
+    assert len(decision_trace.recent(conn)) == 1
 
 
 # ---- Geometric dedup adoption (flag-gated; docs: push/fusion.py) ----

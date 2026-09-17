@@ -116,24 +116,47 @@ def base_level(subject: str, place: str, zone: str) -> tuple[str, bool]:
     return policy.TABLE[table_subject][place], False
 
 
-def evaluate_ladder(snapshot: Snapshot) -> str:
-    """Return one of `ladder_policy.LEVELS`, or `SUPPRESSED`."""
+@dataclass(frozen=True)
+class LadderResult:
+    """The full explanation behind a `evaluate_ladder` outcome: which single
+    step fixed the base outcome (`stage`), and which steps nudged it further
+    (`modifiers`, in application order). See spec `alerts-slice1` §A for the
+    enum and the plain-English text each value maps to."""
+
+    level: str
+    stage: str
+    modifiers: tuple[str, ...]
+
+
+def evaluate_ladder_explained(snapshot: Snapshot) -> LadderResult:
+    """Same evaluation order as `evaluate_ladder`, recording which stage fixed
+    the base outcome and which modifiers moved it afterward."""
     if snapshot.muted:
-        return SUPPRESSED
+        return LadderResult(SUPPRESSED, "muted", ())
     if snapshot.source == "system":
-        return policy.SYSTEM_CARD_LEVEL
+        return LadderResult(policy.SYSTEM_CARD_LEVEL, "system", ())
     if snapshot.audio_safety or snapshot.ai_flagged:
-        return "urgent"
+        return LadderResult("urgent", "safety", ())
 
     subject = snapshot.subject
+    modifiers: list[str] = []
     if snapshot.label in policy.DANGEROUS_ANIMAL_LABELS:
         subject = "person" if "person" in policy.TABLE else "stranger"
+        modifiers.append("reclass_dangerous_animal")
 
-    level, overridden = base_level(subject, snapshot.place, snapshot.zone)
-    if overridden:
-        return level
-    if level == SUPPRESSED:
-        return SUPPRESSED
+    override = policy.ZONE_OVERRIDES.get(snapshot.zone, {}).get(subject)
+    if override is not None:
+        return LadderResult(override, "zone_override", tuple(modifiers))
+
+    if (subject, snapshot.place) in policy.OFF_CELLS:
+        return LadderResult(SUPPRESSED, "off_cell", tuple(modifiers))
+
+    if subject in policy.TABLE:
+        table_subject = subject
+    else:
+        table_subject = _V2_TO_V1.get(subject) or _V1_TO_V2.get(subject) or subject
+    level = policy.TABLE[table_subject][snapshot.place]
+    stage = "table"
 
     levels = policy.LEVELS
     idx = levels.index(level)
@@ -144,14 +167,32 @@ def evaluate_ladder(snapshot: Snapshot) -> str:
         step = 1 if worry > calm else -1 if calm > worry else 0
         if step == 1 and subject == "known":
             step = 0
+        if step == 1:
+            modifiers.append("nudge_up")
+        elif step == -1:
+            modifiers.append("nudge_down")
         idx = max(0, min(len(levels) - 1, idx + step))
 
     if subject in ("stranger", "known", "person") and snapshot.child_hazard_zone:
-        idx = max(idx, levels.index("notify"))
+        notify_idx = levels.index("notify")
+        if idx < notify_idx:
+            modifiers.append("child_hazard_floor")
+        idx = max(idx, notify_idx)
 
     if snapshot.place == "street":
-        idx = min(idx, levels.index("quiet"))
+        quiet_idx = levels.index("quiet")
+        if idx > quiet_idx:
+            modifiers.append("street_cap")
+        idx = min(idx, quiet_idx)
     if not snapshot.detector_confirmed:
-        idx = min(idx, levels.index("quiet"))
+        quiet_idx = levels.index("quiet")
+        if idx > quiet_idx:
+            modifiers.append("unconfirmed_cap")
+        idx = min(idx, quiet_idx)
 
-    return levels[idx]
+    return LadderResult(levels[idx], stage, tuple(modifiers))
+
+
+def evaluate_ladder(snapshot: Snapshot) -> str:
+    """Return one of `ladder_policy.LEVELS`, or `SUPPRESSED`."""
+    return evaluate_ladder_explained(snapshot).level
