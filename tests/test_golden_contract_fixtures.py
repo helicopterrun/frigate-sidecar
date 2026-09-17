@@ -18,6 +18,7 @@ reviewing that a contract change is intentional.
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import json
 import os
@@ -66,13 +67,13 @@ EVENT_ID = "1755550001.123456-abc123"
 
 @pytest.fixture(autouse=True)
 def _isolated_globals() -> Iterator[None]:
-    """These builders touch the process-wide active policy and the decision
-    ring buffer; leave neither behind for other tests."""
+    """These builders touch the process-wide active policy; leave none of it
+    behind for other tests. `decision_trace` state now lives in each
+    builder's own sidecar DB (durable, sqlite-backed) rather than a
+    process-wide ring buffer, so there's nothing here to reset for it."""
     policy_settings.reset_for_tests()
-    decision_trace.reset_for_tests()
     yield
     policy_settings.reset_for_tests()
-    decision_trace.reset_for_tests()
 
 
 # ---------------------------------------------------------------------------
@@ -112,13 +113,18 @@ def _make_client(tmp: Path) -> TestClient:
     )
     settings = Settings(
         frigate=FrigateSection(
-            base_url="http://frigate.test:5000", config_path=fake_config, db_path=frigate_db,
+            base_url="http://frigate.test:5000",
+            config_path=fake_config,
+            db_path=frigate_db,
         ),
         sidecar=SidecarSection(
-            db_path=tmp / "frigate-sidecar.db", bind_port=5001, require_frigate_auth=False,
+            db_path=tmp / "frigate-sidecar.db",
+            bind_port=5001,
+            require_frigate_auth=False,
         ),
         push=PushSection(
-            enabled=False, push_settings_path=str(tmp / "push_settings.json"),
+            enabled=False,
+            push_settings_path=str(tmp / "push_settings.json"),
         ),
     )
     return TestClient(create_app(settings))
@@ -147,9 +153,11 @@ def _content_state_full() -> dict[str, Any]:
         # requires motion.heading and zones.ladder/current_index.
         motion={"heading": "approaching", "speed_label": "walking"},
         zones={"ladder": ["Yard", "Front door"], "current_index": 1},
-        path={"points": live_activities.downsample_path(
-            [[0.1, 0.9], [0.2, 0.8], [0.35, 0.62], [0.5, 0.5], [0.62, 0.41]]
-        )},
+        path={
+            "points": live_activities.downsample_path(
+                [[0.1, 0.9], [0.2, 0.8], [0.35, 0.62], [0.5, 0.5], [0.62, 0.41]]
+            )
+        },
     )
 
 
@@ -195,39 +203,49 @@ def _build_la_content_state_minimal() -> dict[str, Any]:
 
 
 def _build_la_start() -> dict[str, Any]:
-    return _with_bundle(live_activities.build_la_start_payload(
-        content_state=_content_state_minimal(),
-        family=live_activities.PACKAGE,
-        camera=CAMERA,
-        track_id=TRACK_ID,
-        card_key=CARD_KEY,
-        now=SENT_AT,
-        sound=sound_file("package-delivery"),
-    ))
+    return _with_bundle(
+        live_activities.build_la_start_payload(
+            content_state=_content_state_minimal(),
+            family=live_activities.PACKAGE,
+            camera=CAMERA,
+            track_id=TRACK_ID,
+            card_key=CARD_KEY,
+            now=SENT_AT,
+            sound=sound_file("package-delivery"),
+        )
+    )
 
 
 def _build_la_update() -> dict[str, Any]:
-    return _with_bundle(live_activities.build_la_update_payload(
-        content_state=_content_state_full(), now=SENT_AT,
-    ))
+    return _with_bundle(
+        live_activities.build_la_update_payload(
+            content_state=_content_state_full(),
+            now=SENT_AT,
+        )
+    )
 
 
 def _build_la_escalation() -> dict[str, Any]:
-    return _with_bundle(live_activities.build_la_update_payload(
-        content_state=_content_state_full(),
-        now=SENT_AT,
-        alert=True,
-        alert_title="Package at the front door",
-        alert_body="Still on the porch after 42s",
-        sound=sound_file("package-delivery"),
-        interruption_level="time-sensitive",
-    ))
+    return _with_bundle(
+        live_activities.build_la_update_payload(
+            content_state=_content_state_full(),
+            now=SENT_AT,
+            alert=True,
+            alert_title="Package at the front door",
+            alert_body="Still on the porch after 42s",
+            sound=sound_file("package-delivery"),
+            interruption_level="time-sensitive",
+        )
+    )
 
 
 def _build_la_end() -> dict[str, Any]:
-    return _with_bundle(live_activities.build_la_end_payload(
-        content_state=_content_state_resolved(), now=SENT_AT,
-    ))
+    return _with_bundle(
+        live_activities.build_la_end_payload(
+            content_state=_content_state_resolved(),
+            now=SENT_AT,
+        )
+    )
 
 
 def _canonical_put_body() -> dict[str, Any]:
@@ -259,33 +277,196 @@ def _build_push_settings_get() -> dict[str, Any]:
         return body
 
 
+SECOND_EVENT_ID = "1755550002.654321-def456"
+
+
 def _build_push_decisions() -> dict[str, Any]:
-    decision_trace.reset_for_tests()
-    first = decision_trace.append(
-        camera=CAMERA, label="package", subject="package",
-        zones=["front_door"], place="doors", level="notify",
-        reasons=["outcomes[package][doors]=notify"], event_id=EVENT_ID,
-    )
-    decision_trace.annotate(
-        EVENT_ID, family=live_activities.PACKAGE, la_started=True, la_reason="family=package",
-    )
-    second = decision_trace.append(
-        camera="street", label="car", subject="vehicle",
-        zones=["nw_49th_st"], place="street", level="log",
-        reasons=["outcomes[vehicle][street]=log"], event_id="1755550002.654321-def456",
-    )
-    decision_trace.annotate(
-        "1755550002.654321-def456",
-        family=live_activities.CATCH_ALL, la_started=False, la_reason="level=log",
-    )
-    # `append` stamps wall-clock `ts`; the entries returned are the buffered
-    # objects, so pin the timestamps to fixed values for the golden file.
-    first["ts"] = "2026-08-19T20:37:02Z"
-    second["ts"] = "2026-08-19T20:37:41Z"
+    from frigate_sidecar import db as db_mod
+
     with tempfile.TemporaryDirectory() as td:
-        client = _make_client(Path(td))
+        tmp = Path(td)
+        client = _make_client(tmp)
+        conn = db_mod.open_sidecar(tmp / "frigate-sidecar.db")
+        try:
+            decision_trace.reset_for_tests(conn)
+            decision_trace.append(
+                conn,
+                camera=CAMERA,
+                label="package",
+                subject="package",
+                zones=["front_door"],
+                place="doors",
+                level="notify",
+                reasons=["outcomes[package][doors]=notify"],
+                event_id=EVENT_ID,
+                stage="table",
+                modifiers=("nudge_up",),
+                card_key=CARD_KEY,
+                mutation="create",
+                zone="front_door",
+                sound=True,
+                sent=1,
+            )
+            decision_trace.annotate(
+                conn,
+                EVENT_ID,
+                family=live_activities.PACKAGE,
+                la_started=True,
+                la_reason="family=package",
+                sent=1,
+                sound=True,
+            )
+            decision_trace.append(
+                conn,
+                camera="street",
+                label="car",
+                subject="vehicle",
+                zones=["nw_49th_st"],
+                place="street",
+                level="log",
+                reasons=["outcomes[vehicle][street]=log"],
+                event_id=SECOND_EVENT_ID,
+                stage="table",
+                modifiers=(),
+                card_key="",
+                mutation="",
+                zone="",
+                sound=False,
+                sent=0,
+            )
+            decision_trace.annotate(
+                conn,
+                SECOND_EVENT_ID,
+                family=live_activities.CATCH_ALL,
+                la_started=False,
+                la_reason="level=log",
+            )
+            # A silence on the first card's zone/subject, to exercise the
+            # `silenced` field surfaced by `recent()` at read time.
+            conn.execute(
+                "INSERT INTO push_silences (ts, card_key, kind, zone, subject, place, "
+                "previous, applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "2026-08-19T20:36:00Z",
+                    CARD_KEY,
+                    "zone_override",
+                    "front_door",
+                    "package",
+                    "doors",
+                    None,
+                    "quiet",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
         resp = client.get("/v1/push/decisions")
         assert resp.status_code == 200
+        body: dict[str, Any] = resp.json()
+        # `append` stamps wall-clock `ts`; pin to fixed values for the golden
+        # file (decisions are newest-first, so [0] is the second insert).
+        for entry in body["decisions"]:
+            entry["ts"] = (
+                "2026-08-19T20:37:41Z"
+                if entry["event_id"] == SECOND_EVENT_ID
+                else "2026-08-19T20:37:02Z"
+            )
+        return body
+
+
+def _build_push_status() -> dict[str, Any]:
+    from frigate_sidecar import db as db_mod
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        client = _make_client(tmp)
+        conn = db_mod.open_sidecar(tmp / "frigate-sidecar.db")
+        try:
+            decision_trace.reset_for_tests(conn)
+            decision_trace.append(
+                conn,
+                camera=CAMERA,
+                label="package",
+                subject="package",
+                zones=["front_door"],
+                place="doors",
+                level="notify",
+                reasons=["outcomes[package][doors]=notify"],
+                event_id=EVENT_ID,
+                stage="table",
+                modifiers=(),
+                card_key=CARD_KEY,
+                mutation="create",
+                zone="front_door",
+                sound=True,
+                sent=2,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        class _FakeSubscriber:
+            connected = True
+            frigate_online = True
+            last_review_at = SENT_AT - 30.0
+
+        client.app.state.push_subscriber = _FakeSubscriber()
+
+        fixed_utc = _dt.datetime(2026, 9, 17, 17, 58, 41, tzinfo=_dt.timezone.utc)
+        fixed_local = _dt.datetime(2026, 9, 17, 10, 58, 41)
+
+        class _FixedDatetime(_dt.datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> _dt.datetime:  # type: ignore[override]
+                return fixed_utc if tz is not None else fixed_local
+
+        with mock.patch("frigate_sidecar.routes.push._datetime.datetime", _FixedDatetime):
+            resp = client.get("/v1/push/status")
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        # `decision_trace.append` stamps real wall-clock `ts`, not covered by
+        # the `_datetime` patch above (it's a different module) -- pin to a
+        # fixed value for the golden file.
+        body["last_decision_at"] = "2026-09-17T17:55:00Z"
+        body["last_sent_at"] = "2026-09-17T17:55:00Z"
+        return body
+
+
+def _build_push_silence() -> dict[str, Any]:
+    from frigate_sidecar import db as db_mod
+    from frigate_sidecar.push.card_store import upsert_card
+    from frigate_sidecar.push.cards import Card
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        client = _make_client(tmp)
+        conn = db_mod.open_sidecar(tmp / "frigate-sidecar.db")
+        try:
+            # No `zone_name` -- this card routed through the outcomes table,
+            # not a zone override, so the silence scope is `outcome_cell`
+            # (the `zone` key absent entirely from the response).
+            upsert_card(
+                conn,
+                Card(
+                    card_key=CARD_KEY,
+                    level="notify",
+                    created_at=SENT_AT - 60.0,
+                    updated_at=SENT_AT,
+                    state_since_at=SENT_AT - 60.0,
+                    peak_level="notify",
+                ),
+                subject_kind="package",
+                place_class="doors",
+                camera=CAMERA,
+                zone_name="",
+                label="package",
+            )
+        finally:
+            conn.close()
+
+        resp = client.post("/v1/push/silence", json={"card_key": CARD_KEY})
+        assert resp.status_code == 200, resp.text
         body: dict[str, Any] = resp.json()
         return body
 
@@ -340,7 +521,9 @@ def _v1_client(tmp: Path, *, frigate_db: Path, sidecar_db: Path | None = None) -
     fake_config.write_text("cameras: {}\n")
     settings = Settings(
         frigate=FrigateSection(
-            base_url="http://frigate.test:5000", config_path=fake_config, db_path=frigate_db,
+            base_url="http://frigate.test:5000",
+            config_path=fake_config,
+            db_path=frigate_db,
         ),
         sidecar=SidecarSection(
             db_path=sidecar_db or (tmp / "frigate-sidecar.db"),
@@ -374,7 +557,8 @@ def _build_v1_coverage() -> dict[str, Any]:
         client = _v1_client(tmp, frigate_db=frigate_db)
         with mock.patch("time.time", return_value=SENT_AT):
             resp = client.get(
-                "/v1/coverage/doorbell", params={"start": SENT_AT - 400, "end": SENT_AT},
+                "/v1/coverage/doorbell",
+                params={"start": SENT_AT - 400, "end": SENT_AT},
             )
         assert resp.status_code == 200, resp.text
         body: dict[str, Any] = resp.json()
@@ -402,8 +586,17 @@ def _build_v1_scrub_sheets() -> dict[str, Any]:
         try:
             start = 1_785_380_400.0
             db_mod.upsert_scrub_sheet(
-                sconn, camera="doorbell", start_ts=start, interval_s=1.0, cols=12, rows=8,
-                cell_w=320, cell_h=180, count=24, path="doorbell/1.0/x.jpg", complete=False,
+                sconn,
+                camera="doorbell",
+                start_ts=start,
+                interval_s=1.0,
+                cols=12,
+                rows=8,
+                cell_w=320,
+                cell_h=180,
+                count=24,
+                path="doorbell/1.0/x.jpg",
+                complete=False,
             )
             sconn.commit()
         finally:
@@ -411,7 +604,8 @@ def _build_v1_scrub_sheets() -> dict[str, Any]:
 
         client = _v1_client(tmp, frigate_db=frigate_db, sidecar_db=sidecar_db)
         resp = client.get(
-            "/v1/scrub/doorbell/sheets", params={"start": start, "end": start + 200},
+            "/v1/scrub/doorbell/sheets",
+            params={"start": start, "end": start + 200},
         )
         assert resp.status_code == 200, resp.text
         body: dict[str, Any] = resp.json()
@@ -446,8 +640,11 @@ def _build_v1_reel() -> dict[str, Any]:
         conn.execute(
             "INSERT INTO reviewsegment (id, camera, start_time, end_time, severity, data) "
             "VALUES ('r1', 'doorbell', ?, ?, 'alert', ?)",
-            (SENT_AT - 152, SENT_AT - 138,
-             json.dumps({"objects": ["package"], "zones": ["front_door"], "detections": ["e1"]})),
+            (
+                SENT_AT - 152,
+                SENT_AT - 138,
+                json.dumps({"objects": ["package"], "zones": ["front_door"], "detections": ["e1"]}),
+            ),
         )
         conn.commit()
         conn.close()
@@ -504,7 +701,8 @@ def _build_v1_highlights() -> dict[str, Any]:
 
         client = _v1_client(tmp, frigate_db=frigate_db)
         resp = client.get(
-            "/v1/highlights/doorbell", params={"before": SENT_AT, "limit": 50},
+            "/v1/highlights/doorbell",
+            params={"before": SENT_AT, "limit": 50},
         )
         assert resp.status_code == 200, resp.text
         body: dict[str, Any] = resp.json()
@@ -528,7 +726,8 @@ def _build_v1_events_search() -> dict[str, Any]:
 
         client = _v1_client(tmp, frigate_db=frigate_db)
         resp = client.get(
-            "/v1/events/search", params={"cameras": "doorbell", "labels": "person", "limit": 10},
+            "/v1/events/search",
+            params={"cameras": "doorbell", "labels": "person", "limit": 10},
         )
         assert resp.status_code == 200, resp.text
         body: list[Any] = resp.json()
@@ -577,11 +776,13 @@ def _build_v1_push_map_live() -> dict[str, Any]:
         client = _v1_client(tmp, frigate_db=frigate_db)
         policy_settings.reset_for_tests()
         active = dict(policy_settings.get_active())
-        active.update({
-            "camera_optics": {"doorbell": {"hfov": 90.0, "mount_ft": 10.0, "tilt_deg": 12.0}},
-            "camera_layout": {"doorbell": {"x": 0.5, "y": 0.5, "azimuth": 0.0, "fov": 90.0}},
-            "map_scale_ft": 200.0,
-        })
+        active.update(
+            {
+                "camera_optics": {"doorbell": {"hfov": 90.0, "mount_ft": 10.0, "tilt_deg": 12.0}},
+                "camera_layout": {"doorbell": {"x": 0.5, "y": 0.5, "azimuth": 0.0, "fov": 90.0}},
+                "map_scale_ft": 200.0,
+            }
+        )
         policy_settings.apply_settings(active)
 
         class _Engine:
@@ -589,7 +790,12 @@ def _build_v1_push_map_live() -> dict[str, Any]:
 
         engine = _Engine()
         engine.tracks.observe_object(
-            "doorbell", "t1", (), now=SENT_AT, path_data=((0.5, 0.7, SENT_AT),), label="person",
+            "doorbell",
+            "t1",
+            (),
+            now=SENT_AT,
+            path_data=((0.5, 0.7, SENT_AT),),
+            label="person",
         )
         client.app.state.push_engine = engine
 
@@ -614,12 +820,14 @@ def _build_v1_push_map_track() -> dict[str, Any]:
         client = _v1_client(tmp, frigate_db=frigate_db)
         policy_settings.reset_for_tests()
         active = dict(policy_settings.get_active())
-        active.update({
-            "camera_optics": {"doorbell": {"hfov": 90.0, "mount_ft": 10.0, "tilt_deg": 12.0}},
-            "camera_layout": {"doorbell": {"x": 0.5, "y": 0.5, "azimuth": 0.0, "fov": 90.0}},
-            "map_scale_ft": 200.0,
-            "secure_area": {"x0": 0.4, "y0": 0.4, "x1": 0.6, "y1": 0.6},
-        })
+        active.update(
+            {
+                "camera_optics": {"doorbell": {"hfov": 90.0, "mount_ft": 10.0, "tilt_deg": 12.0}},
+                "camera_layout": {"doorbell": {"x": 0.5, "y": 0.5, "azimuth": 0.0, "fov": 90.0}},
+                "map_scale_ft": 200.0,
+                "secure_area": {"x0": 0.4, "y0": 0.4, "x1": 0.6, "y1": 0.6},
+            }
+        )
         policy_settings.apply_settings(active)
 
         class _Engine:
@@ -628,12 +836,18 @@ def _build_v1_push_map_track() -> dict[str, Any]:
         engine = _Engine()
         path = tuple((0.5, 0.6 + 0.05 * i, SENT_AT - (2 - i)) for i in range(3))
         engine.tracks.observe_object(
-            "doorbell", "ev1", (), now=SENT_AT, path_data=path, label="person",
+            "doorbell",
+            "ev1",
+            (),
+            now=SENT_AT,
+            path_data=path,
+            label="person",
         )
         client.app.state.push_engine = engine
 
         resp = client.get(
-            "/v1/push/map/track", params={"camera": "doorbell", "event_id": "ev1"},
+            "/v1/push/map/track",
+            params={"camera": "doorbell", "event_id": "ev1"},
         )
         assert resp.status_code == 200, resp.text
         body: dict[str, Any] = resp.json()
@@ -651,6 +865,8 @@ FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "push_settings_get.json": _build_push_settings_get,
     "push_settings_put.json": _build_push_settings_put,
     "push_decisions.json": _build_push_decisions,
+    "push_status.json": _build_push_status,
+    "push_silence.json": _build_push_silence,
     "capabilities.json": _build_capabilities,
     "card_push.json": _build_card_push,
     "v1_coverage.json": _build_v1_coverage,

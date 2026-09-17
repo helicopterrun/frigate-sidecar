@@ -34,10 +34,11 @@ def client(frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path) -> Test
 
 
 @pytest.fixture(autouse=True)
-def _reset_decision_trace():
-    decision_trace.reset_for_tests()
+def _reset_decision_trace(sidecar_db_path: Path):
+    conn = db.open_sidecar(sidecar_db_path)
+    decision_trace.reset_for_tests(conn)
+    conn.close()
     yield
-    decision_trace.reset_for_tests()
 
 
 def _upsert(sidecar_db_path: Path, card: Card, **ctx: str) -> None:
@@ -165,11 +166,14 @@ def test_reasons_populated_when_in_decision_trace(
         created_at=1.0, updated_at=1.0, state_since_at=1.0,
     )
     _upsert(sidecar_db_path, card, subject_kind="person", camera="cam")
+    conn = db.open_sidecar(sidecar_db_path)
     decision_trace.append(
+        conn,
         camera="cam", label="person", subject="stranger", zones=["yard"],
         place="yard", level="urgent", reasons=["zone_override", "new_face"],
         event_id=event_id,
     )
+    conn.close()
 
     r = client.get(f"/v1/push/card-for-event/{event_id}")
     assert r.json()["reasons"] == ["zone_override", "new_face"]
