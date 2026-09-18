@@ -514,11 +514,20 @@ def device_stats(
         "received": received,
         "median_latency_s": median_latency_s,
         "p90_latency_s": p90_latency_s,
-        "last_sent_at": last_sent_at,
-        "last_received_at": last_received_at,
+        "last_sent_at": epoch_to_iso(last_sent_at),
+        "last_received_at": epoch_to_iso(last_received_at),
         "last_send_error": last_send_error,
-        "last_send_error_at": last_send_error_at,
+        "last_send_error_at": epoch_to_iso(last_send_error_at),
     }
+
+
+def epoch_to_iso(ts: float | None) -> str | None:
+    """Contract: every `*_at` on the wire is ISO8601 `Z` (seconds); epoch
+    floats stay internal to SQLite."""
+    if ts is None:
+        return None
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc).replace(microsecond=0)
+    return dt.isoformat().replace("+00:00", "Z")
 
 
 # -- Live Activities (Phase 2) ----------------------------------------------

@@ -105,10 +105,12 @@ class RelayHealth:
     last_status_code: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
+        from frigate_sidecar.push.store import epoch_to_iso as _epoch_to_iso
+
         return {
-            "last_ok_at": self.last_ok_at,
+            "last_ok_at": _epoch_to_iso(self.last_ok_at),
             "last_error": self.last_error,
-            "last_error_at": self.last_error_at,
+            "last_error_at": _epoch_to_iso(self.last_error_at),
             "last_status_code": self.last_status_code,
         }
 
