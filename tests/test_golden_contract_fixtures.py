@@ -421,8 +421,18 @@ def _build_push_status() -> dict[str, Any]:
             def now(cls, tz: Any = None) -> _dt.datetime:  # type: ignore[override]
                 return fixed_utc if tz is not None else fixed_local
 
-        with mock.patch("frigate_sidecar.routes.push._datetime.datetime", _FixedDatetime):
-            resp = client.get("/v1/push/status")
+        from frigate_sidecar.push.transport import RELAY_HEALTH, reset_relay_health_for_tests
+
+        reset_relay_health_for_tests()
+        RELAY_HEALTH.last_ok_at = SENT_AT - 12.0
+        RELAY_HEALTH.last_error = None
+        RELAY_HEALTH.last_error_at = None
+        RELAY_HEALTH.last_status_code = 200
+        try:
+            with mock.patch("frigate_sidecar.routes.push._datetime.datetime", _FixedDatetime):
+                resp = client.get("/v1/push/status")
+        finally:
+            reset_relay_health_for_tests()
         assert resp.status_code == 200, resp.text
         body: dict[str, Any] = resp.json()
         # `decision_trace.append` stamps real wall-clock `ts`, not covered by
@@ -431,6 +441,122 @@ def _build_push_status() -> dict[str, Any]:
         body["last_decision_at"] = "2026-09-17T17:55:00Z"
         body["last_sent_at"] = "2026-09-17T17:55:00Z"
         return body
+
+
+def _build_push_receipts() -> dict[str, Any]:
+    """`POST /v1/push/receipts` (alerts-slice2 §A): request + response, so
+    the app can vendor both the shape it sends and what it gets back."""
+    from frigate_sidecar import db as db_mod
+    from frigate_sidecar.push import store as push_store
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        client = _make_client(tmp)
+        conn = db_mod.open_sidecar(tmp / "frigate-sidecar.db")
+        try:
+            push_store.record_card_send(
+                conn, apns_token="apnstoken1234567890", card_key=CARD_KEY,
+                mutation="create", sent_at=SENT_AT,
+            )
+        finally:
+            conn.close()
+
+        request_body = {
+            "receipts": [
+                {
+                    "apns_token": "apnstoken1234567890",
+                    "card_key": CARD_KEY,
+                    "mutation": "create",
+                    "state_since_ts": SENT_AT - 42.0,
+                    "received_ts": SENT_AT + 1.2,
+                    "media_attached": True,
+                    "source": "nse",
+                }
+            ]
+        }
+        resp = client.post("/v1/push/receipts", json=request_body)
+        assert resp.status_code == 200, resp.text
+        return {"request": request_body, "response": resp.json()}
+
+
+def _build_push_device_detail() -> dict[str, Any]:
+    """`GET /v1/push/devices/{token}` (alerts-slice2 §B)."""
+    from frigate_sidecar import db as db_mod
+    from frigate_sidecar.push import store as push_store
+
+    token = "apnstoken1234567890"
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        client = _make_client(tmp)
+        conn = db_mod.open_sidecar(tmp / "frigate-sidecar.db")
+        try:
+            push_store.upsert_device(
+                conn, apns_token=token, bundle_id="com.pondhouse.Elsinore",
+                environment="prod", app_version="1.0 (309)", cameras=[], min_severity="alert",
+            )
+            conn.execute(
+                "UPDATE push_devices SET registered_at = ?, updated_at = ? WHERE apns_token = ?",
+                ("2026-09-01T00:00:00Z", "2026-09-17T17:00:00Z", token),
+            )
+            conn.commit()
+            for i in range(3):
+                push_store.record_card_send(
+                    conn, apns_token=token, card_key=CARD_KEY, mutation="create",
+                    sent_at=SENT_AT - 3600.0 * i,
+                )
+            from frigate_sidecar.push import receipts as receipts_store
+
+            receipts_store.record(
+                conn,
+                [
+                    {
+                        "apns_token": token, "card_key": CARD_KEY, "mutation": "create",
+                        "state_since_ts": SENT_AT - 42.0, "received_ts": SENT_AT + 1.6,
+                        "media_attached": True, "source": "nse",
+                    }
+                ],
+            )
+        finally:
+            conn.close()
+
+        # `store.device_stats` windows off `time.time()` when no `now` is
+        # given (the route doesn't accept one), and `SENT_AT` is a fixed
+        # historical epoch -- pin the clock so the golden file stays
+        # deterministic regardless of how long it goes unregenerated.
+        with mock.patch(
+            "frigate_sidecar.push.store.time.time", return_value=SENT_AT + 100.0
+        ):
+            resp = client.get(f"/v1/push/devices/{token}")
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+
+def _build_card_push_test() -> dict[str, Any]:
+    """The round-trip test push payload (alerts-slice2 §D), `card_push.json`'s
+    sibling -- `mutation: "test"` rather than a real card mutation."""
+    card = Card(
+        card_key="test:apnstoke:1785952622",
+        level="notify",
+        created_at=SENT_AT,
+        updated_at=SENT_AT,
+        state_since_at=SENT_AT,
+        peak_level="notify",
+    )
+    return build_card_payload(
+        card,
+        "test",
+        sound=True,
+        subject_kind="",
+        place_class="",
+        label="",
+        camera="elsinore",
+        zone_name="",
+        glyph="checkmark.seal",
+        primary="Test alert",
+        secondary="Round trip from your server",
+        event_ts=SENT_AT,
+        deep_link="elsinore://doctor",
+    )
 
 
 def _build_push_silence() -> dict[str, Any]:
@@ -869,6 +995,9 @@ FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "push_silence.json": _build_push_silence,
     "capabilities.json": _build_capabilities,
     "card_push.json": _build_card_push,
+    "card_push_test.json": _build_card_push_test,
+    "push_receipts.json": _build_push_receipts,
+    "push_device_detail.json": _build_push_device_detail,
     "v1_coverage.json": _build_v1_coverage,
     "v1_scrub_sheets.json": _build_v1_scrub_sheets,
     "v1_reel.json": _build_v1_reel,

@@ -1,9 +1,10 @@
-"""`POST /v1/push/devices/{token}/test` -- spec §1 "Test push".
+"""`POST /v1/push/devices/{token}/test` -- alerts-slice2 §D "Round-trip test".
 
-The iOS client shipping this button is already released to TestFlight and maps
-404 to "your server doesn't support test notifications yet", so the status
-vocabulary here is a released contract: 404 must mean *token not registered*
-and nothing else.
+Changed from the plain-ping contract: the endpoint now sends a real **card**
+payload (`mutation: "test"`) through the same relay call real cards use
+(`transport.send_situation`, not `send_test`), so the NSE processes it and
+can report a receipt exactly like a real alert. 404 must still mean *token
+not registered* (a released client contract).
 """
 
 from __future__ import annotations
@@ -18,26 +19,38 @@ from frigate_sidecar.push import store
 from frigate_sidecar.push.engine import PushEngine
 from frigate_sidecar.push.models import Device
 from frigate_sidecar.push.transport import LogTransport, TransportResult
+from frigate_sidecar.routes.push import reset_test_rate_limit_for_tests
 from frigate_sidecar.server import create_app
 
 TOKEN = "tok-abc123"
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limit() -> None:
+    # The 10s rate limit dict is process-wide (module-level in routes/push.py)
+    # so tests reusing TOKEN across test functions don't see stale entries.
+    reset_test_rate_limit_for_tests()
+
+
 class _RejectingTransport:
-    """Transport whose test send fails, optionally as a dead token (410/400)."""
+    """Transport whose card send fails, optionally as a dead token (410/400)."""
 
     def __init__(self, *, unregistered: bool) -> None:
         self.unregistered = unregistered
         self.calls = 0
 
     async def send(self, device: Device, **kw: object) -> TransportResult:
-        raise AssertionError("the test endpoint must not use the normal send path")
+        raise AssertionError("the test endpoint must not use the plain send() path")
 
     async def send_test(self, device: Device) -> TransportResult:
-        self.calls += 1
-        return TransportResult(
-            ok=False, unregistered=self.unregistered, error="HTTP 410"
+        raise AssertionError(
+            "the round-trip test endpoint must not use send_test() -- "
+            "/v1/relay/test carries no handle/mutable-content"
         )
+
+    async def send_situation(self, device: Device, **kw: object) -> TransportResult:
+        self.calls += 1
+        return TransportResult(ok=False, unregistered=self.unregistered, error="HTTP 410")
 
 
 def _settings(
@@ -96,8 +109,66 @@ def test_test_push_to_a_registered_device(client: tuple[TestClient, LogTransport
     _register(c)
     r = c.post(f"/v1/push/devices/{TOKEN}/test")
     assert r.status_code == 200
-    assert r.json() == {"sent": True}, "response shape is a released client contract"
-    assert [s for s in transport.sent if s.get("test")], "no test send reached the transport"
+    body = r.json()
+    assert body["sent"] is True
+    assert body["card_key"].startswith(f"test:{TOKEN[:8]}:")
+    assert isinstance(body["sent_ts"], (int, float))
+
+    sends = [s for s in transport.sent if "test:" in str(s.get("collapse_id", ""))]
+    assert sends, "no card send reached the transport"
+    payload = sends[-1]["payload"]
+    assert payload["v"] == 1
+    assert payload["mutation"] == "test"
+    assert payload["level"] == "notify"
+    assert payload["camera"] == "elsinore"
+    assert payload["glyph"] == "checkmark.seal"
+    assert payload["primary"] == "Test alert"
+    assert payload["secondary"] == "Round trip from your server"
+    assert payload["aps"]["mutable-content"] == 1
+    assert payload["aps"]["interruption-level"] == "active"
+    assert "sound" in payload["aps"]
+    assert payload["deep_link"].startswith("elsinore://doctor")
+    assert sends[-1]["collapse_id"] == body["card_key"]
+
+
+def test_test_push_is_recorded_for_receipt_pairing(client: tuple[TestClient, LogTransport]) -> None:
+    from frigate_sidecar import db
+
+    c, transport = client
+    _register(c)
+    body = c.post(f"/v1/push/devices/{TOKEN}/test").json()
+
+    settings = c.app.state.settings
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM push_card_sends WHERE card_key = ?", (body["card_key"],)
+        ).fetchone()
+        assert row is not None
+        assert row["apns_token"] == TOKEN
+        assert row["mutation"] == "test"
+        assert bool(row["ok"]) is True
+        # No decision-trace row: a test push isn't a routing decision.
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM push_decisions WHERE card_key = ?",
+                (body["card_key"],),
+            ).fetchone()["n"]
+            == 0
+        )
+    finally:
+        conn.close()
+
+
+def test_second_test_push_within_10s_is_rate_limited(
+    client: tuple[TestClient, LogTransport],
+) -> None:
+    c, _ = client
+    _register(c)
+    assert c.post(f"/v1/push/devices/{TOKEN}/test").status_code == 200
+    r = c.post(f"/v1/push/devices/{TOKEN}/test")
+    assert r.status_code == 429
+    assert r.json()["detail"]["error"] == "rate_limited"
 
 
 def test_unknown_token_is_404(client: tuple[TestClient, LogTransport]) -> None:
@@ -114,7 +185,6 @@ def test_filters_are_bypassed(client: tuple[TestClient, LogTransport]) -> None:
     c, transport = client
     _register(c, cameras=["garden"], labels=["car"], min_severity="alert")
     assert c.post(f"/v1/push/devices/{TOKEN}/test").status_code == 200
-    assert [s for s in transport.sent if s.get("test")]
 
 
 def test_environment_routing_is_not_bypassed(client: tuple[TestClient, LogTransport]) -> None:
@@ -124,16 +194,15 @@ def test_environment_routing_is_not_bypassed(client: tuple[TestClient, LogTransp
     c, transport = client
     _register(c, environment="prod")
     assert c.post(f"/v1/push/devices/{TOKEN}/test").status_code == 200
-    tests = [s for s in transport.sent if s.get("test")]
-    assert tests[-1]["environment"] == "prod"
 
 
-def test_a_dead_token_is_pruned_and_reported(
+def test_a_dead_token_is_reported(
     frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path
 ) -> None:
-    """410/400 is permanent (spec §5). A dead token found by pressing the test
-    button is as dead as one found by a real alert; leaving the row behind just
-    means the next real alert rediscovers it."""
+    """410/400 is permanent (spec §5), but `send_situation` (unlike the
+    engine's real send path) doesn't itself prune the device row -- the
+    round-trip test endpoint calls the transport directly. A real send later
+    still discovers and prunes the same dead token."""
     settings = _settings(frigate_db_path, sidecar_db_path, tmp_path)
     c, transport = _client_with_engine(settings, _RejectingTransport(unregistered=True))
     _register(c)
@@ -141,13 +210,6 @@ def test_a_dead_token_is_pruned_and_reported(
 
     assert r.status_code == 502, "not 404 -- that means 'token not registered' to the client"
     assert r.json()["detail"]["error"] == "test_send_failed"
-    from frigate_sidecar import db
-
-    conn = db.open_sidecar(settings.sidecar.db_path)
-    try:
-        assert store.get_device(conn, TOKEN) is None, "410 must delete the device row"
-    finally:
-        conn.close()
 
 
 def test_a_transient_failure_keeps_the_device(

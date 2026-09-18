@@ -87,6 +87,47 @@ def _exc_error(exc: BaseException) -> str:
 
 
 @dataclass
+class RelayHealth:
+    """Module-level, in-memory relay health (alerts-slice2 §C), updated by
+    `RelayTransport._send_with_retry` on every relay HTTP response (not on
+    breaker-skip/transport-exception paths without a response, except
+    `last_error`/`last_error_at`, which those *do* update -- a status page
+    that goes silent the moment the relay is actually down would be the one
+    time this matters most).
+
+    Process-lifetime only, like `STATS` -- a restart resets it, which is fine
+    for a "since last restart" health snapshot.
+    """
+
+    last_ok_at: float | None = None
+    last_error: str | None = None
+    last_error_at: float | None = None
+    last_status_code: int | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "last_ok_at": self.last_ok_at,
+            "last_error": self.last_error,
+            "last_error_at": self.last_error_at,
+            "last_status_code": self.last_status_code,
+        }
+
+
+#: Single process-wide instance. `routes/push.py`'s status endpoint reads
+#: this directly rather than reaching through a `push_engine`/`transport`
+#: instance, so relay health is reportable even when constructed against a
+#: different transport instance in tests.
+RELAY_HEALTH = RelayHealth()
+
+
+def reset_relay_health_for_tests() -> None:
+    RELAY_HEALTH.last_ok_at = None
+    RELAY_HEALTH.last_error = None
+    RELAY_HEALTH.last_error_at = None
+    RELAY_HEALTH.last_status_code = None
+
+
+@dataclass
 class TransportResult:
     ok: bool
     # True if the relay/APNs reported the token as permanently dead (410
@@ -550,6 +591,9 @@ class RelayTransport:
             except httpx.HTTPError as exc:
                 self._record_breaker_outcome(failed=True)
                 last_error = _exc_error(exc)
+                RELAY_HEALTH.last_error = last_error
+                RELAY_HEALTH.last_error_at = time.time()
+                RELAY_HEALTH.last_status_code = None
                 logger.debug(
                     "push: relay %s attempt %d/%d transport error: %s",
                     label, attempt + 1, max_attempts, last_error,
@@ -561,6 +605,8 @@ class RelayTransport:
             if resp.status_code == 200:
                 self._record_breaker_outcome(failed=False)
                 STATS.incr("relay.send.ok")
+                RELAY_HEALTH.last_ok_at = time.time()
+                RELAY_HEALTH.last_status_code = 200
                 return TransportResult(ok=True)
 
             if resp.status_code in (410, 400):
@@ -569,6 +615,9 @@ class RelayTransport:
                 self._record_breaker_outcome(failed=False)
                 logger.warning("push: relay %s body: %s", resp.status_code, resp.text[:500])
                 STATS.incr("relay.send.unregistered")
+                RELAY_HEALTH.last_error = f"HTTP {resp.status_code}"
+                RELAY_HEALTH.last_error_at = time.time()
+                RELAY_HEALTH.last_status_code = resp.status_code
                 return TransportResult(
                     ok=False, unregistered=True, error=f"HTTP {resp.status_code}",
                     status_code=resp.status_code,
@@ -582,6 +631,9 @@ class RelayTransport:
                     resp.status_code, resp.text[:500],
                 )
                 STATS.incr("relay.send.rejected")
+                RELAY_HEALTH.last_error = f"HTTP 422: {resp.text[:200]}"
+                RELAY_HEALTH.last_error_at = time.time()
+                RELAY_HEALTH.last_status_code = 422
                 return TransportResult(
                     ok=False, error=f"HTTP 422: {resp.text[:200]}", status_code=422,
                 )
@@ -597,6 +649,9 @@ class RelayTransport:
                         resp.status_code, resp.text[:500],
                     )
                     STATS.incr("relay.send.rejected")
+                    RELAY_HEALTH.last_error = f"HTTP 429: {resp.text[:200]}"
+                    RELAY_HEALTH.last_error_at = time.time()
+                    RELAY_HEALTH.last_status_code = 429
                     return TransportResult(
                         ok=False, error=f"HTTP 429: {resp.text[:200]}", status_code=429,
                     )
@@ -610,6 +665,9 @@ class RelayTransport:
             if resp.status_code >= 500:
                 self._record_breaker_outcome(failed=True)
                 last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                RELAY_HEALTH.last_error = last_error
+                RELAY_HEALTH.last_error_at = time.time()
+                RELAY_HEALTH.last_status_code = resp.status_code
                 logger.debug(
                     "push: relay %s attempt %d/%d got %s",
                     label, attempt + 1, max_attempts, resp.status_code,
@@ -621,6 +679,9 @@ class RelayTransport:
             # Any other 4xx: terminal, never retried.
             self._record_breaker_outcome(failed=False)
             STATS.incr("relay.send.failed")
+            RELAY_HEALTH.last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            RELAY_HEALTH.last_error_at = time.time()
+            RELAY_HEALTH.last_status_code = resp.status_code
             return TransportResult(
                 ok=False, error=f"HTTP {resp.status_code}: {resp.text[:200]}",
                 status_code=resp.status_code,
@@ -629,6 +690,8 @@ class RelayTransport:
         # Retries exhausted, the breaker tripped mid-send, or the half-open
         # probe itself failed.
         STATS.incr("relay.send.failed")
+        RELAY_HEALTH.last_error = last_error
+        RELAY_HEALTH.last_error_at = time.time()
         logger.warning(
             "push: relay %s send failed key=%s attempts=%d last_error=%s",
             label, log_key, attempt + 1, last_error,

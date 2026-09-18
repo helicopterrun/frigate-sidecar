@@ -180,6 +180,15 @@ def get_device(conn: sqlite3.Connection, apns_token: str) -> Device | None:
     return _row_to_device(row) if row else None
 
 
+def get_device_row(conn: sqlite3.Connection, apns_token: str) -> sqlite3.Row | None:
+    """Raw `push_devices` row (alerts-slice2 §B's device-detail route needs
+    `registered_at`/`updated_at`, which aren't on the `Device` dataclass)."""
+    row = conn.execute(
+        "SELECT * FROM push_devices WHERE apns_token = ?", (apns_token,)
+    ).fetchone()
+    return cast(sqlite3.Row, row) if row is not None else None
+
+
 def list_devices(conn: sqlite3.Connection) -> list[Device]:
     rows = conn.execute("SELECT * FROM push_devices").fetchall()
     return [_row_to_device(r) for r in rows]
@@ -422,6 +431,94 @@ def prune_old_sends(
     cur = conn.execute("DELETE FROM push_sends WHERE sent_at <= ?", (now - older_than,))
     conn.commit()
     return cur.rowcount
+
+
+# -- Card-mutation sends / device stats (alerts-slice2 §A/§B) ---------------
+
+
+def record_card_send(
+    conn: sqlite3.Connection,
+    *,
+    apns_token: str,
+    card_key: str,
+    mutation: str,
+    sent_at: float | None = None,
+    ok: bool = True,
+    error: str | None = None,
+) -> None:
+    """Record one card-mutation send for receipt pairing and device stats.
+
+    Commits itself, same as `record_send` -- callers that batch several of
+    these per mutation (one per eligible device) still get one commit per
+    row rather than holding the WAL write lock across the loop's `await
+    transport.*` calls.
+    """
+    sent_at = time.time() if sent_at is None else sent_at
+    conn.execute(
+        "INSERT INTO push_card_sends (apns_token, card_key, mutation, sent_at, ok, error) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (apns_token, card_key, mutation, sent_at, 1 if ok else 0, error),
+    )
+    conn.commit()
+
+
+def device_stats(
+    conn: sqlite3.Connection, apns_token: str, *, window_days: float = 7.0, now: float | None = None
+) -> dict[str, Any]:
+    """Send/receipt stats for `GET /v1/push/devices/{token}` (alerts-slice2
+    §B). `sent` counts `push_card_sends` rows for this token in the window;
+    `received` counts *distinct* paired receipts (a receipt with no
+    `sent_at` still counted as accepted, but not as "received" against this
+    device's send volume -- it just never found a matching send)."""
+    now = time.time() if now is None else now
+    since = now - window_days * 86400.0
+
+    sent_row = conn.execute(
+        "SELECT COUNT(*) AS n, MAX(sent_at) AS last FROM push_card_sends "
+        "WHERE apns_token = ? AND sent_at >= ?",
+        (apns_token, since),
+    ).fetchone()
+    sent = int(sent_row["n"]) if sent_row else 0
+    last_sent_at = sent_row["last"] if sent_row else None
+
+    err_row = conn.execute(
+        "SELECT error, sent_at FROM push_card_sends "
+        "WHERE apns_token = ? AND ok = 0 AND sent_at >= ? "
+        "ORDER BY sent_at DESC LIMIT 1",
+        (apns_token, since),
+    ).fetchone()
+    last_send_error = err_row["error"] if err_row else None
+    last_send_error_at = err_row["sent_at"] if err_row else None
+
+    recv_rows = conn.execute(
+        "SELECT latency_s, received_at FROM push_receipts "
+        "WHERE apns_token = ? AND received_at >= ? AND sent_at IS NOT NULL",
+        (apns_token, since),
+    ).fetchall()
+    received = len(recv_rows)
+    latencies = [r["latency_s"] for r in recv_rows if r["latency_s"] is not None]
+    last_received_at = max((r["received_at"] for r in recv_rows), default=None)
+
+    from frigate_sidecar.db import percentile
+
+    median_latency_s = percentile(latencies, 50) if latencies else None
+    p90_latency_s = percentile(latencies, 90) if latencies else None
+    if median_latency_s is not None and median_latency_s != median_latency_s:  # NaN guard
+        median_latency_s = None
+    if p90_latency_s is not None and p90_latency_s != p90_latency_s:
+        p90_latency_s = None
+
+    return {
+        "window_days": window_days,
+        "sent": sent,
+        "received": received,
+        "median_latency_s": median_latency_s,
+        "p90_latency_s": p90_latency_s,
+        "last_sent_at": last_sent_at,
+        "last_received_at": last_received_at,
+        "last_send_error": last_send_error,
+        "last_send_error_at": last_send_error_at,
+    }
 
 
 # -- Live Activities (Phase 2) ----------------------------------------------
