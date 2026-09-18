@@ -489,6 +489,15 @@ async def send_card_mutation(
                 "push: card send failed device=%s card_key=%s mutation=%s error=%s",
                 device.device_id, card.card_key, mutation, result.error,
             )
+        if result.unregistered:
+            # 410 Unregistered / 400 BadDeviceToken (spec §5): the token is
+            # permanently dead -- drop the row now so the next card doesn't
+            # rediscover it (the engine's situation/test paths already do this).
+            logger.info(
+                "push: pruning device %s after card send (%s)",
+                device.device_id, result.error,
+            )
+            store.delete_device(conn, device.apns_token)
         store.record_card_send(
             conn, apns_token=device.apns_token, card_key=card.card_key, mutation=mutation,
             sent_at=now, ok=result.ok, error=result.error,

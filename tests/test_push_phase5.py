@@ -712,3 +712,60 @@ async def test_quiet_peak_story_still_sends_no_resolve_push(sidecar_db_path: Pat
         config=config, subject_kind="thing", now=30.0,
     )
     assert situation_sends(transport) == []
+
+
+# ---------------------------------------------------------------------------
+# 410/400 feedback-driven pruning (spec §5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_card_send_prunes_unregistered_device(sidecar_db_path: Path):
+    """A card-mutation send that comes back `unregistered` (410 Unregistered
+    / 400 BadDeviceToken) must drop that device row immediately, without
+    touching a second device whose send succeeded -- and the failed send is
+    still recorded in `push_card_sends` for receipt pairing."""
+    from frigate_sidecar.push.cards import CREATE, Card
+    from frigate_sidecar.push.transport import TransportResult
+
+    class MixedTransport(LogTransport):
+        async def send_situation(self, device, **kwargs):
+            if device.apns_token == "tok_dead":
+                return TransportResult(
+                    ok=False, unregistered=True, error="HTTP 410", status_code=410,
+                )
+            return TransportResult(ok=True)
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = MixedTransport()
+    store.upsert_device(
+        conn, apns_token="tok_dead", bundle_id="com.pondhouse.Elsinore",
+        environment="sandbox", min_severity="detection",
+    )
+    store.upsert_device(
+        conn, apns_token="tok_alive", bundle_id="com.pondhouse.Elsinore",
+        environment="sandbox", min_severity="detection",
+    )
+    dead = make_device(token="tok_dead")
+    alive = make_device(token="tok_alive")
+    card = Card(
+        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        created_at=1.0, updated_at=1.0, state_since_at=1.0,
+    )
+    payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "now"}}}
+
+    await send_card_mutation(
+        conn, transport, [dead, alive], card, CREATE, payload,
+        subject_kind="person", camera="doorbell", now=1.0,
+    )
+
+    remaining_tokens = {d.apns_token for d in store.list_devices(conn)}
+    assert remaining_tokens == {"tok_alive"}
+
+    rows = conn.execute(
+        "SELECT apns_token, ok, error FROM push_card_sends WHERE apns_token = ?",
+        ("tok_dead",),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["ok"] == 0
+    assert rows[0]["error"] == "HTTP 410"
