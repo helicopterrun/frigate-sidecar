@@ -144,6 +144,28 @@ place never evaluates below `quiet`, so "the subject is gone" must be an
 explicit signal. It rides on `frigate/events`' object `end` message
 (`handle_delivery_resolve`). Mute beats resolve.
 
+#### Resolve visibility (alerts-slice2 §E)
+
+Every resolve gets one final push: quiet (no sound, `interruption-level:
+passive`), same `apns-collapse-id` as the story it's closing. Whether that
+push is **ephemeral** (`ephemeral: true` — the app removes the delivered
+row from Notification Center at once) or not depends on the story's peak:
+
+| Story peak (`card.peak_level`) | Zone override ever hit | Resolve |
+|---|---|---|
+| ≤ `quiet` | no | `ephemeral: true` — removed, scoped to the event's lifetime |
+| `notify` or `urgent` | — | `ephemeral: false` — banner replaced in place, body `"…left after 4 min"` |
+| any | yes | `ephemeral: false`, regardless of peak |
+
+`ephemeral` is always explicit, never omitted — an app reading it absent
+treats the row as coming from an old sidecar and falls back to its own 24h
+sweep, while an explicit `false` means "user-visible story, keep it around
+until the user acts or the sweep ages it out". This is a sidecar policy
+change from the previous slice: a peak-`quiet` story used to get no resolve
+push at all (the row was left to the app's own 24h sweep); it now gets an
+ephemeral one, so a "Noted" card that never became a banner is still
+cleaned up promptly instead of lingering for up to a day.
+
 ### Sound accounting — the entire anti-spam policy
 
 Sound at most twice per card: once at `create` (only if `notify`/`urgent` —
@@ -378,6 +400,10 @@ logs a per-card verdict (tuning trace only; no routing changes yet).
   `devices` registered. Cheap — one or two SQL queries plus in-memory flags,
   no Frigate HTTP round-trip. `paused_until` is always `null`: there is no
   global timed-mute concept, only the per-cell/per-zone silences below.
+  Alerts-slice2 §C adds `relay`: `{"last_ok_at", "last_error",
+  "last_error_at", "last_status_code"}`, an in-memory, process-lifetime
+  record updated by `push/transport.py`'s `RelayTransport` on every relay
+  HTTP response (a restart resets it — a "since last restart" snapshot).
 - `POST /v1/push/silence` — `{"card_key": ...}` drops the cell that card
   routed through (its zone override, or its outcomes-table cell if it has no
   zone) to `quiet`, through the same validate → normalize → save → apply
@@ -400,11 +426,33 @@ being opaque, unguessable, and short-lived — the NSE holds no session.
   will evaluate under, `situations_accepted`, and Live Activity readiness.
   Unknown body fields are accepted, dropped, and logged by name. Omitting
   `snoozes` leaves existing ones alone; explicit `[]` clears them.
-- `POST /v1/push/devices/{apns_token}/test` — one fixed test push, bypassing
-  filters but not environment routing. 404 means "token not registered"
+- `POST /v1/push/devices/{apns_token}/test` — alerts-slice2 §D: sends a
+  real **card** payload (`mutation: "test"`, synthetic `card_key`,
+  `v:1`/`mutable-content:1`) through the same relay call real cards use
+  (`transport.send_situation`), bypassing filters but not environment
+  routing. The NSE processes it and can post a receipt exactly like a real
+  alert — this is a genuine round trip, not just "APNs accepted the
+  request". Recorded in `push_card_sends`; explicitly skips
+  `push_decisions` (it isn't a routing decision). Rate-limited to one per
+  token per 10s (429 otherwise). 404 means "token not registered"
   (reserved — the released client maps it to a specific message), 503
-  `push_disabled`, 502 `test_send_failed`. `{"sent": true}` means APNs
-  accepted; there is no delivery receipt.
+  `push_disabled`, 502 `test_send_failed`. Response:
+  `{"sent": true, "card_key": "test:…", "sent_ts": …}`.
+- `POST /v1/push/receipts` — alerts-slice2 §A: batch delivery receipts from
+  the NSE (right after handing content to the OS) and the app (flushing
+  what the NSE couldn't deliver, or `willPresent` foreground observations).
+  Paired against `push_card_sends` by `(apns_token, card_key, mutation)`,
+  nearest prior send within 24h (this sidecar's send-side table carries no
+  `state_since_ts` to pair on exactly). Duplicates
+  (`apns_token`+`card_key`+`mutation`+`state_since_ts`) are ignored via a
+  unique index, not errors. Unknown tokens are still stored, never 404.
+  Response `{"accepted": n, "matched": m}`. 30-day retention.
+- `GET /v1/push/devices/{apns_token}` — alerts-slice2 §B: registration
+  facts plus send/receipt stats over a window (`window_days`, default 7,
+  max 90): `sent`/`received` counts, `median_latency_s`/`p90_latency_s`
+  (nearest-rank percentile over paired receipts), `last_sent_at`/
+  `last_received_at`, `last_send_error`/`last_send_error_at`. 404 for an
+  unknown token.
 - `GET /v1/push/situations/library`, `GET /v1/push/sounds` — starters
   (legacy, see "Situations (retired)") and the sound catalog (keyed on `app_version`; the `.caf` assets ship in the
   app bundle).

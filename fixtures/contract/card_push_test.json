@@ -1,0 +1,27 @@
+{
+  "aps": {
+    "alert": {
+      "body": "Round trip from your server",
+      "title": "Test alert"
+    },
+    "category": "card.notify",
+    "interruption-level": "active",
+    "mutable-content": 1,
+    "sound": "general.caf",
+    "thread-id": "elsinore"
+  },
+  "camera": "elsinore",
+  "card_key": "test:apnstoke:1785952622",
+  "deep_link": "elsinore://doctor?t=1785952622.704",
+  "event_ts": 1785952622.704,
+  "glyph": "checkmark.seal",
+  "level": "notify",
+  "mutation": "test",
+  "place_class": "",
+  "primary": "Test alert",
+  "secondary": "Round trip from your server",
+  "state_since_ts": 1785952622.704,
+  "subject_kind": "",
+  "v": 1,
+  "zone_name": ""
+}

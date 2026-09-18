@@ -20,7 +20,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from frigate_sidecar import db
 from frigate_sidecar.push import card_store, decision_trace, library, policy_settings, store
+from frigate_sidecar.push import receipts as receipts_store
 from frigate_sidecar.push.situations import Situation
+from frigate_sidecar.push.transport import RELAY_HEALTH
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,18 @@ _ERR_THUMBNAIL_NOT_FOUND = "thumbnail_not_found"
 _ERR_BAD_SCOPE = "bad_scope"
 _ERR_CARD_NOT_FOUND = "card_not_found"
 _ERR_BAD_FEEDBACK = "invalid_feedback"
+_ERR_RATE_LIMITED = "rate_limited"
+
+#: Round-trip test push rate limit (alerts-slice2 §D): one per token per 10s.
+_TEST_RATE_LIMIT_S = 10.0
+#: token -> last test-push epoch. In-memory (like the sound-rate keys in
+#: `delivery.py`'s `_SOUND_RATE_KEY`, but this one doesn't need to survive a
+#: restart -- a fresh process just re-allows the very next tap).
+_last_test_push_at: dict[str, float] = {}
+
+
+def reset_test_rate_limit_for_tests() -> None:
+    _last_test_push_at.clear()
 
 
 class DeviceLocation(BaseModel):
@@ -95,6 +109,24 @@ class DeviceRegistration(BaseModel):
     live_activity_token: str = ""
     morning_digest: dict[str, Any] | None = None
     llm: dict[str, Any] | None = None
+
+
+class ReceiptEntry(BaseModel):
+    """One entry of `POST /v1/push/receipts`' batch body (alerts-slice2 §A)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    apns_token: str
+    card_key: str
+    mutation: str
+    state_since_ts: float
+    received_ts: float
+    media_attached: bool = False
+    source: Literal["nse", "app_flush", "app_foreground"] = "app_flush"
+
+
+class ReceiptsBatch(BaseModel):
+    receipts: list[ReceiptEntry] = Field(default_factory=list)
 
 
 class SnoozeRequest(BaseModel):
@@ -271,15 +303,27 @@ async def unregister_device(
 async def test_push(
     apns_token: Annotated[str, Path(min_length=1)], request: Request
 ) -> dict[str, Any]:
-    """Send one test push to exactly this device (spec §1, "Test push").
+    """Round-trip test push (alerts-slice2 §D, changed from spec §1's plain
+    ping). Sends a real **card** payload -- `mutation: "test"`, a synthetic
+    `card_key`, `v:1`/`mutable-content:1` like any other card -- through the
+    exact same relay call real cards use (`transport.send_situation`, i.e.
+    `RelayTransport`'s `/v1/relay/situation`), *not* `send_test`'s
+    `/v1/relay/test`: that endpoint carries no `handle` and no
+    `mutable-content` (see `PushTransport.send_test`'s docstring), so the NSE
+    never runs and there is nothing for it to report a receipt about. Routing
+    through the card path is what makes this endpoint's own name ("round-trip
+    test") true -- the NSE processes it and posts a receipt exactly like a
+    real alert.
 
-    `{"sent": true}` means APNs *accepted* the request -- there is no delivery
-    receipt, so it can never mean "displayed on the device".
+    Recorded in `push_card_sends` (so receipts can pair against it and the
+    device-detail stats see it); explicitly skips `push_decisions` -- it
+    isn't a routing decision.
 
-    404 is reserved for "token not registered": the released iOS client maps it
-    to "your server doesn't support test notifications yet", so no other
-    condition may borrow it. A rejected send is 502 and a server with push
-    switched off is 503, both carrying the standard error envelope.
+    `{"sent": true}` means the relay *accepted* the request -- there is no
+    delivery receipt in this response, so it can never mean "displayed on the
+    device". 404 is reserved for "token not registered". 429 when called
+    again for the same token within 10s. A rejected send is 502 and a server
+    with push switched off is 503, both carrying the standard error envelope.
     """
     settings = request.app.state.settings
     device = await db.with_sidecar(
@@ -289,6 +333,17 @@ async def test_push(
         raise HTTPException(
             status_code=404,
             detail={"error": _ERR_DEVICE_NOT_FOUND, "message": "token not registered"},
+        )
+
+    now = _datetime.datetime.now(_datetime.timezone.utc).timestamp()
+    last = _last_test_push_at.get(apns_token)
+    if last is not None and now - last < _TEST_RATE_LIMIT_S:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": _ERR_RATE_LIMITED,
+                "message": f"one test push per device per {_TEST_RATE_LIMIT_S:.0f}s",
+            },
         )
 
     # Registration writes to the DB whether or not push is enabled, so a
@@ -304,10 +359,40 @@ async def test_push(
             },
         )
 
-    result = await engine.send_test(device)
+    from frigate_sidecar.push.cards import Card
+    from frigate_sidecar.push.delivery import build_card_payload
+
+    card_key = f"test:{apns_token[:8]}:{int(now)}"
+    card = Card(
+        card_key=card_key, level="notify", peak_level="notify",
+        created_at=now, updated_at=now, state_since_at=now,
+    )
+    payload = build_card_payload(
+        card, "test", sound=True, subject_kind="", place_class="", label="",
+        camera="elsinore", zone_name="", glyph="checkmark.seal",
+        primary="Test alert", secondary="Round trip from your server",
+        event_ts=now, deep_link="elsinore://doctor",
+    )
+
+    _last_test_push_at[apns_token] = now
+    result = await engine.transport.send_situation(
+        device, payload=payload, collapse_id=card_key, apns_priority=10,
+    )
+
+    def _record(conn: Any) -> None:
+        store.record_card_send(
+            conn, apns_token=apns_token, card_key=card_key, mutation="test",
+            sent_at=now, ok=result.ok, error=result.error,
+        )
+        conn.commit()
+
+    await db.with_sidecar(settings.sidecar.db_path, _record)
+
     if not result.ok:
-        # Includes the 410/400 case, where the engine has already deleted the
-        # row per spec §5 -- the device is gone and the client should re-register.
+        # Includes the 410/400 case, where a real send would prune the
+        # device row (spec §5) -- `send_situation` doesn't do that pruning
+        # itself (only the engine's own send path does), so the row is left
+        # for the next real send to discover the same failure.
         raise HTTPException(
             status_code=502,
             detail={
@@ -315,7 +400,7 @@ async def test_push(
                 "message": result.error or "push transport rejected the send",
             },
         )
-    return {"sent": True}
+    return {"sent": True, "card_key": card_key, "sent_ts": now}
 
 
 @router.get("/situations/library")
@@ -698,6 +783,58 @@ async def card_for_event(
     }
 
 
+@router.post("/receipts")
+async def post_receipts(body: ReceiptsBatch, request: Request) -> dict[str, Any]:
+    """NSE/app delivery receipts (alerts-slice2 §A). Unknown tokens are still
+    stored (no 404 -- the sidecar doesn't validate against `push_devices`
+    here, since a receipt naming a token this sidecar never registered is
+    still useful telemetry, not a client error). Duplicates
+    (`apns_token`+`card_key`+`mutation`+`state_since_ts`) are ignored, not
+    errors -- `INSERT OR IGNORE` against the unique index."""
+    settings = request.app.state.settings
+    payload = [r.model_dump() for r in body.receipts]
+    result = await db.with_sidecar(
+        settings.sidecar.db_path, lambda conn: receipts_store.record(conn, payload)
+    )
+    return result
+
+
+@router.get("/devices/{apns_token}")
+async def get_device_detail(
+    apns_token: Annotated[str, Path(min_length=1)],
+    request: Request,
+    window_days: float = Query(default=7.0, gt=0, le=90),
+) -> dict[str, Any]:
+    """Device detail (alerts-slice2 §B): registration facts plus send/receipt
+    stats over `window_days` (default 7). 404 when the token isn't
+    registered -- same convention as every other `/devices/{token}` route."""
+    settings = request.app.state.settings
+
+    def _query(conn: Any) -> tuple[Any, dict[str, Any]] | None:
+        device_row = store.get_device_row(conn, apns_token)
+        if device_row is None:
+            return None
+        stats = store.device_stats(conn, apns_token, window_days=window_days)
+        return device_row, stats
+
+    found = await db.with_sidecar(settings.sidecar.db_path, _query)
+    if found is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_DEVICE_NOT_FOUND, "message": "token not registered"},
+        )
+    device_row, stats = found
+    return {
+        "registered": True,
+        "environment": device_row["environment"],
+        "app_version": device_row["app_version"],
+        "registered_at": device_row["registered_at"],
+        "updated_at": device_row["updated_at"],
+        "la_capable": bool(device_row["la_capable"]),
+        **stats,
+    }
+
+
 @router.get("/decisions")
 async def get_decisions(
     request: Request,
@@ -752,6 +889,9 @@ async def get_push_status(request: Request) -> dict[str, Any]:
         # per-zone silence, `push_silences`) -- resolved as always null.
         "paused_until": None,
         "devices": devices,
+        # Alerts-slice2 §C: in-memory, process-lifetime relay health, updated
+        # by `push/transport.py`'s `RelayTransport` on every relay response.
+        "relay": RELAY_HEALTH.as_dict(),
     }
 
 

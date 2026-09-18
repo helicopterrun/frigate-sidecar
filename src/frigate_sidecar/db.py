@@ -459,6 +459,48 @@ CREATE TABLE IF NOT EXISTS push_decisions (
 CREATE INDEX IF NOT EXISTS idx_push_decisions_ts       ON push_decisions(ts);
 CREATE INDEX IF NOT EXISTS idx_push_decisions_card_key ON push_decisions(card_key);
 
+-- Card-mutation sends (alerts-slice2 §A/§B). One row per (device, card
+-- mutation) actually handed to `PushTransport.send_situation` -- including
+-- the round-trip test push (`mutation='test'`). This is deliberately a new
+-- table rather than reusing `push_sends` above: that table is the
+-- *situation*-pipeline's rolling rate-limit window (keyed on situation_id,
+-- no card_key/mutation), and card mutations were never recorded in it at
+-- all before this slice. `push_receipts` pairs against this table.
+CREATE TABLE IF NOT EXISTS push_card_sends (
+    apns_token TEXT NOT NULL,
+    card_key   TEXT NOT NULL,
+    mutation   TEXT NOT NULL,
+    sent_at    REAL NOT NULL,
+    ok         INTEGER NOT NULL DEFAULT 1,
+    error      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_push_card_sends_token ON push_card_sends(apns_token, sent_at);
+CREATE INDEX IF NOT EXISTS idx_push_card_sends_pair
+    ON push_card_sends(apns_token, card_key, mutation, sent_at);
+
+-- Delivery receipts posted by the NSE / app (alerts-slice2 §A). Paired with
+-- `push_card_sends` at insert time: `sent_at`/`latency_s` are filled in from
+-- the most recent matching send within 24h of `received_at` (this repo has
+-- no `state_since_ts` column on the send side to pair on exactly, so
+-- pairing is token+card_key+mutation, nearest prior send -- see
+-- `push/receipts.py`). 30-day retention like `push_decisions`.
+CREATE TABLE IF NOT EXISTS push_receipts (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    apns_token     TEXT NOT NULL,
+    card_key       TEXT NOT NULL,
+    mutation       TEXT NOT NULL,
+    state_since_ts REAL NOT NULL,
+    sent_at        REAL,
+    received_at    REAL NOT NULL,
+    latency_s      REAL,
+    media_attached INTEGER NOT NULL DEFAULT 0,
+    source         TEXT NOT NULL,
+    created_at     REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_push_receipts_dedupe
+    ON push_receipts(apns_token, card_key, mutation, state_since_ts);
+CREATE INDEX IF NOT EXISTS idx_push_receipts_created ON push_receipts(created_at);
+
 -- Silences applied via POST /v1/push/silence and PUT /v1/push/overrides
 -- (alerts-slice1 §C). Audit trail only -- the live effect is the
 -- push_settings.json write through the same path PUT /v1/push/settings uses.

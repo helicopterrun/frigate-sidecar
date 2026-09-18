@@ -1,0 +1,19 @@
+{
+  "request": {
+    "receipts": [
+      {
+        "apns_token": "apnstoken1234567890",
+        "card_key": "doorbell:package:t_1755550001-abc123",
+        "media_attached": true,
+        "mutation": "create",
+        "received_ts": 1785952623.904,
+        "source": "nse",
+        "state_since_ts": 1785952580.704
+      }
+    ]
+  },
+  "response": {
+    "accepted": 1,
+    "matched": 1
+  }
+}

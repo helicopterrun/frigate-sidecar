@@ -587,10 +587,12 @@ async def test_cancel_deferred_cancels_pending_tasks(sidecar_db_path: Path, monk
 
 
 @pytest.mark.asyncio
-async def test_resolve_push_is_ephemeral_for_notify_peak_story(sidecar_db_path: Path):
-    """A resolve push for a story that peaked at notify (not urgent) and
-    never tripped a zone override carries `ephemeral: true` -- it's scoped
-    to the event's lifetime, not kept around like an alarm record."""
+async def test_resolve_push_not_ephemeral_for_notify_peak_story(sidecar_db_path: Path):
+    """Alerts-slice2 §E (sidecar policy change): a resolve push for a story
+    that peaked at `notify` (not just `quiet`) keeps its resolve push around
+    -- `ephemeral: false`, same collapse-id, quiet/passive -- so the banner
+    is replaced in place rather than removed. Only a peak that never
+    exceeded `quiet` (and never tripped a zone override) is ephemeral."""
     from frigate_sidecar.push.cards import RESOLVE, Card
 
     conn = db.open_sidecar(sidecar_db_path)
@@ -598,6 +600,32 @@ async def test_resolve_push_is_ephemeral_for_notify_peak_story(sidecar_db_path: 
     device = make_device()
     card = Card(
         card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        created_at=1.0, updated_at=9.0, state_since_at=1.0,
+        resolved=True, closed=True,
+    )
+    payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+    await send_card_mutation(
+        conn, transport, [device], card, RESOLVE, payload,
+        subject_kind="person", camera="doorbell", now=10.0,
+        demote_tokens=set(), suppress_demoted=True,
+    )
+    sends = situation_sends(transport)
+    assert len(sends) == 1
+    assert sends[0]["payload"]["ephemeral"] is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_push_is_ephemeral_for_quiet_peak_story(sidecar_db_path: Path):
+    """Alerts-slice2 §E: a story that never exceeded `quiet` and never
+    tripped a zone override gets an *ephemeral* resolve (removes the
+    delivered row) -- this used to get no resolve push at all."""
+    from frigate_sidecar.push.cards import RESOLVE, Card
+
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    card = Card(
+        card_key="doorbell:person:trk1", level="quiet", peak_level="quiet",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
         resolved=True, closed=True,
     )

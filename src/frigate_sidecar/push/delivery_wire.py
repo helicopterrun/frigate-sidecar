@@ -1642,7 +1642,13 @@ async def handle_delivery_event(
                 len(demote_tokens), card_key, mutation,
             )
 
-        if should_push(card.level):
+        # RESOLVE always builds a payload, even for a card whose level never
+        # reached a pushable one (alerts-slice2 §E): `send_card_mutation`'s
+        # own RESOLVE branch decides ephemeral vs. non-ephemeral off the
+        # story's peak, but it can only do that if it gets a payload to mark
+        # up in the first place. Every other mutation still gates on
+        # `should_push`.
+        if should_push(card.level) or mutation == RESOLVE:
             payload = build_card_payload(
                 card, mutation, sound=sound and not la_only,
                 subject_kind=subject_kind, place_class=place_class,
@@ -1783,7 +1789,7 @@ async def handle_delivery_resolve(
         # ongoing-mutation demotion above does.
         demote_resolve: set[str] = set(la_covered)
         payload = None
-        if should_push(card.level):
+        if should_push(card.level) or mutation == RESOLVE:
             payload = build_card_payload(
                 card, mutation, sound=sound and not la_only, subject_kind=kind,
                 place_class="", camera=camera, zone_name=zone_name,

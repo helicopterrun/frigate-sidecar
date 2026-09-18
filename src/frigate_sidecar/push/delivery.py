@@ -398,26 +398,30 @@ async def send_card_mutation(
     if payload is None:
         return 0
 
-    # Quiet resolves: don't push resolve for cards whose peak never exceeded quiet.
+    # Resolve visibility (alerts-slice2 §E, sidecar policy change): every
+    # resolve gets one final silent (quiet, `.passive`, no sound) update --
+    # this used to skip peak<=quiet cards outright, which meant they never
+    # got a resolve push at all. Now they get an *ephemeral* one (removes
+    # the delivered row) instead of no push, and a story that reached
+    # `notify`/`urgent` -- or ever tripped a zone override -- keeps a
+    # non-ephemeral resolve so the banner is replaced in place, never
+    # removed.
     if mutation == RESOLVE:
         from frigate_sidecar.push import ladder_policy
         quiet_idx = ladder_policy.LEVELS.index("quiet")
         peak_idx = _level_index(card.peak_level)
-        if peak_idx <= quiet_idx:
-            return 0
-        # Cards that did produce a notification get one final silent update.
         payload = dict(payload)
         payload["aps"] = dict(payload["aps"])
         payload["aps"].pop("sound", None)
         payload["aps"]["interruption-level"] = "passive"
         # Additive (deep_link precedent, ~payload builder above): a resolve
-        # push for a story that never reached urgent and never tripped a
+        # push for a story that never exceeded `quiet` and never tripped a
         # zone override is scoped to the event's lifetime -- the app removes
         # it from Notification Center at once. Always explicit, never
         # omitted: the app reads absent as "old sidecar" and falls back to
         # its 24 h sweep, while an explicit false means "user-chosen
         # critical story, keep indefinitely".
-        worth_keeping = card.peak_level == "urgent" or card.zone_override_hit
+        worth_keeping = peak_idx > quiet_idx or card.zone_override_hit
         payload["ephemeral"] = not worth_keeping
 
     has_sound = bool(payload.get("aps", {}).get("sound"))
@@ -485,6 +489,11 @@ async def send_card_mutation(
                 "push: card send failed device=%s card_key=%s mutation=%s error=%s",
                 device.device_id, card.card_key, mutation, result.error,
             )
+        store.record_card_send(
+            conn, apns_token=device.apns_token, card_key=card.card_key, mutation=mutation,
+            sent_at=now, ok=result.ok, error=result.error,
+        )
+        conn.commit()
         sent += 1
     logger.info(
         "push: card mutation=%s level=%s card_key=%s sound=%s devices=%d",

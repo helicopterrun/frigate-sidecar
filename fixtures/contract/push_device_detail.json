@@ -1,0 +1,17 @@
+{
+  "app_version": "1.0 (309)",
+  "environment": "prod",
+  "la_capable": true,
+  "last_received_at": 1785952624.304,
+  "last_send_error": null,
+  "last_send_error_at": null,
+  "last_sent_at": 1785952622.704,
+  "median_latency_s": 1.5999999046325684,
+  "p90_latency_s": 1.5999999046325684,
+  "received": 1,
+  "registered": true,
+  "registered_at": "2026-09-01T00:00:00Z",
+  "sent": 3,
+  "updated_at": "2026-09-17T17:00:00Z",
+  "window_days": 7.0
+}

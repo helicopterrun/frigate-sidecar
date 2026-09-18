@@ -10,5 +10,11 @@
   "mqtt_connected": true,
   "now": "2026-09-17T17:58:41Z",
   "paused_until": null,
-  "quiet_hours_active": false
+  "quiet_hours_active": false,
+  "relay": {
+    "last_error": null,
+    "last_error_at": null,
+    "last_ok_at": 1785952610.704,
+    "last_status_code": 200
+  }
 }

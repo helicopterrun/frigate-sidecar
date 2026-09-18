@@ -160,7 +160,19 @@ The `push:` config section:
   `/cameras` map is stored (default `config/floorplan`).
 
 Devices register themselves: install Elsinore, complete onboarding, and the
-phone appears in the device table with a **Test** button.
+phone appears in the device table with a **Test** button. Pressing it now
+sends a real card (`POST /v1/push/devices/{token}/test`, alerts-slice2 §D) —
+the notification service extension processes it exactly like a real alert
+and posts a delivery receipt back, so the button proves the whole round
+trip, not just that APNs accepted the request. It's rate-limited to one per
+device per 10 seconds.
+
+The app (and the extension) post delivery receipts to
+`POST /v1/push/receipts` right after handing a notification to the OS —
+`GET /v1/push/devices/{token}` surfaces the resulting send/receipt stats
+(sent, received, median/p90 latency) per device, and `GET /v1/push/status`'s
+`relay` block reports the sidecar's own view of relay health (last success,
+last error).
 
 ## If it goes wrong
 
