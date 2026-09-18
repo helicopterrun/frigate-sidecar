@@ -15,6 +15,7 @@ from frigate_sidecar import db
 from frigate_sidecar.config import FrigateSection, PushSection, Settings, SidecarSection
 from frigate_sidecar.push import receipts as receipts_store
 from frigate_sidecar.push import store
+from frigate_sidecar.push.store import epoch_to_iso
 from frigate_sidecar.push.transport import RELAY_HEALTH, reset_relay_health_for_tests
 from frigate_sidecar.server import create_app
 
@@ -192,10 +193,10 @@ def test_device_detail_stats(client: TestClient, sidecar_conn: Any) -> None:
     assert body["received"] == 1
     assert body["median_latency_s"] == pytest.approx(1.5)
     assert body["p90_latency_s"] == pytest.approx(1.5)
-    assert body["last_sent_at"] == now - 3.0
-    assert body["last_received_at"] == now - 8.5
+    assert body["last_sent_at"] == epoch_to_iso(now - 3.0)
+    assert body["last_received_at"] == epoch_to_iso(now - 8.5)
     assert body["last_send_error"] == "HTTP 500"
-    assert body["last_send_error_at"] == now - 3.0
+    assert body["last_send_error_at"] == epoch_to_iso(now - 3.0)
 
 
 def test_device_detail_stats_default_zero(client: TestClient) -> None:
@@ -227,7 +228,7 @@ def test_status_carries_relay_health(client: TestClient) -> None:
     RELAY_HEALTH.last_status_code = 200
     resp2 = client.get("/v1/push/status")
     relay2 = resp2.json()["relay"]
-    assert relay2["last_ok_at"] == 123.0
+    assert relay2["last_ok_at"] == "1970-01-01T00:02:03Z"
     assert relay2["last_status_code"] == 200
 
 
