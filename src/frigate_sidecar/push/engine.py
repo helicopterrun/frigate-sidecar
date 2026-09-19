@@ -21,6 +21,7 @@ import asyncio
 import logging
 import sqlite3
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -103,6 +104,16 @@ class PushEngine:
     # of sync with `config.py`. `None` (the default, e.g. in tests that build
     # a `PushEngine` directly) behaves exactly like `delivery_enabled=False`.
     push_config: PushSection | None = None
+
+    #: Encounters live hook (encounters/service.py's `EncounterService.
+    #: observe_review`, wired in server.py's lifespan). Called first, inside
+    #: its own try/except, on every review message -- including "end" --
+    #: before this method's own `msg_type == "end"` short-circuit runs, so a
+    #: review's finalization still reaches encounters even though push itself
+    #: has never done anything with it. An encounters failure must never
+    #: affect push, hence the isolated try/except rather than just letting it
+    #: propagate.
+    on_review: Callable[[ReviewEvent], None] | None = None
 
     _http: httpx.AsyncClient | None = None
     _last_gc: float = 0.0
@@ -277,6 +288,17 @@ class PushEngine:
         return await self.handle_event(event)
 
     async def handle_event(self, event: ReviewEvent) -> int:
+        if self.on_review is not None:
+            try:
+                self.on_review(event)
+            except Exception:
+                logger.exception("push: on_review hook failed for review %s", event.review_id)
+        if event.msg_type == "end":
+            # Review finalization -- never itself a push trigger (unchanged
+            # from when parse_review_message dropped "end" outright; it's
+            # parsed through now only so on_review above gets to see it).
+            return 0
+
         now = time.time()
         conn = self._conn()
         try:

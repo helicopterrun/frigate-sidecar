@@ -280,3 +280,45 @@ class MapTrackResponse(_Wire):
     aspect: float
     speed_ft_s: float | None
     distance_ft_range: list[float] | None
+
+
+# --------------------------------------------------------------------------
+# /v1/encounters, /v1/encounters/{id} (docs/encounters.md)
+# --------------------------------------------------------------------------
+
+
+class EncounterMember(_Wire):
+    atom_id: str
+    camera: str
+    start: float
+    end: float | None
+    severity: str
+    labels: list[str]
+    zones: list[str]
+    event_ids: list[str]
+    sub_labels: list[str]
+    link_reason: str
+    confidence: float
+
+
+class EncounterSummary(_Wire):
+    id: str
+    start: float
+    end: float | None
+    sealed: bool
+    cameras: list[str]
+    labels: list[str]
+    identities: list[str]
+    primary_event_id: str | None
+    peak_severity: str
+    atom_count: int
+
+
+class EncountersResponse(_Wire):
+    t: float
+    encounters: list[EncounterSummary]
+
+
+class EncounterResponse(_Wire):
+    encounter: EncounterSummary
+    members: list[EncounterMember]

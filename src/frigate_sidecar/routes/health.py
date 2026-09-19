@@ -285,6 +285,20 @@ async def healthz(request: Request) -> JSONResponse:
         else:
             checks["face_enrich"] = "starting"
 
+    if settings.encounters.enabled:
+        encounters_service = getattr(app.state, "encounters", None)
+        if encounters_service is not None:
+            enc_status = encounters_service.status()
+            checks["encounters"] = enc_status["state"]
+            if "last_reconcile" in enc_status:
+                checks["encounters_last_reconcile"] = enc_status["last_reconcile"]
+            if enc_status["state"] == "error":
+                ok = False
+        else:
+            checks["encounters"] = "starting"
+    else:
+        checks["encounters"] = "disabled"
+
     body: dict[str, Any] = {"status": "ok" if ok else "degraded", "checks": checks}
     if reason is not None:
         body["reason"] = reason

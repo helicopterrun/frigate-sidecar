@@ -26,7 +26,7 @@ class ReviewEvent:
     camera: str
     severity: str  # "alert" | "detection"
     labels: tuple[str, ...] = field(default_factory=tuple)
-    msg_type: str = "new"  # "new" | "update"
+    msg_type: str = "new"  # "new" | "update" | "end"
     # The Frigate *event* id this review item is about (from
     # `after.data.detections[0]`), distinct from `review_id` (`after.id`).
     # Falls back to `review_id` if Frigate ever sends a review with no
@@ -46,6 +46,10 @@ class ReviewEvent:
     audio: tuple[str, ...] = field(default_factory=tuple)  # `after.data.audio`
     sub_labels: tuple[str, ...] = field(default_factory=tuple)  # Phase 5
     start_time: float = 0.0  # `after.start_time`, the dwell origin
+    # `after.end_time` -- only ever set on a `type: "end"` message (Frigate
+    # leaves it null until the review item finalizes). encounters/service.py
+    # prefers this real end over the live-hook's own wall clock when present.
+    end_time: float | None = None
 
     def __post_init__(self) -> None:
         if not self.event_id:

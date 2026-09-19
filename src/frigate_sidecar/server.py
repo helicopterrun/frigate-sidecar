@@ -34,6 +34,7 @@ from frigate_sidecar.push.mqtt import MqttReviewSubscriber, compute_backoff
 from frigate_sidecar.push.transport import LogTransport, PushTransport, RelayTransport
 from frigate_sidecar.routes import analysis as analysis_routes
 from frigate_sidecar.routes import debug as debug_routes
+from frigate_sidecar.routes import encounters as encounters_routes
 from frigate_sidecar.routes import enrich as enrich_routes
 from frigate_sidecar.routes import face_captures as face_capture_routes
 from frigate_sidecar.routes import fps_budget as fps_budget_routes
@@ -331,6 +332,38 @@ async def _face_enrich_loop(app: FastAPI) -> None:
             logger.exception("face_enrich: cycle failed")
 
 
+async def _encounters_loop(app: FastAPI) -> None:
+    """Drive `EncounterService.reconcile` on a fixed cadence -- the "belt"
+    catching anything the live `on_review` hook missed or saw only
+    partially. Sync work (SQLite, no network) runs via `asyncio.to_thread`,
+    same shape as `_face_enrich_loop`.
+    """
+    settings: Settings = app.state.settings
+    service = app.state.encounters
+    interval = settings.encounters.reconcile_interval_s
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await asyncio.to_thread(service.reconcile)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("encounters: reconcile cycle failed")
+
+
+async def _encounters_worker_loop(app: FastAPI) -> None:
+    """Run `EncounterService.run_worker` -- the live-hook queue consumer.
+
+    A separate task from `_encounters_loop` on purpose: this one drains
+    `observe_review`'s queue continuously (not on a fixed cadence), doing
+    each review's sqlite work via `asyncio.to_thread` so a WAL busy-timeout
+    wait against the reconciler never blocks the event loop that also
+    serves MQTT and push delivery.
+    """
+    service = app.state.encounters
+    await service.run_worker()
+
+
 async def _delivery_resound_sweep_loop(app: FastAPI) -> None:
     """The urgent-only re-sound timer (design doc §3): an `urgent` card
     still unhandled after `delivery_urgent_resound_s` gets exactly one more
@@ -422,6 +455,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             else:
                 task = asyncio.create_task(_scrub_generation_loop(app))
 
+    encounters_task: asyncio.Task[None] | None = None
+    encounters_worker_task: asyncio.Task[None] | None = None
+    if settings.encounters.enabled:
+        from frigate_sidecar.encounters.adjacency import build_adjacency
+        from frigate_sidecar.encounters.service import EncounterService
+        from frigate_sidecar.zones import load_camera_zones
+
+        adjacency = build_adjacency(
+            load_camera_zones(settings.frigate.config_path),
+            extra=settings.encounters.adjacency,
+            removed=settings.encounters.not_adjacent,
+        )
+        app.state.encounters = EncounterService(settings, adjacency=adjacency)
+        encounters_task = asyncio.create_task(_encounters_loop(app))
+        encounters_worker_task = asyncio.create_task(_encounters_worker_loop(app))
+
     push_task: asyncio.Task[None] | None = None
     sweep_task: asyncio.Task[None] | None = None
     delivery_sweep_task: asyncio.Task[None] | None = None
@@ -466,6 +515,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             activity_dismissal_tail_s=settings.push.activity_dismissal_tail_s,
             activity_reap_after_s=settings.push.activity_reap_after_s,
             push_config=settings.push,
+            on_review=(
+                app.state.encounters.observe_review
+                if getattr(app.state, "encounters", None) is not None
+                else None
+            ),
         )
         app.state.push_engine = engine
         subscriber = MqttReviewSubscriber(
@@ -492,7 +546,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         for pending in (
-            task, probe_task, push_task, sweep_task, delivery_sweep_task, enrich_task
+            task,
+            probe_task,
+            push_task,
+            sweep_task,
+            delivery_sweep_task,
+            enrich_task,
+            encounters_task,
+            encounters_worker_task,
         ):
             if pending is not None:
                 pending.cancel()
@@ -600,6 +661,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(debug_routes.router)
     app.include_router(zone_hits_routes.router)
     app.include_router(triage_routes.router)
+    app.include_router(encounters_routes.router)
+    app.include_router(encounters_routes.v1_router)
     app.include_router(motion_routes.router)
     app.include_router(score_histogram_routes.router)
     app.include_router(fps_budget_routes.router)

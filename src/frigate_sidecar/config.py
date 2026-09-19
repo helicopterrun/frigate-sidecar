@@ -566,6 +566,70 @@ class ProxySection(BaseModel):
     )
 
 
+class EncountersSection(BaseModel):
+    """Encounters (docs/encounters.md): group Frigate review segments
+    ("atoms") into human-legible chains across cameras and time gaps --
+    "a raccoon worked its way from the alley to the shed" as one thing,
+    rather than three separate reviews. Overlay only: `event`/`reviewsegment`
+    in Frigate's own DB stay the source of truth and are only ever read.
+
+    Off by default. When on, the live MQTT review hook links as messages
+    arrive and a periodic reconciler backfills/repairs from `reviewsegment`
+    directly -- the reconciler is the "belt": anything the live hook missed
+    or saw only partially (or everything, on a fresh install / after
+    downtime) gets picked up there.
+    """
+
+    enabled: bool = False
+
+    # Reconciler cadence. Encounters are a browsing/triage aid, not a live
+    # alert path, so seconds of staleness is fine.
+    reconcile_interval_s: float = 30.0
+
+    # First-start backfill window over `reviewsegment`, when no watermark has
+    # been recorded yet. Later cycles look back only `max_duration_s` behind
+    # the watermark -- just enough to pick up a segment still updating.
+    backfill_lookback_s: float = 86400.0
+
+    # Max gap (seconds) between an encounter's last member end and a new
+    # atom's start, keyed by the new atom's label family (linker.family_of).
+    # "default" covers any label not in a named family (e.g. `package`).
+    # Identity (sub_label) matches get 3x their family's allowance.
+    gap_s: dict[str, float] = Field(
+        default_factory=lambda: {
+            "animal": 180.0,
+            "person": 90.0,
+            "vehicle": 45.0,
+            "default": 60.0,
+        }
+    )
+
+    # Hard cap on one encounter's total span (start of its first atom to the
+    # start of a candidate atom) -- keeps a slow-moving, endlessly-adjacent
+    # camera chain from growing into an unbounded "encounter" that covers the
+    # whole day.
+    max_duration_s: float = 1800.0
+
+    # How many of an encounter's most-recently-visited distinct cameras count
+    # as "nearby" for the same-camera/adjacency/companionship spatial checks.
+    recent_cameras: int = 2
+
+    # Minimum time (seconds) two atoms' spans must overlap to count as
+    # companions (e.g. a person and a dog seen together) even with no shared
+    # label family.
+    min_copresence_s: float = 3.0
+
+    # Extra camera-pair edges beyond what shared zone names already imply
+    # (each `[camera_a, camera_b]`), e.g. for a handoff Frigate's zone naming
+    # doesn't capture: `[["alley-wide", "shed"]]`.
+    adjacency: list[list[str]] = Field(default_factory=list)
+
+    # Camera-pair edges to remove even though the two cameras share a zone
+    # name -- for a coincidental name collision that isn't really the same
+    # ground. Config always wins over the zone-derived graph.
+    not_adjacent: list[list[str]] = Field(default_factory=list)
+
+
 class PushSection(BaseModel):
     """Push notifications (docs/push-notifications.md).
 
@@ -785,6 +849,7 @@ class Settings(BaseSettings):
     scrub: ScrubSection = Field(default_factory=ScrubSection)
     proxy: ProxySection = Field(default_factory=ProxySection)
     push: PushSection = Field(default_factory=PushSection)
+    encounters: EncountersSection = Field(default_factory=EncountersSection)
     log_level: str = "INFO"
 
     @model_validator(mode="after")
