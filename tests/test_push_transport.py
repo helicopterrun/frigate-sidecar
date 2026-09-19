@@ -78,18 +78,42 @@ async def test_relay_transport_situation_surfaces_a_dead_token():
 
 
 async def test_relay_transport_situation_reports_a_rejected_payload():
-    """The relay 422s an oversized or aps-less payload with a readable
-    reason; that reason has to reach the logs, not be swallowed."""
+    """The relay 422s a bad device token with a readable reason; that reason
+    has to reach the logs, not be swallowed. This 422 case is token-specific
+    (the relay's own hex/length validation), so it is a permanent,
+    never-retried rejection -- same as 410/400 -- and the caller prunes the
+    device rather than retrying it on every future send."""
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(422, json={"error": "payload too large (5000 > 4096)"})
+        return httpx.Response(422, json={"error": "device_token must be hex"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     relay = RelayTransport("https://relay.example.test", client=client)
     result = await relay.send_situation(
         _device(), payload={"aps": {}}, collapse_id="s:t"
     )
-    assert result.ok is False and result.unregistered is False
-    assert "payload too large" in (result.error or "")
+    assert result.ok is False and result.unregistered is True
+    # `error` is now the same terse "HTTP <code>" shape as the 410/400 path
+    # (same category, same handling) -- the full relay-provided reason still
+    # reaches the logs via the `logger.warning` call above.
+    assert result.error == "HTTP 422"
+
+
+async def test_relay_transport_situation_non_token_422_not_pruned():
+    """A 422 that names a payload/code bug -- not the device token -- must
+    NOT prune the device. Pruning here would delete every device on a single
+    sidecar bug (e.g. a bad `environment` value or an over-long field), which
+    is exactly the over-prune regression Fix A introduced and this test
+    locks out."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"error": "handle too long"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    relay = RelayTransport("https://relay.example.test", client=client)
+    result = await relay.send_situation(
+        _device(), payload={"aps": {}}, collapse_id="s:t"
+    )
+    assert result.ok is False
+    assert result.unregistered is False
 
 
 async def test_relay_transport_posts_minimal_payload():

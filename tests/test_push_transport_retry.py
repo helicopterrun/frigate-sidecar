@@ -127,10 +127,13 @@ async def test_liveactivity_update_never_retries(no_sleep: list[float]) -> None:
     assert no_sleep == []
 
 
-# -- 4. 400/410/422 never retry; existing unregistered/rejected mapping holds -
+# -- 4. 400/410/422 never retry, and all three are permanent (prune) --------
 
 
 @pytest.mark.parametrize(
+    # A non-JSON 422 body can't name a bad device_token, so it's the safe
+    # default of NOT unregistered -- unlike 400/410, which are always dead
+    # tokens. It still never retries (see assertions below).
     ("status", "expect_unregistered"), [(400, True), (410, True), (422, False)]
 )
 async def test_terminal_statuses_never_retry(

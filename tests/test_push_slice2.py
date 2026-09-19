@@ -211,6 +211,48 @@ def test_device_detail_stats_default_zero(client: TestClient) -> None:
     assert body["last_send_error"] is None
 
 
+def test_device_detail_relay_is_device_scoped(client: TestClient, sidecar_conn: Any) -> None:
+    """The device-detail `relay` block must reflect *this* device's own
+    sends, not the process-global `RELAY_HEALTH` singleton -- otherwise a
+    healthy device's Connection Doctor shows an unrelated device's failure
+    (the bug this test guards against)."""
+    import time as _time
+
+    other_token = "tok-other-device"
+    _register(client, environment="prod")
+    store.upsert_device(
+        sidecar_conn, apns_token=other_token, bundle_id="com.pondhouse.Elsinore",
+        environment="prod", min_severity="detection",
+    )
+    now = _time.time()
+
+    # This device (TOKEN) has only ever sent successfully.
+    store.record_card_send(
+        sidecar_conn, apns_token=TOKEN, card_key="doorbell:package:t1", mutation="create",
+        sent_at=now - 5.0,
+    )
+    # A *different* device's send failed -- and updates the global singleton.
+    store.record_card_send(
+        sidecar_conn, apns_token=other_token, card_key="doorbell:package:t2", mutation="create",
+        sent_at=now - 3.0, ok=False, error="HTTP 422: device_token must be hex",
+    )
+    RELAY_HEALTH.last_error = "HTTP 422: device_token must be hex"
+    RELAY_HEALTH.last_error_at = now - 3.0
+    RELAY_HEALTH.last_status_code = 422
+
+    resp = client.get(f"/v1/push/devices/{TOKEN}", params={"window_days": 90})
+    assert resp.status_code == 200
+    relay = resp.json()["relay"]
+    assert relay["last_error"] is None
+    assert relay["last_error_at"] is None
+    assert relay["last_ok_at"] == epoch_to_iso(now - 5.0)
+
+    other_resp = client.get(f"/v1/push/devices/{other_token}", params={"window_days": 90})
+    other_relay = other_resp.json()["relay"]
+    assert other_relay["last_error"] == "HTTP 422: device_token must be hex"
+    assert other_relay["last_ok_at"] is None
+
+
 # ---------------------------------------------------------------------------
 # §C: relay status
 # ---------------------------------------------------------------------------
