@@ -133,8 +133,8 @@ def reset_relay_health_for_tests() -> None:
 class TransportResult:
     ok: bool
     # True if the relay/APNs reported the token as permanently dead (410
-    # Unregistered or 400 BadDeviceToken, spec §5) -- the caller prunes the
-    # device row immediately rather than retrying.
+    # Unregistered, 400 BadDeviceToken, spec §5, or 422 payload-rejected) --
+    # the caller prunes the device row immediately rather than retrying.
     unregistered: bool = False
     error: str | None = None
     status_code: int | None = None
@@ -611,9 +611,12 @@ class RelayTransport:
                 RELAY_HEALTH.last_status_code = 200
                 return TransportResult(ok=True)
 
-            if resp.status_code in (410, 400):
-                # 410 Unregistered / 400 BadDeviceToken (spec §5): permanent,
-                # never retried -- the caller deletes the device row.
+            if resp.status_code in (410, 400, 422):
+                # 410 Unregistered / 400 BadDeviceToken (spec §5), or 422
+                # (relay rejected the payload shape -- never reached Apple,
+                # e.g. a token that fails the relay's hex/length validation):
+                # all permanent, never retried -- the caller deletes the
+                # device row.
                 self._record_breaker_outcome(failed=False)
                 logger.warning("push: relay %s body: %s", resp.status_code, resp.text[:500])
                 STATS.incr("relay.send.unregistered")
@@ -623,21 +626,6 @@ class RelayTransport:
                 return TransportResult(
                     ok=False, unregistered=True, error=f"HTTP {resp.status_code}",
                     status_code=resp.status_code,
-                )
-
-            if resp.status_code == 422:
-                # Relay rejected the payload shape -- never reached Apple.
-                self._record_breaker_outcome(failed=False)
-                logger.warning(
-                    "push: relay %s (rejected payload) body: %s",
-                    resp.status_code, resp.text[:500],
-                )
-                STATS.incr("relay.send.rejected")
-                RELAY_HEALTH.last_error = f"HTTP 422: {resp.text[:200]}"
-                RELAY_HEALTH.last_error_at = time.time()
-                RELAY_HEALTH.last_status_code = 422
-                return TransportResult(
-                    ok=False, error=f"HTTP 422: {resp.text[:200]}", status_code=422,
                 )
 
             if resp.status_code == 429:

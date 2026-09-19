@@ -824,6 +824,19 @@ async def get_device_detail(
             detail={"error": _ERR_DEVICE_NOT_FOUND, "message": "token not registered"},
         )
     device_row, stats = found
+    # Device-scoped relay signal (alerts-slice2 §C follow-up): derived from
+    # *this* device's own `push_card_sends` rows, not the process-global
+    # `RELAY_HEALTH` singleton -- that singleton is shared across every
+    # device, so a healthy device's doctor could otherwise show a failure
+    # that actually belonged to some other device's send. `last_status_code`
+    # isn't tracked per-send, so it stays null here (unlike the global
+    # `/status` "relay" block).
+    device_relay = {
+        "last_ok_at": stats.pop("last_send_ok_at", None),
+        "last_error": stats["last_send_error"],
+        "last_error_at": stats["last_send_error_at"],
+        "last_status_code": None,
+    }
     return {
         "registered": True,
         "environment": device_row["environment"],
@@ -831,6 +844,7 @@ async def get_device_detail(
         "registered_at": device_row["registered_at"],
         "updated_at": device_row["updated_at"],
         "la_capable": bool(device_row["la_capable"]),
+        "relay": device_relay,
         **stats,
     }
 

@@ -11,6 +11,12 @@
   "received": 1,
   "registered": true,
   "registered_at": "2026-09-01T00:00:00Z",
+  "relay": {
+    "last_error": null,
+    "last_error_at": null,
+    "last_ok_at": "2026-08-05T17:57:02Z",
+    "last_status_code": null
+  },
   "sent": 3,
   "updated_at": "2026-09-17T17:00:00Z",
   "window_days": 7.0

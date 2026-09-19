@@ -481,6 +481,13 @@ def device_stats(
     sent = int(sent_row["n"]) if sent_row else 0
     last_sent_at = sent_row["last"] if sent_row else None
 
+    ok_row = conn.execute(
+        "SELECT MAX(sent_at) AS last FROM push_card_sends "
+        "WHERE apns_token = ? AND ok = 1 AND sent_at >= ?",
+        (apns_token, since),
+    ).fetchone()
+    last_send_ok_at = ok_row["last"] if ok_row else None
+
     err_row = conn.execute(
         "SELECT error, sent_at FROM push_card_sends "
         "WHERE apns_token = ? AND ok = 0 AND sent_at >= ? "
@@ -515,6 +522,7 @@ def device_stats(
         "median_latency_s": median_latency_s,
         "p90_latency_s": p90_latency_s,
         "last_sent_at": epoch_to_iso(last_sent_at),
+        "last_send_ok_at": epoch_to_iso(last_send_ok_at),
         "last_received_at": epoch_to_iso(last_received_at),
         "last_send_error": last_send_error,
         "last_send_error_at": epoch_to_iso(last_send_error_at),

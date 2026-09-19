@@ -127,11 +127,11 @@ async def test_liveactivity_update_never_retries(no_sleep: list[float]) -> None:
     assert no_sleep == []
 
 
-# -- 4. 400/410/422 never retry; existing unregistered/rejected mapping holds -
+# -- 4. 400/410/422 never retry, and all three are permanent (prune) --------
 
 
 @pytest.mark.parametrize(
-    ("status", "expect_unregistered"), [(400, True), (410, True), (422, False)]
+    ("status", "expect_unregistered"), [(400, True), (410, True), (422, True)]
 )
 async def test_terminal_statuses_never_retry(
     no_sleep: list[float], status: int, expect_unregistered: bool

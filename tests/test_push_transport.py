@@ -79,7 +79,11 @@ async def test_relay_transport_situation_surfaces_a_dead_token():
 
 async def test_relay_transport_situation_reports_a_rejected_payload():
     """The relay 422s an oversized or aps-less payload with a readable
-    reason; that reason has to reach the logs, not be swallowed."""
+    reason; that reason has to reach the logs, not be swallowed. A 422 is
+    also a permanent, never-retried rejection -- same as 410/400 -- because
+    it means the relay refused the payload outright (e.g. a device token
+    that fails the relay's own hex/length validation), so the caller prunes
+    the device rather than retrying it on every future send."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(422, json={"error": "payload too large (5000 > 4096)"})
 
@@ -88,8 +92,11 @@ async def test_relay_transport_situation_reports_a_rejected_payload():
     result = await relay.send_situation(
         _device(), payload={"aps": {}}, collapse_id="s:t"
     )
-    assert result.ok is False and result.unregistered is False
-    assert "payload too large" in (result.error or "")
+    assert result.ok is False and result.unregistered is True
+    # `error` is now the same terse "HTTP <code>" shape as the 410/400 path
+    # (same category, same handling) -- the full relay-provided reason still
+    # reaches the logs via the `logger.warning` call above.
+    assert result.error == "HTTP 422"
 
 
 async def test_relay_transport_posts_minimal_payload():
