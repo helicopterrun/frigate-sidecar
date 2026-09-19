@@ -107,15 +107,24 @@ def _recent_cameras(enc: OpenEncounter, cfg: LinkerConfig) -> list[str]:
     return enc.cameras[-cfg.recent_cameras :]
 
 
-def _span_overlap_s(atom: Atom, enc: OpenEncounter) -> float:
-    atom_end = atom.end_time if atom.end_time is not None else atom.start_time
+def _effective_end(atom: Atom, now: float) -> float:
+    """An atom with `end_time is None` is still active -- its review segment
+    hasn't closed yet -- so it extends to `now`, not back to its own start.
+    Substituting `start_time` here (the original bug) made every live
+    "new"/"update" atom look instantaneous: a raccoon open on one camera for
+    4 minutes would show a 240s gap to the next camera instead of 0."""
+    return atom.end_time if atom.end_time is not None else now
+
+
+def _span_overlap_s(atom: Atom, enc: OpenEncounter, now: float) -> float:
+    atom_end = _effective_end(atom, now)
     lo = max(atom.start_time, enc.start_time)
     hi = min(atom_end, enc.last_end)
     return hi - lo
 
 
 def _candidate_decision(
-    atom: Atom, enc: OpenEncounter, adjacency: Adjacency, cfg: LinkerConfig
+    atom: Atom, enc: OpenEncounter, adjacency: Adjacency, cfg: LinkerConfig, now: float
 ) -> LinkDecision | None:
     """Best decision linking `atom` onto `enc`, or None if `enc` isn't a
     candidate at all (hard-rejected or no rule matches)."""
@@ -147,7 +156,7 @@ def _candidate_decision(
 
     # -- Companionship: no shared family required. --
     recent = _recent_cameras(enc, cfg)
-    if _span_overlap_s(atom, enc) >= cfg.min_copresence_s and (
+    if _span_overlap_s(atom, enc, now) >= cfg.min_copresence_s and (
         atom.camera in recent or any(adjacency.adjacent(atom.camera, cam) for cam in recent)
     ):
         companion = LinkDecision(enc.encounter_id, "companion", 0.7)
@@ -163,6 +172,7 @@ def decide(
     adjacency: Adjacency,
     cfg: LinkerConfig,
     *,
+    now: float,
     pinned_to: str | None = None,
     split_from: frozenset[str] = frozenset(),
 ) -> LinkDecision:
@@ -175,7 +185,7 @@ def decide(
 
     decisions: list[tuple[LinkDecision, float]] = []
     for enc in candidates:
-        decision = _candidate_decision(atom, enc, adjacency, cfg)
+        decision = _candidate_decision(atom, enc, adjacency, cfg, now)
         if decision is not None:
             gap = atom.start_time - enc.last_end
             decisions.append((decision, abs(gap)))
@@ -187,10 +197,9 @@ def decide(
     return decisions[0][0]
 
 
-def apply(enc: OpenEncounter, atom: Atom) -> None:
+def apply(enc: OpenEncounter, atom: Atom, now: float) -> None:
     """Mutate `enc` in place to fold `atom` into it."""
-    atom_end = atom.end_time if atom.end_time is not None else atom.start_time
-    enc.last_end = max(enc.last_end, atom_end)
+    enc.last_end = max(enc.last_end, _effective_end(atom, now))
     if atom.camera not in enc.cameras:
         enc.cameras.append(atom.camera)
     enc.labels |= set(atom.labels)
@@ -207,10 +216,18 @@ def fold(
     adjacency: Adjacency,
     cfg: LinkerConfig,
     *,
+    now: float,
     pinned: Mapping[str, str] | None = None,
     split: Mapping[str, frozenset[str]] | None = None,
 ) -> list[OpenEncounter]:
     """Run `decide` + `apply` over `atoms` sorted by `start_time`.
+
+    `now` is the reference "current time" used to treat any still-open atom
+    (`end_time is None`) as active up to that moment rather than
+    instantaneous at its own start -- callers processing historical atoms
+    (e.g. a fixed-point idempotency test) should pass a `now` at or after the
+    latest atom's start/end, same as a live caller would pass the real
+    current time.
 
     `pinned`/`split` map an atom id to a forced encounter id / a set of
     encounter ids that atom must never join, mirroring the `encounter_decisions`
@@ -225,6 +242,7 @@ def fold(
             open_encounters,
             adjacency,
             cfg,
+            now=now,
             pinned_to=pinned.get(atom.atom_id),
             split_from=split.get(atom.atom_id, frozenset()),
         )
@@ -232,7 +250,7 @@ def fold(
             enc = OpenEncounter(
                 encounter_id=uuid.uuid4().hex,
                 start_time=atom.start_time,
-                last_end=atom.end_time if atom.end_time is not None else atom.start_time,
+                last_end=_effective_end(atom, now),
                 cameras=[atom.camera],
                 labels=set(atom.labels),
                 identities=set(atom.sub_labels),
@@ -243,5 +261,5 @@ def fold(
             open_encounters.append(enc)
         else:
             enc = next(e for e in open_encounters if e.encounter_id == decision.encounter_id)
-            apply(enc, atom)
+            apply(enc, atom, now)
     return open_encounters

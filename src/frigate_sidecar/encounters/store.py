@@ -25,14 +25,17 @@ def _loads_list(value: Any) -> list[str]:
     return [str(x) for x in parsed] if isinstance(parsed, list) else []
 
 
-def _row_to_open(conn: sqlite3.Connection, row: sqlite3.Row) -> OpenEncounter:
+def _row_to_open(conn: sqlite3.Connection, row: sqlite3.Row, now: float) -> OpenEncounter:
     member_rows = conn.execute(
         "SELECT atom_id, start_time, end_time FROM encounter_members "
         "WHERE encounter_id = ? ORDER BY start_time, joined_at",
         (row["id"],),
     ).fetchall()
     atom_ids = [m["atom_id"] for m in member_rows]
-    ends = [m["end_time"] if m["end_time"] is not None else m["start_time"] for m in member_rows]
+    # A member with end_time IS NULL is STILL ACTIVE -- its review segment
+    # hasn't closed -- so it extends to `now`, not back to its own start
+    # (linker._effective_end has the same rule and the same rationale).
+    ends = [m["end_time"] if m["end_time"] is not None else now for m in member_rows]
     last_end = max(ends) if ends else row["start_time"]
     return OpenEncounter(
         encounter_id=row["id"],
@@ -47,16 +50,16 @@ def _row_to_open(conn: sqlite3.Connection, row: sqlite3.Row) -> OpenEncounter:
     )
 
 
-def load_open(conn: sqlite3.Connection) -> list[OpenEncounter]:
+def load_open(conn: sqlite3.Connection, now: float) -> list[OpenEncounter]:
     """Every unsealed encounter, as the in-memory view `decide`/`apply` use."""
     rows = conn.execute(
         "SELECT id, start_time, cameras_json, labels_json, identities_json, "
         "zones_json, peak_severity FROM encounters WHERE sealed_at IS NULL"
     ).fetchall()
-    return [_row_to_open(conn, row) for row in rows]
+    return [_row_to_open(conn, row, now) for row in rows]
 
 
-def load_one(conn: sqlite3.Connection, encounter_id: str) -> OpenEncounter | None:
+def load_one(conn: sqlite3.Connection, encounter_id: str, now: float) -> OpenEncounter | None:
     """Refresh one encounter's in-memory view after `upsert_atom` -- used by
     the reconciler to keep its working set current without a full reload."""
     row = conn.execute(
@@ -64,7 +67,7 @@ def load_one(conn: sqlite3.Connection, encounter_id: str) -> OpenEncounter | Non
         "zones_json, peak_severity FROM encounters WHERE id = ?",
         (encounter_id,),
     ).fetchone()
-    return _row_to_open(conn, row) if row is not None else None
+    return _row_to_open(conn, row, now) if row is not None else None
 
 
 def _member_row(conn: sqlite3.Connection, atom_id: str) -> sqlite3.Row | None:
@@ -247,14 +250,23 @@ def seal_stale(conn: sqlite3.Connection, now: float, cfg: LinkerConfig) -> int:
     "Quiet" = no member end/start seen for more than 1.5x the largest
     configured gap; a live encounter well past `max_duration_s` is sealed
     outright even if it's still active, matching the linker's own hard cap.
+
+    A member with `end_time IS NULL` is still active, so it contributes
+    `now` (not its own `start_time`) to `last_end` -- an encounter with a
+    genuinely open member is therefore never "quiet" (its `now - last_end`
+    is ~0) and is never sealed by that rule. It CAN still be sealed by the
+    `max_duration_s` cap even while open, matching the linker's own hard
+    reject on an atom whose start is more than `max_duration_s` past the
+    encounter's start.
     """
     largest_gap = max(cfg.gap_s.values()) if cfg.gap_s else 60.0
     threshold = 1.5 * largest_gap
     rows = conn.execute(
         "SELECT e.id AS id, e.start_time AS start_time, "
-        "MAX(COALESCE(m.end_time, m.start_time)) AS last_end "
+        "MAX(COALESCE(m.end_time, ?)) AS last_end "
         "FROM encounters e JOIN encounter_members m ON m.encounter_id = e.id "
-        "WHERE e.sealed_at IS NULL GROUP BY e.id"
+        "WHERE e.sealed_at IS NULL GROUP BY e.id",
+        (now,),
     ).fetchall()
     sealed = 0
     for row in rows:

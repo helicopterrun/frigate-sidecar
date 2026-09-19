@@ -120,7 +120,7 @@ def test_seal_stale_seals_quiet_encounters(sidecar_db_path: Path) -> None:
         assert row is not None
         assert row["sealed_at"] is not None
         # sealed encounters are not returned by load_open
-        assert enc_id not in {e.encounter_id for e in store.load_open(conn)}
+        assert enc_id not in {e.encounter_id for e in store.load_open(conn, now)}
     finally:
         conn.close()
 
@@ -137,7 +137,60 @@ def test_seal_stale_leaves_fresh_encounters_open(sidecar_db_path: Path) -> None:
         )
         sealed = store.seal_stale(conn, now, CFG)
         assert sealed == 0
-        assert enc_id in {e.encounter_id for e in store.load_open(conn)}
+        assert enc_id in {e.encounter_id for e in store.load_open(conn, now)}
+    finally:
+        conn.close()
+
+
+def test_seal_stale_never_seals_an_open_member_below_max_duration(
+    sidecar_db_path: Path,
+) -> None:
+    """A member with end_time IS NULL is still active. Before the fix,
+    seal_stale's `COALESCE(m.end_time, m.start_time)` treated it as having
+    ended at its own start -- so an encounter whose only member started 500s
+    ago (well under max_duration_s=1800) but never got an "end" message
+    (still genuinely live) looked "quiet" for 500s -- past the 270s
+    (1.5x the largest 180s gap) staleness threshold -- and got sealed out
+    from under the linker. It must stay open as long as its span hasn't hit
+    max_duration_s."""
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        enc_id = store.upsert_atom(
+            conn,
+            _atom("a1", start=now - 500, end_time=None),  # still open, no end message
+            LinkDecision(None, "new", 1.0),
+            now - 500,
+        )
+        sealed = store.seal_stale(conn, now, CFG)
+        assert sealed == 0
+        row = store.get(conn, enc_id)
+        assert row is not None
+        assert row["sealed_at"] is None
+        assert enc_id in {e.encounter_id for e in store.load_open(conn, now)}
+    finally:
+        conn.close()
+
+
+def test_seal_stale_still_seals_an_open_member_past_max_duration(
+    sidecar_db_path: Path,
+) -> None:
+    """An open member is not exempt from the hard `max_duration_s` cap --
+    only from the "gone quiet" rule."""
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        enc_id = store.upsert_atom(
+            conn,
+            _atom("a1", start=now - CFG.max_duration_s - 100, end_time=None),
+            LinkDecision(None, "new", 1.0),
+            now - CFG.max_duration_s - 100,
+        )
+        sealed = store.seal_stale(conn, now, CFG)
+        assert sealed == 1
+        row = store.get(conn, enc_id)
+        assert row is not None
+        assert row["sealed_at"] is not None
     finally:
         conn.close()
 
