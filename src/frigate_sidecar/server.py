@@ -351,6 +351,19 @@ async def _encounters_loop(app: FastAPI) -> None:
             logger.exception("encounters: reconcile cycle failed")
 
 
+async def _encounters_worker_loop(app: FastAPI) -> None:
+    """Run `EncounterService.run_worker` -- the live-hook queue consumer.
+
+    A separate task from `_encounters_loop` on purpose: this one drains
+    `observe_review`'s queue continuously (not on a fixed cadence), doing
+    each review's sqlite work via `asyncio.to_thread` so a WAL busy-timeout
+    wait against the reconciler never blocks the event loop that also
+    serves MQTT and push delivery.
+    """
+    service = app.state.encounters
+    await service.run_worker()
+
+
 async def _delivery_resound_sweep_loop(app: FastAPI) -> None:
     """The urgent-only re-sound timer (design doc §3): an `urgent` card
     still unhandled after `delivery_urgent_resound_s` gets exactly one more
@@ -443,6 +456,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 task = asyncio.create_task(_scrub_generation_loop(app))
 
     encounters_task: asyncio.Task[None] | None = None
+    encounters_worker_task: asyncio.Task[None] | None = None
     if settings.encounters.enabled:
         from frigate_sidecar.encounters.adjacency import build_adjacency
         from frigate_sidecar.encounters.service import EncounterService
@@ -455,6 +469,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.encounters = EncounterService(settings, adjacency=adjacency)
         encounters_task = asyncio.create_task(_encounters_loop(app))
+        encounters_worker_task = asyncio.create_task(_encounters_worker_loop(app))
 
     push_task: asyncio.Task[None] | None = None
     sweep_task: asyncio.Task[None] | None = None
@@ -538,6 +553,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             delivery_sweep_task,
             enrich_task,
             encounters_task,
+            encounters_worker_task,
         ):
             if pending is not None:
                 pending.cancel()

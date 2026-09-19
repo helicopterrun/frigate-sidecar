@@ -6,17 +6,17 @@ from frigate_sidecar.push.models import Device, ReviewEvent
 
 def _review_payload(
     *, msg_type="new", severity="alert", camera="doorbell", review_id="r1",
-    objects=("person",), detections=("1785123902.717381-2joc0p",),
+    objects=("person",), detections=("1785123902.717381-2joc0p",), end_time=None,
 ):
-    return {
-        "type": msg_type,
-        "after": {
-            "id": review_id,
-            "camera": camera,
-            "severity": severity,
-            "data": {"objects": list(objects), "detections": list(detections), "zones": []},
-        },
+    after = {
+        "id": review_id,
+        "camera": camera,
+        "severity": severity,
+        "data": {"objects": list(objects), "detections": list(detections), "zones": []},
     }
+    if end_time is not None:
+        after["end_time"] = end_time
+    return {"type": msg_type, "after": after}
 
 
 def test_parse_new_alert():
@@ -44,6 +44,18 @@ def test_parse_end_is_parsed_but_not_a_push_trigger():
     event = parse_review_message(_review_payload(msg_type="end"))
     assert event is not None
     assert event.msg_type == "end"
+
+
+def test_parse_end_populates_end_time():
+    event = parse_review_message(_review_payload(msg_type="end", end_time=1785123999.5))
+    assert event is not None
+    assert event.end_time == 1785123999.5
+
+
+def test_parse_new_leaves_end_time_none():
+    event = parse_review_message(_review_payload())
+    assert event is not None
+    assert event.end_time is None
 
 
 def test_parse_missing_severity_dropped():

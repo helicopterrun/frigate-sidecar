@@ -68,6 +68,13 @@ def parse_review_message(payload: dict[str, Any]) -> ReviewEvent | None:
     except (TypeError, ValueError):
         start_time = 0.0
 
+    end_time: float | None
+    raw_end = after.get("end_time")
+    try:
+        end_time = float(raw_end) if raw_end is not None else None
+    except (TypeError, ValueError):
+        end_time = None
+
     return ReviewEvent(
         review_id=str(review_id),
         camera=str(camera),
@@ -80,6 +87,7 @@ def parse_review_message(payload: dict[str, Any]) -> ReviewEvent | None:
         audio=_strings(data.get("audio")),
         sub_labels=_strings(data.get("sub_labels")),
         start_time=start_time,
+        end_time=end_time,
     )
 
 

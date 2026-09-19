@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import time
@@ -132,13 +133,15 @@ def test_reconcile_over_reviewsegment(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_live_then_reconcile_agree_no_duplicates(tmp_path: Path) -> None:
+async def test_live_then_reconcile_agree_no_duplicates(tmp_path: Path) -> None:
     frigate_db = _reviewsegment_db(tmp_path)
     now = time.time()
     settings = _settings(tmp_path, frigate_db)
     service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
 
-    # Live: a "new" then an "end" for the same review.
+    # Live: a "new" then an "end" for the same review. observe_review only
+    # enqueues (non-blocking, off the event loop) -- process_pending drains
+    # the queue synchronously for the test, same work run_worker would do.
     ev_new = ReviewEvent(
         review_id="r1",
         camera="alley-wide",
@@ -157,14 +160,16 @@ def test_live_then_reconcile_agree_no_duplicates(tmp_path: Path) -> None:
         msg_type="end",
         track_ids=("ev1",),
         start_time=now - 100,
+        end_time=now - 97.0,  # Frigate's real end_time -- preferred over wall clock
     )
     service.observe_review(ev_end)
+    await service.process_pending()
 
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:
         row = conn.execute("SELECT * FROM encounter_members WHERE atom_id = 'r1'").fetchone()
         assert row is not None
-        assert row["end_time"] == now  # set by the "end" hook
+        assert row["end_time"] == now - 97.0  # Frigate's end_time, not the wall clock
 
         n = conn.execute("SELECT COUNT(*) AS n FROM encounter_members").fetchone()["n"]
         assert n == 1
@@ -197,7 +202,49 @@ def test_live_then_reconcile_agree_no_duplicates(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_replay_capture_charger_loiter_produces_sane_grouping(tmp_path: Path) -> None:
+async def test_observe_review_does_not_touch_sqlite_synchronously(tmp_path: Path) -> None:
+    """`observe_review` must be a non-blocking enqueue only -- no sqlite
+    connection opened on the caller's thread/loop. Nothing is linked until
+    something actually drains the queue (`process_pending` here, `run_worker`
+    in the running app)."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()))
+
+    ev = ReviewEvent(review_id="r1", camera="alley-wide", severity="alert", labels=("person",))
+    service.observe_review(ev)
+
+    # The sidecar DB file shouldn't even exist yet -- open_sidecar's
+    # CREATE-schema-on-first-open hasn't run, because nothing has opened a
+    # connection at all.
+    assert not settings.sidecar.db_path.exists()
+
+    await service.process_pending()
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        n = conn.execute("SELECT COUNT(*) AS n FROM encounter_members").fetchone()["n"]
+        assert n == 1
+    finally:
+        conn.close()
+
+
+async def test_observe_review_drops_and_logs_once_when_queue_full(tmp_path: Path) -> None:
+    frigate_db = _reviewsegment_db(tmp_path)
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()))
+    # Shrink the queue after construction so the test doesn't need 1000 events.
+    service._queue = asyncio.Queue(maxsize=2)
+
+    for i in range(5):
+        service.observe_review(
+            ReviewEvent(review_id=f"r{i}", camera="alley-wide", severity="alert")
+        )
+
+    assert service._queue.qsize() == 2  # first two accepted, rest dropped
+    assert service._queue_drop_logged is True
+
+
+async def test_replay_capture_charger_loiter_produces_sane_grouping(tmp_path: Path) -> None:
     frigate_db = _reviewsegment_db(tmp_path)
     settings = _settings(tmp_path, frigate_db)
     service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()))
@@ -211,6 +258,7 @@ def test_replay_capture_charger_loiter_produces_sane_grouping(tmp_path: Path) ->
             event = parse_review_message(msg["payload"])
             if event is not None:
                 service.observe_review(event)
+    await service.process_pending()
 
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:
@@ -241,8 +289,6 @@ def test_observe_review_exception_does_not_propagate_through_handle_event(
         on_review=service.observe_review,
     )
     engine.push_config = PushSection(delivery_enabled=True)
-
-    import asyncio
 
     event = ReviewEvent(review_id="r1", camera="doorbell", severity="alert", labels=("person",))
     # Must not raise, even though the hook always blows up.

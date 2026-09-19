@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -20,6 +21,11 @@ from frigate_sidecar.encounters.linker import Atom, LinkerConfig, apply, decide
 from frigate_sidecar.push.models import ReviewEvent
 
 logger = logging.getLogger(__name__)
+
+#: Bound on the live-hook queue (see `EncounterService.observe_review`). Sized
+#: generously above any plausible MQTT review burst -- the reconciler is the
+#: safety net if it's ever exceeded, so dropping past this point is fine.
+_QUEUE_MAXSIZE = 1000
 
 
 @dataclass(frozen=True)
@@ -76,6 +82,11 @@ class EncounterService:
         self._last_reconcile: ReconcileStats | None = None
         self._last_reconcile_at: float | None = None
         self._last_error: str | None = None
+        # Live-hook decoupling (see `observe_review`/`run_worker`): sqlite
+        # writes never happen on the caller's thread/loop, only inside the
+        # worker (via `asyncio.to_thread`) or `reconcile`.
+        self._queue: asyncio.Queue[ReviewEvent] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
+        self._queue_drop_logged = False
 
     def _conn(self) -> sqlite3.Connection:
         return db.open_sidecar(self.settings.sidecar.db_path)
@@ -89,10 +100,41 @@ class EncounterService:
         return pinned_to, split_from
 
     def observe_review(self, ev: ReviewEvent) -> None:
-        """LIVE hook off `PushEngine.handle_event` -- never raises."""
+        """LIVE hook off `PushEngine.handle_event` -- never raises, never
+        blocks. Only enqueues; `run_worker` (or, in tests, `process_pending`)
+        does the actual sqlite linking work off the event loop.
+
+        `PushEngine.handle_event` calls this synchronously, unawaited, right
+        on the asyncio event loop that also serves MQTT and push delivery --
+        opening a sqlite connection here would risk a `busy_timeout` wait
+        (up to 3s) stalling that whole loop whenever the reconciler happens
+        to be mid-write against the same WAL file.
+        """
+        try:
+            self._queue.put_nowait(ev)
+        except asyncio.QueueFull:
+            if not self._queue_drop_logged:
+                logger.warning(
+                    "encounters: live-hook queue full (%d) -- dropping review "
+                    "events until it drains; the reconciler will catch up",
+                    self._queue.maxsize,
+                )
+                self._queue_drop_logged = True
+        except Exception:  # noqa: BLE001 -- an encounters failure must never affect push
+            logger.exception("encounters: observe_review failed to enqueue review %s", ev.review_id)
+
+    def _link_review(self, ev: ReviewEvent) -> None:
+        """The actual (sync, sqlite-touching) linking work for one live
+        review message -- run via `asyncio.to_thread` from `run_worker`/
+        `process_pending`, never directly on the event loop."""
         try:
             now = self._now()
-            end_time = now if ev.msg_type == "end" else None
+            if ev.msg_type == "end":
+                # Prefer Frigate's own end_time; fall back to wall clock only
+                # if Frigate somehow sent none.
+                end_time = ev.end_time if ev.end_time is not None else now
+            else:
+                end_time = None
             atom = Atom(
                 atom_id=ev.review_id,
                 camera=ev.camera,
@@ -107,12 +149,13 @@ class EncounterService:
             conn = self._conn()
             try:
                 pinned_to, split_from = self._pin_split(conn, atom.atom_id)
-                open_encounters = store.load_open(conn)
+                open_encounters = store.load_open(conn, now)
                 decision = decide(
                     atom,
                     open_encounters,
                     self.adjacency,
                     self._cfg,
+                    now=now,
                     pinned_to=pinned_to,
                     split_from=split_from,
                 )
@@ -120,7 +163,30 @@ class EncounterService:
             finally:
                 conn.close()
         except Exception:  # noqa: BLE001 -- an encounters failure must never affect push
-            logger.exception("encounters: observe_review failed for review %s", ev.review_id)
+            logger.exception("encounters: linking failed for review %s", ev.review_id)
+
+    async def run_worker(self) -> None:
+        """Consume `observe_review`'s queue forever, one review at a time (in
+        arrival order), doing the sqlite work via `asyncio.to_thread` so the
+        event loop is never blocked on it. Started as its own task from the
+        server lifespan; cancelled on shutdown."""
+        while True:
+            ev = await self._queue.get()
+            try:
+                await asyncio.to_thread(self._link_review, ev)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("encounters: link worker failed for review %s", ev.review_id)
+
+    async def process_pending(self) -> None:
+        """Drain whatever's currently queued, synchronously from the caller's
+        point of view (each item still runs via `asyncio.to_thread`). Test
+        helper -- `run_worker` is what actually services the queue in the
+        running app."""
+        while not self._queue.empty():
+            ev = self._queue.get_nowait()
+            await asyncio.to_thread(self._link_review, ev)
 
     def _atom_from_review_row(self, row: sqlite3.Row) -> Atom:
         camera = str(row["camera"])
@@ -167,7 +233,7 @@ class EncounterService:
                 (self._atom_from_review_row(row) for row in rows), key=lambda a: a.start_time
             )
 
-            open_encounters = store.load_open(sidecar_conn)
+            open_encounters = store.load_open(sidecar_conn, now)
             by_id = {e.encounter_id: e for e in open_encounters}
             new_count = 0
             updated_count = 0
@@ -181,14 +247,15 @@ class EncounterService:
                     list(by_id.values()),
                     self.adjacency,
                     self._cfg,
+                    now=now,
                     pinned_to=pinned_to,
                     split_from=split_from,
                 )
                 encounter_id = store.upsert_atom(sidecar_conn, atom, decision, now)
                 if encounter_id in by_id:
-                    apply(by_id[encounter_id], atom)
+                    apply(by_id[encounter_id], atom, now)
                 else:
-                    refreshed = store.load_one(sidecar_conn, encounter_id)
+                    refreshed = store.load_one(sidecar_conn, encounter_id, now)
                     if refreshed is not None:
                         by_id[encounter_id] = refreshed
                 if existing is None:
