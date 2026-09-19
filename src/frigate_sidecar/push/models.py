@@ -26,7 +26,7 @@ class ReviewEvent:
     camera: str
     severity: str  # "alert" | "detection"
     labels: tuple[str, ...] = field(default_factory=tuple)
-    msg_type: str = "new"  # "new" | "update"
+    msg_type: str = "new"  # "new" | "update" | "end"
     # The Frigate *event* id this review item is about (from
     # `after.data.detections[0]`), distinct from `review_id` (`after.id`).
     # Falls back to `review_id` if Frigate ever sends a review with no

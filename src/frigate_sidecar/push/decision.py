@@ -26,14 +26,21 @@ _SEVERITY_RANK = {name: rank for rank, name in enumerate(SEVERITIES)}
 def parse_review_message(payload: dict[str, Any]) -> ReviewEvent | None:
     """Parse one `frigate/reviews` message.
 
-    Fires on `type in ("new", "update")` with `after.severity == "alert"` or
-    `"detection"`; `type == "end"` finalizes a review item and is not itself
-    pushed (spec's "Architecture at a glance"). Returns `None` for anything
-    not actionable rather than raising -- a malformed or unrecognised message
-    should be dropped, not crash the subscriber loop.
+    Fires on `type in ("new", "update", "end")` with `after.severity ==
+    "alert"` or `"detection"`. `type == "end"` finalizes a review item and is
+    NOT itself pushed (spec's "Architecture at a glance") -- `PushEngine.
+    handle_event` short-circuits on it before any push logic runs, exactly as
+    it did back when this function dropped "end" messages outright. It is
+    parsed through now (rather than returning None) so non-push consumers of
+    `handle_event` -- namely `encounters.service.EncounterService.
+    observe_review`, wired as the engine's `on_review` hook -- see it too;
+    `msg_type=="end"` is how an encounter atom's `end_time` gets filled in
+    from the live stream. Returns `None` for anything not actionable rather
+    than raising -- a malformed or unrecognised message should be dropped,
+    not crash the subscriber loop.
     """
     msg_type = payload.get("type")
-    if msg_type not in ("new", "update"):
+    if msg_type not in ("new", "update", "end"):
         return None
 
     after = payload.get("after") or {}

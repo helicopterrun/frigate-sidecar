@@ -35,8 +35,15 @@ def test_parse_update_is_actionable():
     assert event.msg_type == "update"
 
 
-def test_parse_end_is_not_actionable():
-    assert parse_review_message(_review_payload(msg_type="end")) is None
+def test_parse_end_is_parsed_but_not_a_push_trigger():
+    """`end` is parsed through (encounters/service.py's observe_review, wired
+    as PushEngine.on_review, needs it to fill in an atom's end_time) -- but
+    it still finalizes a review rather than being pushed: PushEngine.
+    handle_event short-circuits on msg_type == "end" before any push logic
+    runs, so nothing downstream of parse_review_message changes behavior."""
+    event = parse_review_message(_review_payload(msg_type="end"))
+    assert event is not None
+    assert event.msg_type == "end"
 
 
 def test_parse_missing_severity_dropped():
