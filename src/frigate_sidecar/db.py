@@ -516,6 +516,55 @@ CREATE TABLE IF NOT EXISTS push_silences (
     applied   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_push_silences_ts ON push_silences(ts);
+
+-- Encounters (docs/encounters.md): an overlay grouping Frigate review
+-- segments ("atoms") that a person would describe as one continuous thing
+-- happening, across cameras and time gaps. `event`/`reviewsegment` in
+-- Frigate's own DB stay the sole source of truth -- these tables are
+-- read-mostly derived state, rebuildable from them at any time.
+CREATE TABLE IF NOT EXISTS encounters (
+    id               TEXT PRIMARY KEY,           -- uuid4 hex
+    start_time       REAL NOT NULL,
+    end_time         REAL,                       -- max member end, NULL while any member open
+    sealed_at        REAL,                       -- NULL = open, candidate for linking
+    cameras_json     TEXT NOT NULL DEFAULT '[]', -- ordered distinct
+    labels_json      TEXT NOT NULL DEFAULT '[]',
+    identities_json  TEXT NOT NULL DEFAULT '[]', -- sub_labels seen
+    zones_json       TEXT NOT NULL DEFAULT '[]',
+    primary_event_id TEXT,                       -- first alert-severity member's event id
+                                                   -- (else the first member's)
+    peak_severity    TEXT NOT NULL DEFAULT 'detection',
+    atom_count       INTEGER NOT NULL DEFAULT 0,
+    updated_at       REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_encounters_start ON encounters(start_time);
+CREATE INDEX IF NOT EXISTS idx_encounters_open ON encounters(sealed_at) WHERE sealed_at IS NULL;
+CREATE TABLE IF NOT EXISTS encounter_members (
+    atom_id         TEXT PRIMARY KEY,            -- Frigate review id
+    encounter_id    TEXT NOT NULL,
+    camera          TEXT NOT NULL,
+    start_time      REAL NOT NULL,
+    end_time        REAL,
+    severity        TEXT NOT NULL,
+    labels_json     TEXT NOT NULL DEFAULT '[]',
+    zones_json      TEXT NOT NULL DEFAULT '[]',
+    event_ids_json  TEXT NOT NULL DEFAULT '[]',
+    sub_labels_json TEXT NOT NULL DEFAULT '[]',
+    link_reason     TEXT NOT NULL,
+    confidence      REAL NOT NULL,
+    joined_at       REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_encounter_members_enc ON encounter_members(encounter_id, start_time);
+CREATE TABLE IF NOT EXISTS encounter_decisions (
+    atom_id      TEXT NOT NULL,
+    action       TEXT NOT NULL CHECK(action IN ('pin','split')),
+    encounter_id TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    note         TEXT,
+    PRIMARY KEY (atom_id, action, encounter_id)
+);
+-- 'watermark' = last reconciled reviewsegment start_time (encounters/service.py's reconcile).
+CREATE TABLE IF NOT EXISTS encounter_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 # Columns added to `push_devices` / `push_handles` after those tables first
