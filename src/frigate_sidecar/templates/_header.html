@@ -1,7 +1,8 @@
 {# Shared header with cross-page nav, included by base.html's header block.
-   Templates set `active_page` to one of: 'status', 'scrub', 'triage', 'map',
-   'settings', 'replay', 'guide', 'debug', 'toybox', 'cameras', or one of the
-   People/Tuning pages listed in `_people_pages` / `_tuning_pages` below. #}
+   Templates set `active_page` to one of: 'status', 'scrub', 'triage',
+   'encounters', 'map', 'settings', 'replay', 'guide', 'debug', 'toybox',
+   'cameras', or one of the People/Tuning pages listed in `_people_pages` /
+   `_tuning_pages` below. #}
 {% set _active = active_page|default('') %}
 {% set _people_pages = ('face_captures', 'enrich') %}
 {% set _tuning_pages = ('score_histogram', 'motion', 'fps_budget', 'placement', 'zone_hits') %}
@@ -23,6 +24,7 @@
     <a href="/" class="page-link{% if _active == 'status' %} active{% endif %}"{% if _active == 'status' %} aria-current="page"{% endif %}>Status</a>
     <a href="/scrub" class="page-link{% if _active == 'scrub' %} active{% endif %}"{% if _active == 'scrub' %} aria-current="page"{% endif %}>Scrub</a>
     <a href="/triage" class="page-link{% if _active == 'triage' %} active{% endif %}"{% if _active == 'triage' %} aria-current="page"{% endif %}>Triage</a>
+    <a href="/encounters" class="page-link{% if _active == 'encounters' %} active{% endif %}"{% if _active == 'encounters' %} aria-current="page"{% endif %}>Encounters</a>
     <a href="/map" class="page-link{% if _active == 'map' %} active{% endif %}"{% if _active == 'map' %} aria-current="page"{% endif %}>Map</a>
     <details class="nav-group">
       <summary class="page-link{% if _active in _people_pages %} active{% endif %}"{% if _active in _people_pages %} aria-current="page"{% endif %}>People</summary>
@@ -81,6 +83,7 @@
     <div class="more-heading">Review</div>
     <a href="/scrub" class="page-link">Scrub</a>
     <a href="/triage" class="page-link">Triage</a>
+    <a href="/encounters" class="page-link">Encounters</a>
   </div>
   <div class="more-group">
     <div class="more-heading">Space</div>

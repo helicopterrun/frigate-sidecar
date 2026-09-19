@@ -1286,3 +1286,14 @@ body.map-full-open .me-toolbar {
 @media (max-width: 720px) {
   header .search-form { display: none; }
 }
+
+/* Encounters (docs/encounters.md): list + detail pages, styled off the same
+   .capture-visit/.faces-bar/.badge tokens enrich.html established. */
+.enc-filter { display: flex; gap: 8px; align-items: center; }
+.enc-filter input[type="text"] { padding: 6px 10px; border-radius: var(--radius-md); border: 1px solid var(--stroke); background: var(--surface); color: var(--text); }
+.enc-chips { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 .6rem .6rem; }
+.enc-members { padding: 0 .6rem .6rem; }
+.enc-members summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.enc-member-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+.enc-member-table th, .enc-member-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line, #333); }
+.enc-member-table th { color: var(--muted); font-weight: 600; }
