@@ -86,6 +86,26 @@ def _exc_error(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
+def _is_relay_token_error(resp: httpx.Response) -> bool:
+    """True only when a relay 422 body says the device token itself is bad.
+
+    The relay (elsinore-push-relay/src/relay.ts) returns 422 for many
+    unrelated validation failures -- bad `environment`, over-long fields,
+    missing fields -- as well as for a malformed `device_token`. Only the
+    token-specific case means the device is actually dead; everything else
+    is a payload/code bug on our side and must not prune. Defensive: an
+    unparseable body is treated as NOT a token error (the safe default).
+    """
+    try:
+        payload = resp.json()
+    except ValueError:
+        return False
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, str):
+        return False
+    return "device_token" in error.lower()
+
+
 @dataclass
 class RelayHealth:
     """Module-level, in-memory relay health (alerts-slice2 §C), updated by
@@ -612,13 +632,29 @@ class RelayTransport:
                 return TransportResult(ok=True)
 
             if resp.status_code in (410, 400, 422):
-                # 410 Unregistered / 400 BadDeviceToken (spec §5), or 422
-                # (relay rejected the payload shape -- never reached Apple,
-                # e.g. a token that fails the relay's hex/length validation):
-                # all permanent, never retried -- the caller deletes the
-                # device row.
+                # 410 Unregistered / 400 BadDeviceToken (spec §5): always a
+                # dead token, never retried -- the caller deletes the device
+                # row. 422 is the relay's generic payload-validation error and
+                # covers multiple, unrelated failure modes -- only some are
+                # token-specific (e.g. "device_token must be hex"). Others
+                # (bad environment, field-length/type errors, missing
+                # fields) are payload/code bugs on our side, not dead
+                # devices, and must NOT prune -- pruning on those would wipe
+                # every device on a single sidecar bug. Only treat 422 as
+                # unregistered when the relay's error body names the token.
                 self._record_breaker_outcome(failed=False)
                 logger.warning("push: relay %s body: %s", resp.status_code, resp.text[:500])
+                is_token_error = resp.status_code in (410, 400) or _is_relay_token_error(resp)
+                if not is_token_error:
+                    # Non-token 422: treat as before Fix A -- log and move
+                    # on, breaker-success, no prune, no retry.
+                    RELAY_HEALTH.last_error = f"HTTP {resp.status_code}"
+                    RELAY_HEALTH.last_error_at = time.time()
+                    RELAY_HEALTH.last_status_code = resp.status_code
+                    return TransportResult(
+                        ok=False, error=f"HTTP {resp.status_code}: {resp.text[:200]}",
+                        status_code=resp.status_code,
+                    )
                 STATS.incr("relay.send.unregistered")
                 RELAY_HEALTH.last_error = f"HTTP {resp.status_code}"
                 RELAY_HEALTH.last_error_at = time.time()
