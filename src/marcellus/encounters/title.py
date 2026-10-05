@@ -7,10 +7,13 @@ and the routes compute a title at read time (nothing is stored).
     Person · Gate Face camera
     Activity
 
-**Who** is the encounter's recognised identities when it has any (names, plate
-text, delivery brands), otherwise the subject words from its labels. Subjects
-read in a fixed order -- people, animals, vehicles, packages, then anything
-else (bins, doors) -- and are joined "A", "A and B", "A, B and C".
+**Who** is the encounter's recognised identities (names, then delivery
+brands) followed by the subjects from its labels, in a fixed order -- people,
+animals, vehicles, packages, then anything else (bins, doors) -- joined "A",
+"A and B", "A, B and C". An identity only *replaces* the subject it names: a
+personal name replaces "person"; a delivery brand replaces "person" and the
+motor vehicles (Frigate hangs the brand sub-label on the van or its driver).
+Every other subject stays, so "Chris" walking a dog reads "Chris and dog".
 
 **Route** is the encounter's members in time order, each reduced to one place
 (its first zone's display name, else the camera) with consecutive duplicates
@@ -21,6 +24,7 @@ keep the first two, an ellipsis and the last.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
@@ -37,10 +41,18 @@ BRANDS: dict[str, str] = {
     "dhl": "DHL",
 }
 
-#: Strings that show up in an encounter's `identities` without being one:
-#: Frigate lists a recognised object as `person-verified` in `objects`, and
-#: the encounter store keeps the `-verified` qualifier as a "sub_label".
-_NOT_IDENTITIES = frozenset({"verified", "unknown"})
+#: Strings that show up in an encounter's `identities` without being one.
+#: `identities` is every member `sub_labels` entry, and the linker also folds
+#: label *qualifiers* in there (`linker.normalise_labels`): Frigate lists a
+#: recognised object as `person-verified` in `objects`, which leaves the
+#: literal string "verified" behind as a "sub_label"; "unknown" is Frigate's
+#: placeholder for a face it could not match. Anything else that merely
+#: repeats one of the encounter's own labels/qualifiers is skipped in `who`.
+NON_IDENTITY_SUB_LABELS = frozenset({"verified", "unknown"})
+
+#: Labels a delivery brand replaces ("Amazon", not "Amazon and car"). Bicycles
+#: are deliberately absent: a brand does not ride one.
+_BRAND_REPLACES_LABELS = frozenset({"car", "truck", "bus", "motorcycle"})
 
 #: Subject order: people, animals, vehicles, packages, everything else.
 _RANK_PERSON, _RANK_ANIMAL, _RANK_VEHICLE, _RANK_PACKAGE, _RANK_OTHER = range(5)
@@ -84,11 +96,18 @@ class MemberStop:
 
 def pretty_camera(camera: str) -> str:
     """"gate-face" / "gate_face" -> "Gate Face" (same as the push/doorbell copy)."""
-    return camera.replace("_", " ").replace("-", " ").title()
+    return _humanise(camera, "_-")
 
 
 def _upper_first(text: str) -> str:
     return text[:1].upper() + text[1:]
+
+
+def _humanise(text: str, separators: str) -> str:
+    """Split on `separators` and capitalise only the first letter of each word,
+    leaving the rest as written ("nw_49th_st" -> "Nw 49th St"; `str.title()`
+    would give "Nw 49Th St")."""
+    return " ".join(_upper_first(w) for w in re.split(f"[{separators}]+", text) if w)
 
 
 def _join(words: Sequence[str]) -> str:
@@ -97,52 +116,49 @@ def _join(words: Sequence[str]) -> str:
     return ", ".join(words[:-1]) + " and " + words[-1]
 
 
-def _subject_words(labels: Iterable[str]) -> list[tuple[int, str]]:
-    """(rank, lower-case word) per distinct recognisable subject, input order.
-    Brands keep their casing."""
-    base, qualifiers = normalise_labels(labels)
-    out: list[tuple[int, str]] = []
-    seen: set[str] = set()
-    for label in base:
-        word = label.replace("_", " ").lower()
-        if word not in seen:
-            seen.add(word)
-            out.append((_LABEL_RANK.get(label, _RANK_OTHER), word))
-    # A bare brand in `labels` ("amazon") comes back as a qualifier.
-    for qualifier in qualifiers:
-        brand = BRANDS.get(qualifier.lower())
-        if brand is not None and brand not in seen:
-            seen.add(brand)
-            out.append((_RANK_PACKAGE, brand))
-    return out
-
-
-def _identity_words(identities: Iterable[str]) -> list[str]:
-    """Names first (as stored, first letter capitalised), then brands."""
+def _identity_words(
+    identities: Iterable[str], skip: frozenset[str]
+) -> tuple[list[str], list[str]]:
+    """(names, brands). Names are as stored with the first letter capitalised;
+    brands are written canonically. Junk (`NON_IDENTITY_SUB_LABELS`, anything
+    in `skip`) and duplicates are dropped."""
     names: list[str] = []
     brands: list[str] = []
     seen: set[str] = set()
     for raw in identities:
         text = (raw or "").strip()
         key = text.lower()
-        if not text or key in _NOT_IDENTITIES or key in seen:
+        if not text or key in seen:
+            continue
+        brand = BRANDS.get(key)
+        if brand is None and (key in NON_IDENTITY_SUB_LABELS or key in skip):
             continue
         seen.add(key)
-        brand = BRANDS.get(key)
         if brand is not None:
             brands.append(brand)
         else:
             names.append(_upper_first(text))
-    return names + brands
+    return names, brands
 
 
 def who(labels: Iterable[str], identities: Iterable[str]) -> str:
-    """"Alice", "Person and dog", "Amazon", ... or "Activity" when nothing is
-    recognisable."""
-    words = _identity_words(identities)
-    if not words:
-        subjects = sorted(_subject_words(labels), key=lambda s: s[0])  # stable
-        words = [w for _, w in subjects]
+    """"Chris and dog", "Person and dog", "Amazon and package", ... or
+    "Activity" when nothing is recognisable. See the module docstring."""
+    base, qualifiers = normalise_labels(list(labels))
+    own = frozenset(x.lower() for x in (*base, *qualifiers))
+    names, brands = _identity_words([*identities, *qualifiers], own)
+
+    subjects: list[tuple[int, str]] = []
+    for label in dict.fromkeys(base):
+        rank = _LABEL_RANK.get(label, _RANK_OTHER)
+        if (names or brands) and rank == _RANK_PERSON:
+            continue
+        if brands and label in _BRAND_REPLACES_LABELS:
+            continue
+        subjects.append((rank, label.replace("_", " ").lower()))
+    subjects.sort(key=lambda s: s[0])  # stable: input order within a rank
+
+    words = [*names, *brands, *(w for _, w in subjects)]
     if not words:
         return "Activity"
     return _upper_first(_join(words))
@@ -161,7 +177,7 @@ def route_places(
     for stop in sorted(stops, key=lambda s: s.start):
         zone = stop.first_zone or (stop.zones[0] if stop.zones else "")
         if zone:
-            place = Place(zone_display(zone) or zone.replace("_", " ").title(), True)
+            place = Place(zone_display(zone) or _humanise(zone, "_"), True)
         elif stop.camera:
             place = Place(pretty_camera(stop.camera), False)
         else:

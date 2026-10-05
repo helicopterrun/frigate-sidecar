@@ -69,22 +69,56 @@ def test_who_sub_label_qualified_label_normalises_to_base() -> None:
         (["dhl"], "DHL"),
         (["amazon", "alice"], "Alice and Amazon"),
         (["alice", "Alice"], "Alice"),
-        (["verified"], "Activity"),
     ],
 )
-def test_who_prefers_identities(identities: list[str], expected: str) -> None:
-    # identities win over labels, however many labels there are.
-    labels = ["person", "dog"] if expected != "Activity" else []
-    assert who(labels, identities) == expected
+def test_who_identity_words(identities: list[str], expected: str) -> None:
+    assert who(["person"], identities) == expected
 
 
-def test_who_falls_back_to_labels_when_identities_are_noise() -> None:
+def test_who_name_replaces_only_person() -> None:
+    assert who(["person", "dog"], ["Chris"]) == "Chris and dog"
+    assert who(["person"], ["Chris"]) == "Chris"
+    assert who(["person", "dog"], ["Alice", "Bob"]) == "Alice, Bob and dog"
+    # A name does not replace vehicles or packages.
+    assert who(["person", "car", "package"], ["Chris"]) == "Chris, car and package"
+
+
+def test_who_brand_replaces_person_and_motor_vehicles() -> None:
+    assert who(["car", "package"], ["amazon"]) == "Amazon and package"
+    assert who(["person", "truck", "package"], ["ups"]) == "UPS and package"
+    assert who(["person", "dog", "motorcycle"], ["fedex"]) == "FedEx and dog"
+    # Bicycles are not replaced.
+    assert who(["person", "bicycle"], ["dhl"]) == "DHL and bicycle"
+
+
+def test_who_name_and_brand_together() -> None:
+    assert who(["person", "car", "dog"], ["alice", "amazon"]) == "Alice, Amazon and dog"
+
+
+def test_who_keeps_other_subjects_in_rank_order() -> None:
+    assert who(["package", "waste_bin", "cat", "person"], ["Chris"]) == (
+        "Chris, cat, package and waste bin"
+    )
+
+
+def test_who_junk_identities_fall_back_to_labels() -> None:
+    assert who(["person", "dog"], ["verified"]) == "Person and dog"
     assert who(["person"], ["verified", "unknown"]) == "Person"
+    assert who([], ["verified"]) == "Activity"
+
+
+def test_who_skips_identities_that_repeat_own_labels_or_qualifiers() -> None:
+    assert who(["person", "dog"], ["Person", "DOG"]) == "Person and dog"
+    # "foo" is a qualifier of the label "person-foo": not a name.
+    assert who(["person-foo"], ["foo"]) == "Person"
+    assert who(["person-foo", "dog"], ["foo", "Chris"]) == "Chris and dog"
 
 
 def test_who_brand_in_labels() -> None:
     assert who(["amazon"], []) == "Amazon"
-    assert who(["person", "ups"], []) == "Person and UPS"
+    assert who(["person", "ups"], []) == "UPS"
+    # The brand as qualifier AND identity is still one brand.
+    assert who(["person-amazon", "package"], ["amazon"]) == "Amazon and package"
 
 
 # --- places ----------------------------------------------------------------
@@ -93,6 +127,12 @@ def test_who_brand_in_labels() -> None:
 def test_pretty_camera() -> None:
     assert pretty_camera("gate-face") == "Gate Face"
     assert pretty_camera("front_door_cam") == "Front Door Cam"
+    assert pretty_camera("cam-2nd_floor") == "Cam 2nd Floor"  # not "2Nd"
+
+
+def test_unconfigured_zone_keeps_inner_casing_and_digits() -> None:
+    stops = [MemberStop("street", 1.0, first_zone="nw_49th_st")]
+    assert route_places(stops, lambda z: None) == [Place("Nw 49th St", True)]
 
 
 def test_route_places_zone_then_camera_fallback() -> None:
@@ -191,7 +231,7 @@ def test_title_identity_with_route() -> None:
 
 def test_title_brand() -> None:
     assert encounter_title(["person", "package"], ["amazon"], _zones("Front Door")) == (
-        "Amazon near Front Door"
+        "Amazon and package near Front Door"
     )
 
 

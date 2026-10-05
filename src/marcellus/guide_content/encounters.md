@@ -109,14 +109,16 @@ The default 48 hour window applies only when neither `since` nor `before` is
 given; `before` alone has no lower bound.
 
 Every encounter (list and detail) carries a `title`, computed on read and
-never stored: "who + route". Who is the recognised identities if there are
-any (delivery brands read as Amazon, UPS, FedEx, USPS, DHL), otherwise the
-subjects from the labels (people, then animals, vehicles, packages), or
-"Activity" when nothing is recognisable. The route is each member's first
-zone display name (the camera name when it had no zone) in time order, e.g.
-"Person and dog · Sidewalk → Front Garden → Front Door", "Amazon near Front
-Door" or "Person · Gate Face camera". Over four places it keeps the first
-two and the last: "A → B → … → Z".
+never stored: "who + route". Who is the recognised identities followed by
+the subjects from the labels (people, animals, vehicles, packages), or
+"Activity" when nothing is recognisable. A personal name replaces only the
+"person" subject ("Chris and dog"); a delivery brand (Amazon, UPS, FedEx,
+USPS, DHL) replaces the person and any car, truck, bus or motorcycle
+("Amazon and package"). The route is each member's first zone display name
+(the camera name when it had no zone) in time order, e.g. "Person and dog ·
+Sidewalk → Front Garden → Front Door", "Chris near Front Door" or "Person ·
+Gate Face camera". Over four places it keeps the first two and the last:
+"A → B → … → Z".
 
 `GET /v1/capabilities` reports `encounters: {enabled, loops}`; `enabled`
 mirrors `encounters.enabled` and `loops` is always `false` for now.
