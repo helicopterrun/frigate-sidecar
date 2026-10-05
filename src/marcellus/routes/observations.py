@@ -34,7 +34,7 @@ from marcellus.models.wire import (
     ObservationsResponse,
 )
 from marcellus.routes._deps import settings_of as _settings
-from marcellus.routes.encounters import _adjacency_for, _summary
+from marcellus.routes.encounters import _adjacency_for, summaries
 
 v1_router = APIRouter(prefix="/v1", tags=["v1"])
 
@@ -118,19 +118,18 @@ async def observation_detail(atom_id: str, request: Request) -> dict[str, Any]:
         if row is None:
             return None, None, (None, None)
         encounter_row = store.get(conn, row["encounter_id"])
+        encounter = summaries(conn, [encounter_row])[0] if encounter_row is not None else None
         neighbours = store.observation_neighbours(conn, atom_id)
-        return row, encounter_row, neighbours
+        return row, encounter, neighbours
 
-    row, encounter_row, (prev_row, next_row) = await db.with_sidecar(
-        settings.sidecar.db_path, _load
-    )
-    if row is None or encounter_row is None:
+    row, encounter, (prev_row, next_row) = await db.with_sidecar(settings.sidecar.db_path, _load)
+    if row is None or encounter is None:
         raise HTTPException(
             status_code=404, detail=error_detail("not_found", "no such observation")
         )
     return {
         "observation": _observation(row),
-        "encounter": _summary(encounter_row),
+        "encounter": encounter,
         "neighbours": {
             "prev": _observation(prev_row) if prev_row is not None else None,
             "next": _observation(next_row) if next_row is not None else None,

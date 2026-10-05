@@ -397,7 +397,8 @@ class EncounterMember(_Wire):
     labels: list[str]; zones: list[str]; event_ids: list[str]; sub_labels: list[str]
     link_reason: str; confidence: float
 class EncounterSummary(_Wire):
-    id: str; start: float; end: float | None; sealed: bool
+    id: str; title: str  # computed at read time, encounters/title.py
+    start: float; end: float | None; sealed: bool
     cameras: list[str]; labels: list[str]; identities: list[str]
     primary_event_id: str | None; peak_severity: str; atom_count: int
 ```

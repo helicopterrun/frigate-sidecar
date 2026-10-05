@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 from marcellus.encounters.linker import Atom, LinkDecision, LinkerConfig, OpenEncounter
@@ -521,14 +522,39 @@ def seal_stale(conn: sqlite3.Connection, now: float, cfg: LinkerConfig) -> int:
 
 
 def list_recent(
-    conn: sqlite3.Connection, *, since: float, limit: int = 200, camera: str | None = None
+    conn: sqlite3.Connection,
+    *,
+    since: float | None = None,
+    before: float | None = None,
+    limit: int = 200,
+    camera: str | None = None,
+    severity: str | None = None,
 ) -> list[dict[str, Any]]:
-    sql = "SELECT * FROM encounters WHERE start_time >= ?"
-    params: list[Any] = [since]
+    """Newest first by `start_time` (ties broken by `id`, so a page is stable).
+
+    Every filter is applied in SQL, so `limit` counts filtered rows. `since`
+    is inclusive, `before` exclusive (`start_time < before`): a client pages
+    by passing the last row's `start` as `before`. Either bound may be
+    omitted -- the caller decides whether a default window applies.
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if since is not None:
+        clauses.append("start_time >= ?")
+        params.append(since)
+    if before is not None:
+        clauses.append("start_time < ?")
+        params.append(before)
     if camera:
-        sql += " AND cameras_json LIKE ?"
+        clauses.append("cameras_json LIKE ?")
         params.append(f'%"{camera}"%')
-    sql += " ORDER BY start_time DESC LIMIT ?"
+    if severity:
+        clauses.append("peak_severity = ?")
+        params.append(severity)
+    sql = "SELECT * FROM encounters"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY start_time DESC, id DESC LIMIT ?"
     params.append(limit)
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
@@ -544,6 +570,25 @@ def members(conn: sqlite3.Connection, encounter_id: str) -> list[dict[str, Any]]
         (encounter_id,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def members_for(
+    conn: sqlite3.Connection, encounter_ids: Sequence[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """`members()` for many encounters in one query per 500 ids (no N+1)."""
+    out: dict[str, list[dict[str, Any]]] = {eid: [] for eid in encounter_ids}
+    ids = list(out)
+    for i in range(0, len(ids), 500):
+        chunk = ids[i : i + 500]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"SELECT * FROM encounter_members WHERE encounter_id IN ({placeholders}) "
+            "ORDER BY start_time, joined_at",
+            chunk,
+        ).fetchall()
+        for r in rows:
+            out[r["encounter_id"]].append(dict(r))
+    return out
 
 
 def decisions_for(conn: sqlite3.Connection, atom_id: str) -> list[dict[str, Any]]:

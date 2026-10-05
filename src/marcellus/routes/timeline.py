@@ -22,7 +22,7 @@ from marcellus.encounters import store
 from marcellus.errors import error_detail
 from marcellus.models.wire import TimelineResponse
 from marcellus.routes._deps import settings_of as _settings
-from marcellus.routes.encounters import _summary
+from marcellus.routes.encounters import summaries
 from marcellus.routes.scrub import _etagged, _known_cameras, compose_reel
 
 router = APIRouter(prefix="/v1", tags=["v1"])
@@ -175,18 +175,12 @@ async def timeline(
             encounter_rows_by_id[eid] = row
             encounter_ids_seen.append(eid)
 
-    def _load_encounters(sc_conn: Any) -> dict[str, dict[str, Any]]:
-        out: dict[str, dict[str, Any]] = {}
-        for eid in encounter_ids_seen:
-            row = store.get(sc_conn, eid)
-            if row is not None:
-                out[eid] = row
-        return out
+    def _load_encounters(sc_conn: Any) -> list[dict[str, Any]]:
+        rows = [r for eid in encounter_ids_seen if (r := store.get(sc_conn, eid)) is not None]
+        return summaries(sc_conn, rows)
 
-    encounter_rows = await db.with_sidecar(settings.sidecar.db_path, _load_encounters)
-    encounters_out = sorted(
-        (_summary(row) for row in encounter_rows.values()), key=lambda e: e["start"]
-    )
+    encounter_summaries = await db.with_sidecar(settings.sidecar.db_path, _load_encounters)
+    encounters_out = sorted(encounter_summaries, key=lambda e: e["start"])
 
     body: dict[str, Any] = {
         "t": time.time(),

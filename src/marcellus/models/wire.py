@@ -72,6 +72,11 @@ class UnifiProtectCapabilities(_Wire):
     ring_snapshot: bool
 
 
+class EncountersCapabilities(_Wire):
+    enabled: bool
+    loops: bool
+
+
 class CapabilitiesResponse(_Wire):
     version: str
     scrub_cache: ScrubCacheCapabilities
@@ -80,6 +85,7 @@ class CapabilitiesResponse(_Wire):
     decisions: DecisionsCapabilities
     search: SearchCapabilities
     unifi_protect: UnifiProtectCapabilities
+    encounters: EncountersCapabilities
 
 
 # --------------------------------------------------------------------------
@@ -314,8 +320,20 @@ class EncounterMember(_Wire):
     dir_source: str = ""
 
 
+class EncounterStop(_Wire):
+    """One visit: consecutive same-camera members merged (`encounters/visits.py`).
+    `camera` is the raw key; `zone` a display name or null; `end` null while open."""
+
+    camera: str
+    zone: str | None
+    start: float
+    end: float | None
+
+
 class EncounterSummary(_Wire):
     id: str
+    #: Computed at read time ("who + route"), never stored -- `encounters/title.py`.
+    title: str
     start: float
     end: float | None
     sealed: bool
@@ -325,6 +343,7 @@ class EncounterSummary(_Wire):
     primary_event_id: str | None
     peak_severity: str
     atom_count: int
+    stops: list[EncounterStop]
 
 
 class EncountersResponse(_Wire):

@@ -2,6 +2,10 @@
   "decisions": {
     "enabled": true
   },
+  "encounters": {
+    "enabled": false,
+    "loops": false
+  },
   "proxy": {
     "enabled": true
   },

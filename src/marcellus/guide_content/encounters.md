@@ -92,6 +92,44 @@ automatically moves that atom again, even across reconcile cycles or a
 sealed donor/target. The same actions are available as `/v1/encounters/...`
 JSON routes for scripting.
 
+## Feed API
+
+`GET /v1/encounters` is the app's feed: newest first by start time (ties
+broken by id, so pages are stable).
+
+| Parameter | Meaning |
+| --- | --- |
+| `limit` | Rows per page, 1-500 (default 200). Applied after every filter. |
+| `since` | Only encounters starting at or after this epoch. |
+| `before` | Only encounters starting strictly before this epoch. Page by passing the last row's `start`. |
+| `camera` | Only encounters that include this camera. |
+| `severity` | `alert` or `detection`: exact match on the encounter's peak severity. Anything else is a 422. |
+
+The default 48 hour window applies only when neither `since` nor `before` is
+given; `before` alone has no lower bound.
+
+Every encounter (list and detail) carries a `title`, computed on read and
+never stored: "who + route". Who is the recognised identities followed by
+the subjects from the labels (people, animals, vehicles, packages), or
+"Activity" when nothing is recognisable. A personal name replaces only the
+"person" subject ("Chris and dog"); a delivery brand (Amazon, UPS, FedEx,
+USPS, DHL) replaces the person and any car, truck, bus or motorcycle
+("Amazon and package"). The route is each member's first zone display name
+(the camera name when it had no zone) in time order, e.g. "Person and dog ·
+Sidewalk → Front Garden → Front Door", "Chris near Front Door" or "Person ·
+Gate Face camera". Over four places it keeps the first two and the last:
+"A → B → … → Z".
+
+Every encounter also carries `stops`: its members in time order with
+consecutive members on the same camera merged into one visit, each
+`{camera, zone, start, end}`. `camera` is the raw camera key, `zone` the first
+member's zone display name (null when it had none), `start` the earliest
+member start and `end` the latest member end (null while any member is still
+open). A return to an earlier camera is its own stop; there is no cap.
+
+`GET /v1/capabilities` reports `encounters: {enabled, loops}`; `enabled`
+mirrors `encounters.enabled` and `loops` is always `false` for now.
+
 ## Retention
 
 Sealed encounters (and their members and decisions) older than

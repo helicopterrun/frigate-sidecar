@@ -294,3 +294,198 @@ def test_decision_routes_require_auth(tmp_path: Path, frigate_db_path: Path) -> 
     ):
         resp = gated_client.post(path, follow_redirects=False, **kwargs)
         assert resp.status_code in (401, 403), path
+
+
+# --------------------------------------------------------------------------
+# Feed API: paging, severity filter, default window, titles, capabilities
+# --------------------------------------------------------------------------
+
+_DAY = 86400.0
+
+
+def _seed_at(
+    settings: Settings,
+    atom_id: str,
+    *,
+    start: float,
+    camera: str = "alley-wide",
+    labels: tuple[str, ...] = ("person",),
+    zones: tuple[str, ...] = (),
+    severity: str = "alert",
+    sub_labels: tuple[str, ...] = (),
+    encounter_id: str | None = None,
+) -> str:
+    """One atom at an absolute start time. With `encounter_id` the atom joins
+    that encounter (so a multi-camera encounter can be built)."""
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        atom = Atom(
+            atom_id=atom_id,
+            camera=camera,
+            start_time=start,
+            end_time=start + 5,
+            labels=labels,
+            zones=zones,
+            event_ids=(f"ev-{atom_id}",),
+            sub_labels=sub_labels,
+            severity=severity,
+        )
+        decision = (
+            LinkDecision(encounter_id, "adjacent", 0.9)
+            if encounter_id
+            else LinkDecision(None, "new", 1.0)
+        )
+        return upsert_atom(conn, atom, decision, start)
+    finally:
+        conn.close()
+
+
+def _ids(client: TestClient, **params: object) -> list[str]:
+    resp = client.get("/v1/encounters", params=params)  # type: ignore[arg-type]
+    assert resp.status_code == 200, resp.text
+    return [e["id"] for e in resp.json()["encounters"]]
+
+
+def test_v1_encounters_before_pages_newest_first(client: TestClient, settings: Settings) -> None:
+    now = time.time()
+    ids = [_seed_at(settings, f"a{i}", start=now - 1000 + i * 100) for i in range(5)]
+    newest_first = list(reversed(ids))
+
+    page1 = client.get("/v1/encounters", params={"limit": 2}).json()["encounters"]
+    assert [e["id"] for e in page1] == newest_first[:2]
+    page2 = client.get(
+        "/v1/encounters", params={"limit": 2, "before": page1[-1]["start"]}
+    ).json()["encounters"]
+    assert [e["id"] for e in page2] == newest_first[2:4]
+    page3 = client.get(
+        "/v1/encounters", params={"limit": 2, "before": page2[-1]["start"]}
+    ).json()["encounters"]
+    assert [e["id"] for e in page3] == newest_first[4:]
+
+
+def test_v1_encounters_before_is_exclusive(client: TestClient, settings: Settings) -> None:
+    now = time.time()
+    older = _seed_at(settings, "o", start=now - 500)
+    _seed_at(settings, "n", start=now - 400)
+    assert _ids(client, before=now - 400) == [older]
+
+
+def test_v1_encounters_default_window_only_without_since_or_before(
+    client: TestClient, settings: Settings
+) -> None:
+    now = time.time()
+    recent = _seed_at(settings, "recent", start=now - 3600)
+    old = _seed_at(settings, "old", start=now - 10 * _DAY)
+    # Neither bound: the 48 h default window applies.
+    assert _ids(client) == [recent]
+    # `before` alone: no lower bound, so the old one is reachable.
+    assert _ids(client, before=now) == [recent, old]
+    # `since` alone: honoured as given.
+    assert _ids(client, since=now - 20 * _DAY) == [recent, old]
+    # Both bounds.
+    assert _ids(client, since=now - 20 * _DAY, before=now - 5 * _DAY) == [old]
+
+
+def test_v1_encounters_severity_filter_applies_before_limit(
+    client: TestClient, settings: Settings
+) -> None:
+    now = time.time()
+    alert = _seed_at(settings, "al", start=now - 900, severity="alert")
+    # Three newer detections would fill limit=2 if filtering happened after the fetch.
+    for i in range(3):
+        _seed_at(settings, f"d{i}", start=now - 100 + i, severity="detection")
+    assert _ids(client, severity="alert", limit=2) == [alert]
+    rows = client.get("/v1/encounters", params={"severity": "detection"}).json()["encounters"]
+    assert len(rows) == 3
+    assert {r["peak_severity"] for r in rows} == {"detection"}
+
+
+def test_v1_encounters_severity_invalid_uses_error_envelope(client: TestClient) -> None:
+    resp = client.get("/v1/encounters", params={"severity": "urgent"})
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert isinstance(detail["error"], str)
+    assert isinstance(detail["message"], str)
+
+
+def test_v1_encounters_ordering_tiebreak_by_id_is_stable(
+    client: TestClient, settings: Settings
+) -> None:
+    start = time.time() - 600
+    ids = [_seed_at(settings, f"t{i}", start=start, camera="alley-wide") for i in range(4)]
+    expected = sorted(ids, reverse=True)
+    assert _ids(client) == expected
+    assert _ids(client) == expected  # repeatable
+
+
+def test_v1_encounters_title_in_list_and_detail(client: TestClient, settings: Settings) -> None:
+    now = time.time()
+    enc = _seed_at(
+        settings, "m1", start=now - 300, camera="alley-wide", zones=("back_walkway",)
+    )
+    _seed_at(
+        settings,
+        "m2",
+        start=now - 280,
+        camera="shed",
+        labels=("dog",),
+        zones=(),
+        encounter_id=enc,
+    )
+    row = client.get("/v1/encounters").json()["encounters"][0]
+    assert row["title"] == "Person and dog · Back Walkway → Shed"
+    EncountersResponse.model_validate(client.get("/v1/encounters").json())
+    detail = client.get(f"/v1/encounters/{enc}").json()
+    assert detail["encounter"]["title"] == row["title"]
+    expected_stops = [
+        {"camera": "alley-wide", "zone": "Back Walkway", "start": now - 300, "end": now - 295},
+        {"camera": "shed", "zone": None, "start": now - 280, "end": now - 275},
+    ]
+    assert row["stops"] == expected_stops
+    assert detail["encounter"]["stops"] == expected_stops
+
+
+def test_v1_encounters_title_single_camera_fallback_and_identity(
+    client: TestClient, settings: Settings
+) -> None:
+    now = time.time()
+    _seed_at(settings, "g1", start=now - 100, camera="gate-face", sub_labels=("alice",))
+    row = client.get("/v1/encounters").json()["encounters"][0]
+    assert row["title"] == "Alice · Gate Face camera"
+    assert row["identities"] == ["alice"]
+
+
+def test_v1_encounters_list_fetches_members_in_one_query(
+    client: TestClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marcellus.encounters import store
+
+    now = time.time()
+    for i in range(4):
+        _seed_at(settings, f"q{i}", start=now - 100 + i)
+    calls: list[int] = []
+    real = store.members_for
+
+    def _spy(conn: object, ids: list[str]) -> object:
+        calls.append(len(ids))
+        return real(conn, ids)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(store, "members_for", _spy)
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("per-encounter members() lookup (N+1)")
+
+    monkeypatch.setattr(store, "members", _boom)
+    assert len(client.get("/v1/encounters").json()["encounters"]) == 4
+    assert calls == [4]
+
+
+def test_capabilities_encounters_block(settings: Settings, tmp_path: Path) -> None:
+    off = TestClient(create_app(settings)).get("/v1/capabilities").json()
+    assert off["encounters"] == {"enabled": False, "loops": False}
+
+    from marcellus.config import EncountersSection
+
+    on_settings = settings.model_copy(update={"encounters": EncountersSection(enabled=True)})
+    on = TestClient(create_app(on_settings)).get("/v1/capabilities").json()
+    assert on["encounters"] == {"enabled": True, "loops": False}
