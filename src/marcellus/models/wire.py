@@ -320,6 +320,16 @@ class EncounterMember(_Wire):
     dir_source: str = ""
 
 
+class EncounterStop(_Wire):
+    """One visit: consecutive same-camera members merged (`encounters/visits.py`).
+    `camera` is the raw key; `zone` a display name or null; `end` null while open."""
+
+    camera: str
+    zone: str | None
+    start: float
+    end: float | None
+
+
 class EncounterSummary(_Wire):
     id: str
     #: Computed at read time ("who + route"), never stored -- `encounters/title.py`.
@@ -333,6 +343,7 @@ class EncounterSummary(_Wire):
     primary_event_id: str | None
     peak_severity: str
     atom_count: int
+    stops: list[EncounterStop]
 
 
 class EncountersResponse(_Wire):

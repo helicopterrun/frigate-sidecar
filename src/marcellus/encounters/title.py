@@ -24,11 +24,17 @@ keep the first two, an ellipsis and the last.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from marcellus.encounters.linker import LABEL_FAMILIES, normalise_labels
+from marcellus.encounters.visits import (
+    MemberStop,
+    humanise,
+    member_zone,
+    order_members,
+    zone_label,
+)
 from marcellus.push.live_activities import BIN_LABELS, OPENING_LABELS
 
 #: Delivery brands, as Frigate classification sub_labels (lower-case) -> how
@@ -84,30 +90,13 @@ class Place:
     is_zone: bool
 
 
-@dataclass(frozen=True)
-class MemberStop:
-    """What the route needs from one encounter member."""
-
-    camera: str
-    start: float
-    first_zone: str = ""
-    zones: Sequence[str] = ()
-
-
 def pretty_camera(camera: str) -> str:
     """"gate-face" / "gate_face" -> "Gate Face" (same as the push/doorbell copy)."""
-    return _humanise(camera, "_-")
+    return humanise(camera, "_-")
 
 
 def _upper_first(text: str) -> str:
     return text[:1].upper() + text[1:]
-
-
-def _humanise(text: str, separators: str) -> str:
-    """Split on `separators` and capitalise only the first letter of each word,
-    leaving the rest as written ("nw_49th_st" -> "Nw 49th St"; `str.title()`
-    would give "Nw 49Th St")."""
-    return " ".join(_upper_first(w) for w in re.split(f"[{separators}]+", text) if w)
 
 
 def _join(words: Sequence[str]) -> str:
@@ -174,10 +163,10 @@ def route_places(
     ("front_door" -> "Front Door").
     """
     places: list[Place] = []
-    for stop in sorted(stops, key=lambda s: s.start):
-        zone = stop.first_zone or (stop.zones[0] if stop.zones else "")
+    for stop in order_members(stops):
+        zone = member_zone(stop)
         if zone:
-            place = Place(zone_display(zone) or _humanise(zone, "_"), True)
+            place = Place(zone_label(zone, zone_display), True)
         elif stop.camera:
             place = Place(pretty_camera(stop.camera), False)
         else:

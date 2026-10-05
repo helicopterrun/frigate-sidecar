@@ -693,8 +693,8 @@ def _build_v1_coverage() -> dict[str, Any]:
 
 def _build_v1_encounters() -> dict[str, Any]:
     """`GET /v1/encounters` over three canned encounters: a multi-camera alert
-    (person + dog, three zones), a single-camera detection that falls back to
-    the camera name, and a sealed single-zone delivery identified as Amazon.
+    (person + dog, a merged stop and a return visit), a single-camera detection
+    that falls back to the camera name, and a sealed single-zone delivery identified as Amazon.
     Newest first; every row carries its computed `title`."""
     from marcellus import db as db_mod
     from marcellus.encounters.linker import Atom, LinkDecision
@@ -743,10 +743,22 @@ def _build_v1_encounters() -> dict[str, Any]:
                     _atom("r2", "yard-cam", base + 30, labels=("dog", "person"),
                           zones=("front_garden",), severity="detection"),
                 ),
+                # Back-to-back on one camera: merges into one stop.
+                (
+                    "enc_walk", "adjacent",
+                    _atom("r2b", "yard-cam", base + 45, labels=("person",),
+                          zones=("front_garden",), severity="detection"),
+                ),
                 (
                     "enc_walk", "adjacent",
                     _atom("r3", "porch-cam", base + 60, labels=("person",),
                           zones=("front_door",), severity="alert"),
+                ),
+                # Return to an earlier camera: its own stop.
+                (
+                    "enc_walk", "adjacent",
+                    _atom("r6", "street-cam", base + 90, labels=("person",),
+                          zones=("sidewalk",), severity="detection"),
                 ),
                 # Single-camera detection, no zone: camera fallback.
                 (

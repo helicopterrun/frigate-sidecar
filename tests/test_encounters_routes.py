@@ -437,6 +437,12 @@ def test_v1_encounters_title_in_list_and_detail(client: TestClient, settings: Se
     EncountersResponse.model_validate(client.get("/v1/encounters").json())
     detail = client.get(f"/v1/encounters/{enc}").json()
     assert detail["encounter"]["title"] == row["title"]
+    expected_stops = [
+        {"camera": "alley-wide", "zone": "Back Walkway", "start": now - 300, "end": now - 295},
+        {"camera": "shed", "zone": None, "start": now - 280, "end": now - 275},
+    ]
+    assert row["stops"] == expected_stops
+    assert detail["encounter"]["stops"] == expected_stops
 
 
 def test_v1_encounters_title_single_camera_fallback_and_identity(

@@ -120,6 +120,13 @@ Sidewalk → Front Garden → Front Door", "Chris near Front Door" or "Person ·
 Gate Face camera". Over four places it keeps the first two and the last:
 "A → B → … → Z".
 
+Every encounter also carries `stops`: its members in time order with
+consecutive members on the same camera merged into one visit, each
+`{camera, zone, start, end}`. `camera` is the raw camera key, `zone` the first
+member's zone display name (null when it had none), `start` the earliest
+member start and `end` the latest member end (null while any member is still
+open). A return to an earlier camera is its own stop; there is no cap.
+
 `GET /v1/capabilities` reports `encounters: {enabled, loops}`; `enabled`
 mirrors `encounters.enabled` and `loops` is always `false` for now.
 

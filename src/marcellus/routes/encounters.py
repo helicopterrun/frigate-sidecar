@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from marcellus import db, zones
-from marcellus.encounters import store, title
+from marcellus.encounters import store, title, visits
 from marcellus.encounters.adjacency import Adjacency, build_adjacency
 from marcellus.errors import error_detail
 from marcellus.models.wire import EncounterResponse, EncountersResponse
@@ -50,29 +50,44 @@ def _adjacency_for(request: Request) -> Adjacency:
     )
 
 
-def _title(row: dict[str, Any], member_rows: list[dict[str, Any]]) -> str:
-    """The encounter's "who + route" title (`encounters/title.py`), computed at
-    read time from the encounter row and its members (already time-ordered)."""
-    stops = [
-        title.MemberStop(
+def _stops_of(member_rows: list[dict[str, Any]]) -> list[visits.MemberStop]:
+    return [
+        visits.MemberStop(
             camera=m["camera"],
             start=m["start_time"],
+            end=m["end_time"],
             first_zone=m.get("first_zone") or "",
             zones=json.loads(m["zones_json"]),
+            joined_at=m.get("joined_at") or 0.0,
         )
         for m in member_rows
     ]
-    return title.encounter_title(
+
+
+def _title_and_stops(
+    row: dict[str, Any], member_rows: list[dict[str, Any]]
+) -> tuple[str, list[dict[str, Any]]]:
+    """The encounter's "who + route" title (`encounters/title.py`) and its
+    `stops` (`encounters/visits.py`), computed at read time from the encounter
+    row and its members, both through the real zone display-name lookup."""
+    members = _stops_of(member_rows)
+    text = title.encounter_title(
         json.loads(row["labels_json"]),
         json.loads(row["identities_json"]),
-        title.route_places(stops, policy_settings.zone_display_name),
+        title.route_places(members, policy_settings.zone_display_name),
     )
+    stops = [
+        {"camera": s.camera, "zone": s.zone, "start": s.start, "end": s.end}
+        for s in visits.build_stops(members, policy_settings.zone_display_name)
+    ]
+    return text, stops
 
 
 def _summary(row: dict[str, Any], member_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    text, stops = _title_and_stops(row, member_rows)
     return {
         "id": row["id"],
-        "title": _title(row, member_rows),
+        "title": text,
         "start": row["start_time"],
         "end": row["end_time"],
         "sealed": row["sealed_at"] is not None,
@@ -82,6 +97,7 @@ def _summary(row: dict[str, Any], member_rows: list[dict[str, Any]]) -> dict[str
         "primary_event_id": row["primary_event_id"],
         "peak_severity": row["peak_severity"],
         "atom_count": row["atom_count"],
+        "stops": stops,
     }
 
 
