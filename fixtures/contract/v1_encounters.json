@@ -1,0 +1,62 @@
+{
+  "encounters": [
+    {
+      "atom_count": 1,
+      "cameras": [
+        "porch-cam"
+      ],
+      "end": 1785949034.704,
+      "id": "enc_delivery",
+      "identities": [
+        "amazon"
+      ],
+      "labels": [
+        "package",
+        "person"
+      ],
+      "peak_severity": "alert",
+      "primary_event_id": "1785949022.704-r5",
+      "sealed": true,
+      "start": 1785949022.704,
+      "title": "Amazon near Front Door"
+    },
+    {
+      "atom_count": 1,
+      "cameras": [
+        "gate-face"
+      ],
+      "end": 1785947234.704,
+      "id": "enc_raccoon",
+      "identities": [],
+      "labels": [
+        "raccoon"
+      ],
+      "peak_severity": "detection",
+      "primary_event_id": "1785947222.704-r4",
+      "sealed": false,
+      "start": 1785947222.704,
+      "title": "Raccoon \u00b7 Gate Face camera"
+    },
+    {
+      "atom_count": 3,
+      "cameras": [
+        "street-cam",
+        "yard-cam",
+        "porch-cam"
+      ],
+      "end": 1785945494.704,
+      "id": "enc_walk",
+      "identities": [],
+      "labels": [
+        "dog",
+        "person"
+      ],
+      "peak_severity": "alert",
+      "primary_event_id": "1785945482.704-r3",
+      "sealed": true,
+      "start": 1785945422.704,
+      "title": "Person and dog \u00b7 Sidewalk \u2192 Front Garden \u2192 Front Door"
+    }
+  ],
+  "t": 1785952622.704
+}

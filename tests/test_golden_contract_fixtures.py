@@ -691,6 +691,95 @@ def _build_v1_coverage() -> dict[str, Any]:
         return body
 
 
+def _build_v1_encounters() -> dict[str, Any]:
+    """`GET /v1/encounters` over three canned encounters: a multi-camera alert
+    (person + dog, three zones), a single-camera detection that falls back to
+    the camera name, and a sealed single-zone delivery identified as Amazon.
+    Newest first; every row carries its computed `title`."""
+    from marcellus import db as db_mod
+    from marcellus.encounters.linker import Atom, LinkDecision
+    from marcellus.encounters.store import upsert_atom
+
+    def _atom(
+        atom_id: str,
+        camera: str,
+        start: float,
+        *,
+        labels: tuple[str, ...],
+        zones: tuple[str, ...] = (),
+        sub_labels: tuple[str, ...] = (),
+        severity: str,
+    ) -> Atom:
+        return Atom(
+            atom_id=atom_id,
+            camera=camera,
+            start_time=start,
+            end_time=start + 12.0,
+            labels=labels,
+            zones=zones,
+            event_ids=(f"{start}-{atom_id}",),
+            sub_labels=sub_labels,
+            severity=severity,
+        )
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        frigate_db = tmp / "frigate.db"
+        sqlite3.connect(frigate_db).close()
+        sidecar_db = tmp / "marcellus.db"
+        sconn = db_mod.open_sidecar(sidecar_db)
+        try:
+            base = SENT_AT - 7200.0
+            # (encounter id, link reason, atom). The first atom of an encounter
+            # founds it ("new"); later ones join ("adjacent").
+            plan = [
+                (
+                    "enc_walk", "new",
+                    _atom("r1", "street-cam", base, labels=("person",),
+                          zones=("sidewalk",), severity="detection"),
+                ),
+                (
+                    "enc_walk", "adjacent",
+                    _atom("r2", "yard-cam", base + 30, labels=("dog", "person"),
+                          zones=("front_garden",), severity="detection"),
+                ),
+                (
+                    "enc_walk", "adjacent",
+                    _atom("r3", "porch-cam", base + 60, labels=("person",),
+                          zones=("front_door",), severity="alert"),
+                ),
+                # Single-camera detection, no zone: camera fallback.
+                (
+                    "enc_raccoon", "new",
+                    _atom("r4", "gate-face", base + 1800, labels=("raccoon",),
+                          severity="detection"),
+                ),
+                # Sealed delivery, recognised brand, one zone.
+                (
+                    "enc_delivery", "new",
+                    _atom("r5", "porch-cam", base + 3600, labels=("package", "person"),
+                          zones=("front_door",), sub_labels=("amazon",), severity="alert"),
+                ),
+            ]
+            for encounter_id, reason, atom in plan:
+                decision = LinkDecision(encounter_id, reason, 1.0 if reason == "new" else 0.9)
+                upsert_atom(sconn, atom, decision, atom.start_time)
+            sconn.execute(
+                "UPDATE encounters SET sealed_at = ? WHERE id IN ('enc_walk', 'enc_delivery')",
+                (SENT_AT - 600.0,),
+            )
+            sconn.commit()
+        finally:
+            sconn.close()
+
+        client = _v1_client(tmp, frigate_db=frigate_db, sidecar_db=sidecar_db)
+        with mock.patch("time.time", return_value=SENT_AT):
+            resp = client.get("/v1/encounters")
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+
 def _build_v1_scrub_sheets() -> dict[str, Any]:
     from marcellus import db as db_mod
 
@@ -999,6 +1088,7 @@ FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "push_receipts.json": _build_push_receipts,
     "push_device_detail.json": _build_push_device_detail,
     "v1_coverage.json": _build_v1_coverage,
+    "v1_encounters.json": _build_v1_encounters,
     "v1_scrub_sheets.json": _build_v1_scrub_sheets,
     "v1_reel.json": _build_v1_reel,
     "v1_highlights.json": _build_v1_highlights,

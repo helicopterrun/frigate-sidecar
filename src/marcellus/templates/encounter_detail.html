@@ -18,7 +18,8 @@
 
   <section class="capture-visit">
     <header>
-      <b class="id-title">{{ encounter.cameras|join(' → ') }}</b>
+      <b class="id-title">{{ encounter.title }}</b>
+      <span class="mode">{{ encounter.cameras|join(' → ') }}</span>
     </header>
     <div class="enc-chips">
       {% for label in encounter.labels %}<span class="badge">{{ label }}</span>{% endfor %}

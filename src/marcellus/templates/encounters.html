@@ -31,9 +31,9 @@
   <section class="capture-visit enc-row">
     <header>
       <span class="badge {{ 'ok' if e.sealed else 'recognized' }}">{{ 'sealed' if e.sealed else 'open' }}</span>
-      <b class="id-title"><a href="/encounters/{{ e.id }}">{{ e.cameras|join(' → ') }}</a></b>
+      <b class="id-title"><a href="/encounters/{{ e.id }}">{{ e.title }}</a></b>
       <span class="mode">
-        {{ fmt_ts(e.start) }} &middot; {{ fmt_duration(e.start, e.end) if e.end else 'ongoing' }}
+        {{ e.cameras|join(' → ') }} &middot; {{ fmt_ts(e.start) }} &middot; {{ fmt_duration(e.start, e.end) if e.end else 'ongoing' }}
         &middot; {{ e.atom_count }} atom{{ 's' if e.atom_count != 1 else '' }}
       </span>
     </header>

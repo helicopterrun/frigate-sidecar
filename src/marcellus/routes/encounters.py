@@ -8,18 +8,20 @@ decorator, no CSRF token, matching every other admin POST route in this repo
 
 from __future__ import annotations
 
+import json
 import time
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qsl, quote
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from marcellus import db, zones
-from marcellus.encounters import store
+from marcellus.encounters import store, title
 from marcellus.encounters.adjacency import Adjacency, build_adjacency
 from marcellus.errors import error_detail
 from marcellus.models.wire import EncounterResponse, EncountersResponse
+from marcellus.push import policy_settings
 from marcellus.routes._deps import settings_of as _settings
 from marcellus.routes._deps import templates_of as _templates
 
@@ -48,11 +50,29 @@ def _adjacency_for(request: Request) -> Adjacency:
     )
 
 
-def _summary(row: dict[str, Any]) -> dict[str, Any]:
-    import json
+def _title(row: dict[str, Any], member_rows: list[dict[str, Any]]) -> str:
+    """The encounter's "who + route" title (`encounters/title.py`), computed at
+    read time from the encounter row and its members (already time-ordered)."""
+    stops = [
+        title.MemberStop(
+            camera=m["camera"],
+            start=m["start_time"],
+            first_zone=m.get("first_zone") or "",
+            zones=json.loads(m["zones_json"]),
+        )
+        for m in member_rows
+    ]
+    return title.encounter_title(
+        json.loads(row["labels_json"]),
+        json.loads(row["identities_json"]),
+        title.route_places(stops, policy_settings.zone_display_name),
+    )
 
+
+def _summary(row: dict[str, Any], member_rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "id": row["id"],
+        "title": _title(row, member_rows),
         "start": row["start_time"],
         "end": row["end_time"],
         "sealed": row["sealed_at"] is not None,
@@ -65,9 +85,14 @@ def _summary(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _member(row: dict[str, Any]) -> dict[str, Any]:
-    import json
+def summaries(conn: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`_summary` for many encounter rows, fetching every member in one
+    query (no per-row lookups). Run inside `db.with_sidecar`."""
+    by_encounter = store.members_for(conn, [r["id"] for r in rows])
+    return [_summary(r, by_encounter[r["id"]]) for r in rows]
 
+
+def _member(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "atom_id": row["atom_id"],
         "camera": row["camera"],
@@ -118,11 +143,12 @@ async def encounters_page(
 
     def _load(conn: Any) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
         rows = store.list_recent(conn, since=window_since, limit=200, camera=camera)
-        return [(row, store.members(conn, row["id"])) for row in rows]
+        by_encounter = store.members_for(conn, [r["id"] for r in rows])
+        return [(row, by_encounter[row["id"]]) for row in rows]
 
     loaded = await db.with_sidecar(settings.sidecar.db_path, _load)
     encounters = [
-        dict(_summary(row), members=[_member(m) for m in member_rows])
+        dict(_summary(row, member_rows), members=[_member(m) for m in member_rows])
         for row, member_rows in loaded
     ]
     return _templates(request).TemplateResponse(
@@ -161,7 +187,7 @@ async def encounter_detail_page(encounter_id: str, request: Request, msg: str | 
         request,
         "encounter_detail.html",
         {
-            "encounter": _summary(row),
+            "encounter": _summary(row, member_rows),
             "members": [_member(m) for m in member_rows],
             "decisions": decisions,
             "active_page": "encounters",
@@ -184,17 +210,32 @@ async def encounters_adjacency(request: Request) -> dict[str, Any]:
 async def encounters_list(
     request: Request,
     since: float | None = None,
+    before: float | None = None,
     limit: int = Query(200, ge=1, le=_MAX_LIMIT),
     camera: str | None = None,
+    severity: Literal["alert", "detection"] | None = None,
 ) -> dict[str, Any]:
+    """Newest first. Page by passing the last row's `start` as `before`. The
+    48 h default window applies only when neither `since` nor `before` is
+    given; with `before` alone there is no lower bound."""
     settings = _settings(request)
-    window_since = since if since is not None else time.time() - _DEFAULT_WINDOW_S
+    window_since = since
+    if since is None and before is None:
+        window_since = time.time() - _DEFAULT_WINDOW_S
 
     def _load(conn: Any) -> list[dict[str, Any]]:
-        return store.list_recent(conn, since=window_since, limit=limit, camera=camera)
+        rows = store.list_recent(
+            conn,
+            since=window_since,
+            before=before,
+            limit=limit,
+            camera=camera,
+            severity=severity,
+        )
+        return summaries(conn, rows)
 
-    rows = await db.with_sidecar(settings.sidecar.db_path, _load)
-    return {"t": time.time(), "encounters": [_summary(r) for r in rows]}
+    out = await db.with_sidecar(settings.sidecar.db_path, _load)
+    return {"t": time.time(), "encounters": out}
 
 
 @v1_router.get("/encounters/{encounter_id}", response_model=EncounterResponse)
@@ -211,7 +252,7 @@ async def encounter_detail(encounter_id: str, request: Request) -> dict[str, Any
     if row is None:
         raise HTTPException(status_code=404, detail=error_detail("not_found", "no such encounter"))
     return {
-        "encounter": _summary(row),
+        "encounter": _summary(row, member_rows),
         "members": [_member(m) for m in member_rows],
     }
 
@@ -234,7 +275,7 @@ async def _load_encounter_json(settings: Any, encounter_id: str) -> dict[str, An
     row, member_rows = await db.with_sidecar(settings.sidecar.db_path, _load)
     if row is None:
         raise HTTPException(status_code=404, detail=error_detail("not_found", "no such encounter"))
-    return {"encounter": _summary(row), "members": [_member(m) for m in member_rows]}
+    return {"encounter": _summary(row, member_rows), "members": [_member(m) for m in member_rows]}
 
 
 @router.post("/encounters/{encounter_id}/atoms/{atom_id}/split")

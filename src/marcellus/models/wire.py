@@ -72,6 +72,11 @@ class UnifiProtectCapabilities(_Wire):
     ring_snapshot: bool
 
 
+class EncountersCapabilities(_Wire):
+    enabled: bool
+    loops: bool
+
+
 class CapabilitiesResponse(_Wire):
     version: str
     scrub_cache: ScrubCacheCapabilities
@@ -80,6 +85,7 @@ class CapabilitiesResponse(_Wire):
     decisions: DecisionsCapabilities
     search: SearchCapabilities
     unifi_protect: UnifiProtectCapabilities
+    encounters: EncountersCapabilities
 
 
 # --------------------------------------------------------------------------
@@ -316,6 +322,8 @@ class EncounterMember(_Wire):
 
 class EncounterSummary(_Wire):
     id: str
+    #: Computed at read time ("who + route"), never stored -- `encounters/title.py`.
+    title: str
     start: float
     end: float | None
     sealed: bool

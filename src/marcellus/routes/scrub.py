@@ -155,6 +155,13 @@ def _protect_capabilities(settings: Any, app_state: Any) -> dict[str, Any]:
     }
 
 
+def _encounters_capabilities(settings: Any) -> dict[str, Any]:
+    """`encounters` block of `/v1/capabilities`: `enabled` mirrors
+    `encounters.enabled` (whether the linking service runs); `loops` is
+    reserved for the loop-video feature and is always `False` for now."""
+    return {"enabled": bool(settings.encounters.enabled), "loops": False}
+
+
 @router.get("/capabilities", response_model=CapabilitiesResponse)
 async def capabilities(request: Request) -> dict[str, Any]:
     """No auth required -- this is the one `/v1` endpoint the client probes
@@ -212,6 +219,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
         "decisions": {"enabled": True},
         "search": {"enabled": True, "related_events": True},
         "unifi_protect": _protect_capabilities(settings, request.app.state),
+        "encounters": _encounters_capabilities(settings),
     }
 
 
