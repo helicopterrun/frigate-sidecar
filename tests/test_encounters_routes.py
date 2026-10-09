@@ -482,10 +482,15 @@ def test_v1_encounters_list_fetches_members_in_one_query(
 
 def test_capabilities_encounters_block(settings: Settings, tmp_path: Path) -> None:
     off = TestClient(create_app(settings)).get("/v1/capabilities").json()
-    assert off["encounters"] == {"enabled": False, "loops": False}
+    assert off["encounters"] == {"enabled": False, "loops": False, "tags": False, "filters": []}
 
     from marcellus.config import EncountersSection
 
     on_settings = settings.model_copy(update={"encounters": EncountersSection(enabled=True)})
     on = TestClient(create_app(on_settings)).get("/v1/capabilities").json()
-    assert on["encounters"] == {"enabled": True, "loops": False}
+    assert on["encounters"] == {
+        "enabled": True,
+        "loops": False,
+        "tags": True,
+        "filters": ["tag", "label", "place", "camera"],
+    }

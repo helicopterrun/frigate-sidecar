@@ -115,6 +115,23 @@ CREATE TABLE IF NOT EXISTS face_enrichments (
     processed_at      TEXT NOT NULL
 );
 """,
+    # Pre-notability form: no tag/place/outcome/tag_reason stamp columns.
+    "encounters": """
+CREATE TABLE IF NOT EXISTS encounters (
+    id               TEXT PRIMARY KEY,
+    start_time       REAL NOT NULL,
+    end_time         REAL,
+    sealed_at        REAL,
+    cameras_json     TEXT NOT NULL DEFAULT '[]',
+    labels_json      TEXT NOT NULL DEFAULT '[]',
+    identities_json  TEXT NOT NULL DEFAULT '[]',
+    zones_json       TEXT NOT NULL DEFAULT '[]',
+    primary_event_id TEXT,
+    peak_severity    TEXT NOT NULL DEFAULT 'detection',
+    atom_count       INTEGER NOT NULL DEFAULT 0,
+    updated_at       REAL NOT NULL
+);
+""",
     "encounter_members": """
 CREATE TABLE IF NOT EXISTS encounter_members (
     atom_id         TEXT PRIMARY KEY,

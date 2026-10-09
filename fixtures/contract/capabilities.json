@@ -4,7 +4,9 @@
   },
   "encounters": {
     "enabled": false,
-    "loops": false
+    "filters": [],
+    "loops": false,
+    "tags": false
   },
   "proxy": {
     "enabled": true

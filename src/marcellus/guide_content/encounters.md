@@ -102,8 +102,13 @@ broken by id, so pages are stable).
 | `limit` | Rows per page, 1-500 (default 200). Applied after every filter. |
 | `since` | Only encounters starting at or after this epoch. |
 | `before` | Only encounters starting strictly before this epoch. Page by passing the last row's `start`. |
-| `camera` | Only encounters that include this camera. |
+| `camera` | Only encounters that include this camera. Comma-separated values match any of them. |
 | `severity` | `alert` or `detection`: exact match on the encounter's peak severity. Anything else is a 422. |
+| `tag` | `notable` or `background` (see below). `notable` also returns encounters that were never stamped. Anything else is a 422. |
+| `label` | Comma-separated; matches encounters whose labels or recognised identities include any of them (case-insensitive). |
+| `place` | Comma-separated place keys (`street` Public, `yard` Semi-private, `doors` Entry / exit, `private` Private, `off_limits` Restricted): encounters whose most private place is any of them. An unknown key is a 422. |
+
+All filters combine with AND.
 
 The default 48 hour window applies only when neither `since` nor `before` is
 given; `before` alone has no lower bound.
@@ -127,8 +132,38 @@ member's zone display name (null when it had none), `start` the earliest
 member start and `end` the latest member end (null while any member is still
 open). A return to an earlier camera is its own stop; there is no cap.
 
-`GET /v1/capabilities` reports `encounters: {enabled, loops}`; `enabled`
-mirrors `encounters.enabled` and `loops` is always `false` for now.
+`GET /v1/capabilities` reports `encounters: {enabled, loops, tags,
+filters}`; `enabled` mirrors `encounters.enabled`, `loops` is always `false`
+for now, `tags` says encounters carry the background/notable tag, and
+`filters` lists the feed filters this build understands (`tag`, `label`,
+`place`, `camera`).
+
+## Background or notable
+
+Marcellus tags every encounter as **background** (a passer-by you rarely
+need to look at) or **notable**, and records the most private place it
+reached (Public, Semi-private, Entry / exit, Private or Restricted) and the
+loudest answer the alert settings would give it (off, log, glance, notify or
+alarm). The feed carries these as `tag`, `place` and `outcome`.
+
+The first rule that matches decides, in this order:
+
+1. **Multi camera**: more than one camera saw it.
+2. **Left public**: it reached anywhere beyond Public.
+3. **Alerted**: your alert settings would do more than just log it.
+4. **Recognised**: anyone or anything was recognised by name.
+5. **Animal**: an animal was seen. A person together with a dog counts as a
+   dog walker, so the dog is ignored.
+6. **Lingered**: it lasted at least `linger_s` seconds.
+7. **Night**: it began after dark.
+8. Otherwise it is background, a passer-by.
+
+The tag is fixed when the visit is recorded and refreshed only when its
+members change. Later changes to your alert settings or zones do not rewrite
+older encounters; `fsc encounters restamp` re-applies the current rules to
+past ones on request. Night means the sun is below the horizon at the spot
+set by `latitude` and `longitude`; without them it falls back to 22:00 to
+06:00 server time.
 
 ## Retention
 
@@ -165,6 +200,9 @@ cycle, with no restart; the others need a restart.
 | `min_copresence_s` | `3.0` | yes | Minimum span overlap for two atoms to count as companions with no shared label family. |
 | `adjacency` | `[]` | yes | Extra camera-pair edges (`[[a, b], ...]`) beyond what shared zone names already imply. |
 | `not_adjacent` | `[]` | yes | Camera-pair edges to remove despite a shared zone name; config always beats the zone-derived graph. |
+| `linger_s` | `60.0` | no | Seconds an encounter must last to be tagged notable ("lingered") rather than a passer-by. |
+| `latitude` | unset | no | Property latitude (-90 to 90), used with `longitude` to decide when it is night. Unset: night is 22:00-06:00 server time. |
+| `longitude` | unset | no | Property longitude (-180 to 180); see `latitude`. |
 | `retention_days` | `30` | no | Age at which the hourly prune drops sealed encounters; unsealed ones are never pruned. |
 | `transitions_enabled` | `false` | no | Whether the learner writes per-camera-pair transition times into `camera_transitions`. |
 | `transition_min_samples` | `8` | yes | Samples an edge needs before its own percentiles are trusted (`learned`) rather than defaulted. |

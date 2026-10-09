@@ -17,8 +17,9 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from marcellus import db, zones
-from marcellus.encounters import store, title, visits
+from marcellus.encounters import notability, store, title, visits
 from marcellus.encounters.adjacency import Adjacency, build_adjacency
+from marcellus.encounters.notability import Stamper
 from marcellus.errors import error_detail
 from marcellus.models.wire import EncounterResponse, EncountersResponse
 from marcellus.push import policy_settings
@@ -31,6 +32,15 @@ v1_router = APIRouter(prefix="/v1", tags=["v1"])
 #: HTML page default window.
 _DEFAULT_WINDOW_S = 48 * 3600.0
 _MAX_LIMIT = 500
+
+
+def _csv(value: str | None) -> list[str]:
+    """`a,b, c` -> ["a", "b", "c"]; blanks dropped."""
+    return [v.strip() for v in (value or "").split(",") if v.strip()]
+
+
+def _stamper(request: Request) -> Stamper:
+    return notability.stamper_for(_settings(request))
 
 
 def _adjacency_for(request: Request) -> Adjacency:
@@ -98,6 +108,9 @@ def _summary(row: dict[str, Any], member_rows: list[dict[str, Any]]) -> dict[str
         "peak_severity": row["peak_severity"],
         "atom_count": row["atom_count"],
         "stops": stops,
+        "tag": row.get("tag"),
+        "place": row.get("place"),
+        "outcome": row.get("outcome"),
     }
 
 
@@ -230,11 +243,27 @@ async def encounters_list(
     limit: int = Query(200, ge=1, le=_MAX_LIMIT),
     camera: str | None = None,
     severity: Literal["alert", "detection"] | None = None,
+    tag: Literal["notable", "background"] | None = None,
+    label: str | None = None,
+    place: str | None = None,
 ) -> dict[str, Any]:
     """Newest first. Page by passing the last row's `start` as `before`. The
     48 h default window applies only when neither `since` nor `before` is
-    given; with `before` alone there is no lower bound."""
+    given; with `before` alone there is no lower bound. `camera`, `label`
+    and `place` take comma-separated lists (any-of); all filters AND."""
     settings = _settings(request)
+    cameras = _csv(camera)
+    labels = _csv(label)
+    places = _csv(place)
+    unknown = [p for p in places if p not in policy_settings.PLACES]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=error_detail(
+                "invalid",
+                f"unknown place {unknown[0]!r}; expected one of {list(policy_settings.PLACES)}",
+            ),
+        )
     window_since = since
     if since is None and before is None:
         window_since = time.time() - _DEFAULT_WINDOW_S
@@ -245,8 +274,11 @@ async def encounters_list(
             since=window_since,
             before=before,
             limit=limit,
-            camera=camera,
+            camera=cameras,
             severity=severity,
+            tag=tag,
+            labels=labels,
+            places=places,
         )
         return summaries(conn, rows)
 
@@ -297,9 +329,10 @@ async def _load_encounter_json(settings: Any, encounter_id: str) -> dict[str, An
 @router.post("/encounters/{encounter_id}/atoms/{atom_id}/split")
 async def split_atom_page(encounter_id: str, atom_id: str, request: Request) -> Any:
     settings = _settings(request)
+    stamper = _stamper(request)
 
     def _do(conn: Any) -> str:
-        return store.split_atom(conn, atom_id, time.time())
+        return store.split_atom(conn, atom_id, time.time(), stamper=stamper)
 
     try:
         new_encounter_id = await db.with_sidecar(settings.sidecar.db_path, _do)
@@ -313,13 +346,14 @@ async def split_atom_page(encounter_id: str, atom_id: str, request: Request) -> 
 @router.post("/encounters/{encounter_id}/atoms/{atom_id}/pin")
 async def pin_atom_page(encounter_id: str, atom_id: str, request: Request) -> Any:
     settings = _settings(request)
+    stamper = _stamper(request)
     form = await _urlencoded_form(request)
     target = form.get("target") or ""
     if not target:
         raise HTTPException(status_code=400, detail=error_detail("invalid", "target is required"))
 
     def _do(conn: Any) -> str:
-        return store.pin_atom(conn, atom_id, target, time.time())
+        return store.pin_atom(conn, atom_id, target, time.time(), stamper=stamper)
 
     try:
         target_encounter_id = await db.with_sidecar(settings.sidecar.db_path, _do)
@@ -331,13 +365,14 @@ async def pin_atom_page(encounter_id: str, atom_id: str, request: Request) -> An
 @router.post("/encounters/{encounter_id}/merge")
 async def merge_encounters_page(encounter_id: str, request: Request) -> Any:
     settings = _settings(request)
+    stamper = _stamper(request)
     form = await _urlencoded_form(request)
     source = form.get("source") or ""
     if not source:
         raise HTTPException(status_code=400, detail=error_detail("invalid", "source is required"))
 
     def _do(conn: Any) -> int:
-        return store.merge_encounters(conn, source, encounter_id, time.time())
+        return store.merge_encounters(conn, source, encounter_id, time.time(), stamper=stamper)
 
     try:
         count = await db.with_sidecar(settings.sidecar.db_path, _do)
@@ -360,9 +395,10 @@ async def undo_decisions_page(encounter_id: str, atom_id: str, request: Request)
 @v1_router.post("/encounters/{encounter_id}/atoms/{atom_id}/split")
 async def v1_split_atom(encounter_id: str, atom_id: str, request: Request) -> dict[str, Any]:
     settings = _settings(request)
+    stamper = _stamper(request)
 
     def _do(conn: Any) -> str:
-        return store.split_atom(conn, atom_id, time.time())
+        return store.split_atom(conn, atom_id, time.time(), stamper=stamper)
 
     try:
         new_encounter_id = await db.with_sidecar(settings.sidecar.db_path, _do)
@@ -374,13 +410,14 @@ async def v1_split_atom(encounter_id: str, atom_id: str, request: Request) -> di
 @v1_router.post("/encounters/{encounter_id}/atoms/{atom_id}/pin")
 async def v1_pin_atom(encounter_id: str, atom_id: str, request: Request) -> dict[str, Any]:
     settings = _settings(request)
+    stamper = _stamper(request)
     body = await request.json()
     target = body.get("target") if isinstance(body, dict) else None
     if not target:
         raise HTTPException(status_code=400, detail=error_detail("invalid", "target is required"))
 
     def _do(conn: Any) -> str:
-        return store.pin_atom(conn, atom_id, target, time.time())
+        return store.pin_atom(conn, atom_id, target, time.time(), stamper=stamper)
 
     try:
         target_encounter_id = await db.with_sidecar(settings.sidecar.db_path, _do)
@@ -392,13 +429,14 @@ async def v1_pin_atom(encounter_id: str, atom_id: str, request: Request) -> dict
 @v1_router.post("/encounters/{encounter_id}/merge")
 async def v1_merge_encounters(encounter_id: str, request: Request) -> dict[str, Any]:
     settings = _settings(request)
+    stamper = _stamper(request)
     body = await request.json()
     source = body.get("source") if isinstance(body, dict) else None
     if not source:
         raise HTTPException(status_code=400, detail=error_detail("invalid", "source is required"))
 
     def _do(conn: Any) -> int:
-        return store.merge_encounters(conn, source, encounter_id, time.time())
+        return store.merge_encounters(conn, source, encounter_id, time.time(), stamper=stamper)
 
     try:
         await db.with_sidecar(settings.sidecar.db_path, _do)

@@ -158,8 +158,16 @@ def _protect_capabilities(settings: Any, app_state: Any) -> dict[str, Any]:
 def _encounters_capabilities(settings: Any) -> dict[str, Any]:
     """`encounters` block of `/v1/capabilities`: `enabled` mirrors
     `encounters.enabled` (whether the linking service runs); `loops` is
-    reserved for the loop-video feature and is always `False` for now."""
-    return {"enabled": bool(settings.encounters.enabled), "loops": False}
+    reserved for the loop-video feature and is always `False` for now. `tags`
+    says encounters carry the background/notable stamp and `filters` lists the
+    `GET /v1/encounters` filters this build accepts (empty while disabled)."""
+    enabled = bool(settings.encounters.enabled)
+    return {
+        "enabled": enabled,
+        "loops": False,
+        "tags": enabled,
+        "filters": ["tag", "label", "place", "camera"] if enabled else [],
+    }
 
 
 @router.get("/capabilities", response_model=CapabilitiesResponse)

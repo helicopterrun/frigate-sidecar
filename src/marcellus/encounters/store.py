@@ -11,10 +11,13 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from marcellus.encounters.linker import Atom, LinkDecision, LinkerConfig, OpenEncounter
 from marcellus.encounters.observations import Direction
+
+if TYPE_CHECKING:
+    from marcellus.encounters.notability import Stamper
 
 _EMPTY_DIRECTION = Direction("", "", "", None, "")
 
@@ -126,14 +129,19 @@ def founder_singleton(conn: sqlite3.Connection, atom_id: str) -> str | None:
     return encounter_id
 
 
-def _donor_after_move(conn: sqlite3.Connection, encounter_id: str, now: float) -> None:
+def _donor_after_move(
+    conn: sqlite3.Connection,
+    encounter_id: str,
+    now: float,
+    stamper: Stamper | None = None,
+) -> None:
     """After an atom leaves `encounter_id` for another encounter: recompute
     its aggregates from the members that remain, or delete it outright if
     none remain."""
     if _member_count(conn, encounter_id) == 0:
         conn.execute("DELETE FROM encounters WHERE id = ?", (encounter_id,))
         return
-    recompute(conn, encounter_id)
+    recompute(conn, encounter_id, stamper=stamper)
     conn.execute("UPDATE encounters SET updated_at = ? WHERE id = ?", (now, encounter_id))
 
 
@@ -174,7 +182,9 @@ def member_unchanged(conn: sqlite3.Connection, atom: Atom) -> bool:
     )
 
 
-def remove_member(conn: sqlite3.Connection, atom_id: str, now: float) -> str | None:
+def remove_member(
+    conn: sqlite3.Connection, atom_id: str, now: float, *, stamper: Stamper | None = None
+) -> str | None:
     """Drop `atom_id`'s membership row (its Frigate reviewsegment vanished)
     and clean up the encounter it leaves behind -- same donor cleanup as a
     re-home in `upsert_atom`. Returns the encounter id the atom left, or
@@ -184,7 +194,7 @@ def remove_member(conn: sqlite3.Connection, atom_id: str, now: float) -> str | N
         return None
     encounter_id = str(row["encounter_id"])
     conn.execute("DELETE FROM encounter_members WHERE atom_id = ?", (atom_id,))
-    _donor_after_move(conn, encounter_id, now)
+    _donor_after_move(conn, encounter_id, now, stamper)
     return encounter_id
 
 
@@ -240,6 +250,7 @@ def upsert_atom(
     *,
     commit: bool = True,
     direction: Direction | None = None,
+    stamper: Stamper | None = None,
 ) -> str:
     """Insert or update one atom's membership row, then refresh its
     encounter's aggregates. Returns the encounter id the atom ends up in.
@@ -258,6 +269,9 @@ def upsert_atom(
     opens itself -- see `observations.load_direction`). Omitted/None writes
     the empty Direction, same as a genuinely undeterminable one; this upsert
     must never fail because direction derivation couldn't.
+
+    `stamper` (see `notability.stamper_for`) restamps the encounter's
+    tag/place/outcome from its members; omitted leaves them untouched.
     """
     # `commit=True` is the standalone-caller mode (live worker / push path,
     # both via `asyncio.to_thread` on independent connections). Python's
@@ -345,7 +359,7 @@ def upsert_atom(
                         atom.atom_id,
                     ),
                 )
-                _donor_after_move(conn, current_encounter_id, now)
+                _donor_after_move(conn, current_encounter_id, now, stamper)
             else:
                 encounter_id = current_encounter_id
                 existing_end_time = existing["end_time"]
@@ -415,7 +429,7 @@ def upsert_atom(
                 ),
             )
 
-        recompute(conn, encounter_id)
+        recompute(conn, encounter_id, stamper=stamper)
         conn.execute("UPDATE encounters SET updated_at = ? WHERE id = ?", (now, encounter_id))
         if commit:
             conn.commit()
@@ -426,8 +440,38 @@ def upsert_atom(
         raise
 
 
-def recompute(conn: sqlite3.Connection, encounter_id: str) -> None:
-    """Recompute one encounter's aggregate columns from its current members."""
+def _stamp_input(m: sqlite3.Row) -> dict[str, Any]:
+    """One member row in the shape `notability.stamp` reads."""
+    return {
+        "camera": m["camera"],
+        "start_time": m["start_time"],
+        "end_time": m["end_time"],
+        "labels": _loads_list(m["labels_json"]),
+        "zones": _loads_list(m["zones_json"]),
+        "sub_labels": _loads_list(m["sub_labels_json"]),
+    }
+
+
+def stamp_inputs(conn: sqlite3.Connection, encounter_id: str) -> list[dict[str, Any]]:
+    """The encounter's members as the stamper sees them (read-only; used by
+    `encounters restamp --dry-run`)."""
+    rows = conn.execute(
+        "SELECT camera, start_time, end_time, labels_json, zones_json, sub_labels_json "
+        "FROM encounter_members WHERE encounter_id = ? ORDER BY start_time, joined_at",
+        (encounter_id,),
+    ).fetchall()
+    return [_stamp_input(r) for r in rows]
+
+
+def recompute(
+    conn: sqlite3.Connection, encounter_id: str, *, stamper: Stamper | None = None
+) -> None:
+    """Recompute one encounter's aggregate columns from its current members.
+
+    With a `stamper`, also writes the notability stamp (`tag`, `place`,
+    `outcome`, `tag_reason`) in the same UPDATE; without one those four
+    columns are left exactly as they were. The stamp is therefore fixed at
+    the moment the members last changed -- `seal_stale` never restamps."""
     members = conn.execute(
         "SELECT camera, start_time, end_time, severity, labels_json, zones_json, "
         "event_ids_json, sub_labels_json FROM encounter_members "
@@ -464,23 +508,28 @@ def recompute(conn: sqlite3.Connection, encounter_id: str) -> None:
     if primary_event_id is None:
         primary_event_id = fallback_event_id
 
-    conn.execute(
-        "UPDATE encounters SET start_time = ?, end_time = ?, cameras_json = ?, "
-        "labels_json = ?, identities_json = ?, zones_json = ?, primary_event_id = ?, "
-        "peak_severity = ?, atom_count = ? WHERE id = ?",
-        (
-            start_time,
-            end_time,
-            json.dumps(cameras),
-            json.dumps(sorted(labels)),
-            json.dumps(sorted(identities)),
-            json.dumps(sorted(zones)),
-            primary_event_id,
-            peak_severity,
-            len(members),
-            encounter_id,
-        ),
+    set_sql = (
+        "start_time = ?, end_time = ?, cameras_json = ?, labels_json = ?, "
+        "identities_json = ?, zones_json = ?, primary_event_id = ?, peak_severity = ?, "
+        "atom_count = ?"
     )
+    params: list[Any] = [
+        start_time,
+        end_time,
+        json.dumps(cameras),
+        json.dumps(sorted(labels)),
+        json.dumps(sorted(identities)),
+        json.dumps(sorted(zones)),
+        primary_event_id,
+        peak_severity,
+        len(members),
+    ]
+    if stamper is not None:
+        stamp = stamper([_stamp_input(m) for m in members])
+        set_sql += ", tag = ?, place = ?, outcome = ?, tag_reason = ?"
+        params += [stamp.tag, stamp.place, stamp.outcome, stamp.reason]
+    params.append(encounter_id)
+    conn.execute(f"UPDATE encounters SET {set_sql} WHERE id = ?", params)
 
 
 def seal_stale(conn: sqlite3.Connection, now: float, cfg: LinkerConfig) -> int:
@@ -527,8 +576,11 @@ def list_recent(
     since: float | None = None,
     before: float | None = None,
     limit: int = 200,
-    camera: str | None = None,
+    camera: str | Sequence[str] | None = None,
     severity: str | None = None,
+    tag: str | None = None,
+    labels: Sequence[str] | None = None,
+    places: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Newest first by `start_time` (ties broken by `id`, so a page is stable).
 
@@ -536,6 +588,11 @@ def list_recent(
     is inclusive, `before` exclusive (`start_time < before`): a client pages
     by passing the last row's `start` as `before`. Either bound may be
     omitted -- the caller decides whether a default window applies.
+
+    Filters combine with AND. `camera` is one name or any-of a sequence;
+    `tag` is "notable" (which also matches never-stamped NULL rows) or
+    "background"; `labels` matches case-insensitively against the labels or
+    recognised identities; `places` matches the stamped place class.
     """
     clauses: list[str] = []
     params: list[Any] = []
@@ -545,12 +602,38 @@ def list_recent(
     if before is not None:
         clauses.append("start_time < ?")
         params.append(before)
-    if camera:
-        clauses.append("cameras_json LIKE ?")
-        params.append(f'%"{camera}"%')
+    camera_values = [camera] if isinstance(camera, str) else list(camera or [])
+    camera_values = [c for c in camera_values if c]
+    if camera_values:
+        marks = ",".join("?" for _ in camera_values)
+        clauses.append(
+            f"EXISTS (SELECT 1 FROM json_each(encounters.cameras_json) WHERE value IN ({marks}))"
+        )
+        params.extend(camera_values)
     if severity:
         clauses.append("peak_severity = ?")
         params.append(severity)
+    if tag == "notable":
+        clauses.append("(tag = 'notable' OR tag IS NULL)")
+    elif tag:
+        clauses.append("tag = ?")
+        params.append(tag)
+    label_values = [v.lower() for v in (labels or []) if v]
+    if label_values:
+        marks = ",".join("?" for _ in label_values)
+        clauses.append(
+            "(EXISTS (SELECT 1 FROM json_each(encounters.labels_json) "
+            f"WHERE lower(value) IN ({marks})) "
+            "OR EXISTS (SELECT 1 FROM json_each(encounters.identities_json) "
+            f"WHERE lower(value) IN ({marks})))"
+        )
+        params.extend(label_values)
+        params.extend(label_values)
+    place_values = [p for p in (places or []) if p]
+    if place_values:
+        marks = ",".join("?" for _ in place_values)
+        clauses.append(f"place IN ({marks})")
+        params.extend(place_values)
     sql = "SELECT * FROM encounters"
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
@@ -621,7 +704,14 @@ def clear_decisions(conn: sqlite3.Connection, atom_id: str) -> None:
     conn.execute("DELETE FROM encounter_decisions WHERE atom_id = ?", (atom_id,))
 
 
-def split_atom(conn: sqlite3.Connection, atom_id: str, now: float, *, commit: bool = True) -> str:
+def split_atom(
+    conn: sqlite3.Connection,
+    atom_id: str,
+    now: float,
+    *,
+    commit: bool = True,
+    stamper: Stamper | None = None,
+) -> str:
     """Split `atom_id` out of its current encounter into a fresh one of its
     own, recording a `split` decision against the donor. The new encounter's
     single member gets `link_reason='split'` -- never treated as a lone
@@ -646,8 +736,8 @@ def split_atom(conn: sqlite3.Connection, atom_id: str, now: float, *, commit: bo
         "confidence = 1.0, joined_at = ? WHERE atom_id = ?",
         (new_encounter_id, now, atom_id),
     )
-    _donor_after_move(conn, donor_id, now)
-    recompute(conn, new_encounter_id)
+    _donor_after_move(conn, donor_id, now, stamper)
+    recompute(conn, new_encounter_id, stamper=stamper)
     conn.execute("UPDATE encounters SET updated_at = ? WHERE id = ?", (now, new_encounter_id))
     if commit:
         conn.commit()
@@ -661,6 +751,7 @@ def pin_atom(
     now: float,
     *,
     commit: bool = True,
+    stamper: Stamper | None = None,
 ) -> str:
     """Pin `atom_id` into `target_encounter_id`, recording a `pin` decision
     and clearing any `split` decision that named this same target (a pin
@@ -689,8 +780,8 @@ def pin_atom(
         (target_encounter_id, now, atom_id),
     )
     if donor_id != target_encounter_id:
-        _donor_after_move(conn, donor_id, now)
-    recompute(conn, target_encounter_id)
+        _donor_after_move(conn, donor_id, now, stamper)
+    recompute(conn, target_encounter_id, stamper=stamper)
     conn.execute("UPDATE encounters SET updated_at = ? WHERE id = ?", (now, target_encounter_id))
     if commit:
         conn.commit()
@@ -698,7 +789,13 @@ def pin_atom(
 
 
 def merge_encounters(
-    conn: sqlite3.Connection, source_id: str, target_id: str, now: float, *, commit: bool = True
+    conn: sqlite3.Connection,
+    source_id: str,
+    target_id: str,
+    now: float,
+    *,
+    commit: bool = True,
+    stamper: Stamper | None = None,
 ) -> int:
     """Pin every member of `source_id` into `target_id` (recording a pin
     decision per atom). `source_id` is deleted once empty. Returns the
@@ -712,7 +809,7 @@ def merge_encounters(
     ).fetchall()
     atom_ids = [str(r["atom_id"]) for r in member_rows]
     for atom_id in atom_ids:
-        pin_atom(conn, atom_id, target_id, now, commit=False)
+        pin_atom(conn, atom_id, target_id, now, commit=False, stamper=stamper)
     if commit:
         conn.commit()
     return len(atom_ids)

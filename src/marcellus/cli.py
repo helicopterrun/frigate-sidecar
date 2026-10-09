@@ -409,6 +409,7 @@ def encounters_repair(
     import time
 
     from marcellus import db
+    from marcellus.encounters import notability
     from marcellus.encounters import repair as repair_mod
     from marcellus.encounters.service import _linker_config
 
@@ -418,12 +419,51 @@ def encounters_repair(
     try:
         cfg = _linker_config(s, sidecar_conn)
         summary = repair_mod.repair(
-            sidecar_conn, frigate_conn, time.time(), cfg, dry_run=dry_run, limit=limit
+            sidecar_conn,
+            frigate_conn,
+            time.time(),
+            cfg,
+            dry_run=dry_run,
+            limit=limit,
+            stamper=notability.stamper_for(s),
         )
     finally:
         sidecar_conn.close()
         frigate_conn.close()
     typer.echo(json.dumps(summary.as_dict()))
+
+
+@encounters_app.command("restamp")
+def encounters_restamp(
+    since: float | None = typer.Option(
+        None, "--since", help="Only encounters starting at or after this epoch (default: all)."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report counts without writing."),
+) -> None:
+    """Re-run the background/notable stamp over existing encounters with the
+    current alert settings and zones, in batches of 200. Prints counts by tag
+    and by reason. Idempotent; stamps otherwise only change when an
+    encounter's members do."""
+    from marcellus import db
+    from marcellus.encounters import notability
+    from marcellus.encounters import repair as repair_mod
+    from marcellus.push import policy_settings
+
+    s = load_settings()
+    # The CLI runs outside the server, so load the user's routing/zone policy
+    # exactly when the server's lifespan does (push enabled) -- otherwise the
+    # stamp would use the built-in baseline instead of the settings the app
+    # edits, and a push-disabled install would stamp differently here than live.
+    if s.push.enabled:
+        policy_settings.startup(s.push.push_settings_path)
+    conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        result = repair_mod.restamp(
+            conn, notability.stamper_for(s), since=since, dry_run=dry_run
+        )
+    finally:
+        conn.close()
+    typer.echo(json.dumps(result))
 
 
 @face_capture_app.command("stats")

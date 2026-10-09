@@ -556,7 +556,13 @@ CREATE TABLE IF NOT EXISTS encounters (
                                                    -- (else the first member's)
     peak_severity    TEXT NOT NULL DEFAULT 'detection',
     atom_count       INTEGER NOT NULL DEFAULT 0,
-    updated_at       REAL NOT NULL
+    updated_at       REAL NOT NULL,
+    -- Notability stamp (encounters/notability.py), written by recompute when
+    -- the members change; NULL = never stamped. Also in _ADDED_COLUMNS.
+    tag              TEXT,                       -- 'background' | 'notable'
+    place            TEXT,                       -- most private place class reached
+    outcome          TEXT,                       -- loudest alert-ladder outcome
+    tag_reason       TEXT                        -- which rule decided the tag
 );
 CREATE INDEX IF NOT EXISTS idx_encounters_start ON encounters(start_time);
 CREATE INDEX IF NOT EXISTS idx_encounters_open ON encounters(sealed_at) WHERE sealed_at IS NULL;
@@ -702,6 +708,14 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "face_enrichments": [
         # Soft-exclude (Wave 6B-2): added after face_enrichments first shipped.
         ("excluded_at", "TEXT"),
+    ],
+    "encounters": [
+        # Notability stamp (encounters/notability.py). Also in the CREATE
+        # TABLE literal above for fresh installs. NULL = never stamped.
+        ("tag", "TEXT"),
+        ("place", "TEXT"),
+        ("outcome", "TEXT"),
+        ("tag_reason", "TEXT"),
     ],
     "encounter_members": [
         # Observations (M1): direction derived from the atom's Frigate event
