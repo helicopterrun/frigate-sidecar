@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from marcellus import db
 from marcellus.analysis.clock_offset import event_clock_offset_s
 from marcellus.config import Settings
-from marcellus.encounters import store
+from marcellus.encounters import notability, store
 from marcellus.encounters.adjacency import Adjacency
 from marcellus.encounters.linker import Atom, LinkerConfig, apply, decide, normalise_labels
 from marcellus.encounters.observations import Direction, load_direction
@@ -116,6 +116,7 @@ class EncounterService:
         self.adjacency = adjacency
         self._now = now
         self._cfg = _linker_config(settings, None)
+        self._stamper = notability.stamper_for(settings)
         # Cache of the adjacency/not_adjacent lists `self.adjacency` was last
         # built from, so `reconcile` only re-derives zones + rebuilds the
         # graph when a tuning override actually changed one of them, not on
@@ -288,7 +289,9 @@ class EncounterService:
                     split_from=exclude,
                 )
                 direction = self._direction_for(atom)
-                return store.upsert_atom(conn, atom, decision, now, direction=direction)
+                return store.upsert_atom(
+                    conn, atom, decision, now, direction=direction, stamper=self._stamper
+                )
             finally:
                 conn.close()
         except Exception:  # noqa: BLE001 -- an encounters failure must never affect push
@@ -430,7 +433,13 @@ class EncounterService:
                     except Exception:  # noqa: BLE001 -- direction is best-effort
                         direction = None
                     encounter_id = store.upsert_atom(
-                        sidecar_conn, atom, decision, now, commit=False, direction=direction
+                        sidecar_conn,
+                        atom,
+                        decision,
+                        now,
+                        commit=False,
+                        direction=direction,
+                        stamper=self._stamper,
                     )
 
                     # Keep the in-memory `by_id` view consistent with what the
@@ -485,7 +494,9 @@ class EncounterService:
                     atom_id = stale["atom_id"]
                     if atom_id in seen_ids:
                         continue
-                    donor_id = store.remove_member(sidecar_conn, atom_id, now)
+                    donor_id = store.remove_member(
+                        sidecar_conn, atom_id, now, stamper=self._stamper
+                    )
                     if donor_id is not None:
                         by_id.pop(donor_id, None)
                     removed_count += 1

@@ -692,13 +692,22 @@ def _build_v1_coverage() -> dict[str, Any]:
 
 
 def _build_v1_encounters() -> dict[str, Any]:
-    """`GET /v1/encounters` over three canned encounters: a multi-camera alert
+    """`GET /v1/encounters` over four canned encounters: a multi-camera alert
     (person + dog, a merged stop and a return visit), a single-camera detection
-    that falls back to the camera name, and a sealed single-zone delivery identified as Amazon.
-    Newest first; every row carries its computed `title`."""
+    that falls back to the camera name, a sealed single-zone delivery identified as Amazon,
+    and a brief passer-by on the sidewalk (the one stamped `background` row).
+    Newest first; every row carries its computed `title` and its notability stamp."""
     from marcellus import db as db_mod
+    from marcellus.encounters import notability
     from marcellus.encounters.linker import Atom, LinkDecision
     from marcellus.encounters.store import upsert_atom
+
+    # A fixed location and zone map (not the host's clock or live policy) so
+    # the "night" rule and place classes are the same file on every machine.
+    def _stamper(members: list[dict[str, Any]]) -> notability.Stamp:
+        return notability.stamp(
+            members, zone_classes={}, linger_s=60.0, latitude=47.6, longitude=-122.3
+        )
 
     def _atom(
         atom_id: str,
@@ -766,6 +775,12 @@ def _build_v1_encounters() -> dict[str, Any]:
                     _atom("r4", "gate-face", base + 1800, labels=("raccoon",),
                           severity="detection"),
                 ),
+                # A brief walk past on the sidewalk: background.
+                (
+                    "enc_passerby", "new",
+                    _atom("r7", "street-cam", base + 5400, labels=("person",),
+                          zones=("sidewalk",), severity="detection"),
+                ),
                 # Sealed delivery, recognised brand, one zone.
                 (
                     "enc_delivery", "new",
@@ -775,7 +790,7 @@ def _build_v1_encounters() -> dict[str, Any]:
             ]
             for encounter_id, reason, atom in plan:
                 decision = LinkDecision(encounter_id, reason, 1.0 if reason == "new" else 0.9)
-                upsert_atom(sconn, atom, decision, atom.start_time)
+                upsert_atom(sconn, atom, decision, atom.start_time, stamper=_stamper)
             sconn.execute(
                 "UPDATE encounters SET sealed_at = ? WHERE id IN ('enc_walk', 'enc_delivery')",
                 (SENT_AT - 600.0,),

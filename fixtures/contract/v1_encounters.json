@@ -3,6 +3,34 @@
     {
       "atom_count": 1,
       "cameras": [
+        "street-cam"
+      ],
+      "end": 1785950834.704,
+      "id": "enc_passerby",
+      "identities": [],
+      "labels": [
+        "person"
+      ],
+      "outcome": "log",
+      "peak_severity": "detection",
+      "place": "street",
+      "primary_event_id": "1785950822.704-r7",
+      "sealed": false,
+      "start": 1785950822.704,
+      "stops": [
+        {
+          "camera": "street-cam",
+          "end": 1785950834.704,
+          "start": 1785950822.704,
+          "zone": "Sidewalk"
+        }
+      ],
+      "tag": "background",
+      "title": "Person near Sidewalk"
+    },
+    {
+      "atom_count": 1,
+      "cameras": [
         "porch-cam"
       ],
       "end": 1785949034.704,
@@ -14,7 +42,9 @@
         "package",
         "person"
       ],
+      "outcome": "notify",
       "peak_severity": "alert",
+      "place": "doors",
       "primary_event_id": "1785949022.704-r5",
       "sealed": true,
       "start": 1785949022.704,
@@ -26,6 +56,7 @@
           "zone": "Front Door"
         }
       ],
+      "tag": "notable",
       "title": "Amazon and package near Front Door"
     },
     {
@@ -39,7 +70,9 @@
       "labels": [
         "raccoon"
       ],
+      "outcome": "log",
       "peak_severity": "detection",
+      "place": "street",
       "primary_event_id": "1785947222.704-r4",
       "sealed": false,
       "start": 1785947222.704,
@@ -51,6 +84,7 @@
           "zone": null
         }
       ],
+      "tag": "notable",
       "title": "Raccoon \u00b7 Gate Face camera"
     },
     {
@@ -67,7 +101,9 @@
         "dog",
         "person"
       ],
+      "outcome": "notify",
       "peak_severity": "alert",
+      "place": "doors",
       "primary_event_id": "1785945482.704-r3",
       "sealed": true,
       "start": 1785945422.704,
@@ -97,6 +133,7 @@
           "zone": "Sidewalk"
         }
       ],
+      "tag": "notable",
       "title": "Person and dog \u00b7 Sidewalk \u2192 Front Garden \u2192 Front Door \u2192 Sidewalk"
     }
   ],

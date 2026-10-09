@@ -17,10 +17,14 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING
 
 from marcellus.encounters import store
 from marcellus.encounters.linker import LinkerConfig
 from marcellus.encounters.observations import load_direction
+
+if TYPE_CHECKING:
+    from marcellus.encounters.notability import Stamper
 
 _BATCH_SIZE = 200
 
@@ -63,6 +67,7 @@ def repair(
     *,
     dry_run: bool = False,
     limit: int | None = None,
+    stamper: Stamper | None = None,
 ) -> RepairSummary:
     """Run one repair pass. `cfg.max_duration_s` bounds how old a still-open
     (NULL end_time) Frigate segment may be before it's treated as stale
@@ -87,7 +92,9 @@ def repair(
         for row in batch:
             sidecar_conn.execute("SAVEPOINT repair_atom")
             try:
-                _repair_one(row, sidecar_conn, frigate_conn, now, cfg, summary, touched_encounters)
+                _repair_one(
+                    row, sidecar_conn, frigate_conn, now, cfg, summary, touched_encounters, stamper
+                )
             except Exception:
                 sidecar_conn.execute("ROLLBACK TO SAVEPOINT repair_atom")
                 sidecar_conn.execute("RELEASE SAVEPOINT repair_atom")
@@ -110,7 +117,7 @@ def repair(
             sidecar_conn.execute("DELETE FROM encounters WHERE id = ?", (encounter_id,))
             summary.deleted_encounters += 1
         else:
-            store.recompute(sidecar_conn, encounter_id)
+            store.recompute(sidecar_conn, encounter_id, stamper=stamper)
             sidecar_conn.execute(
                 "UPDATE encounters SET updated_at = ? WHERE id = ?", (now, encounter_id)
             )
@@ -169,12 +176,13 @@ def _remove_and_track(
     now: float,
     summary: RepairSummary,
     touched: set[str],
+    stamper: Stamper | None = None,
 ) -> None:
     """`store.remove_member` already deletes the donor encounter outright
     when it's left with zero members (`_donor_after_move`), so by the time
     it returns there's nothing left in `encounters` to recompute -- count it
     here rather than adding it to `touched` for the end-of-pass sweep."""
-    store.remove_member(sidecar_conn, atom_id, now)
+    store.remove_member(sidecar_conn, atom_id, now, stamper=stamper)
     summary.deleted_members += 1
     still_exists = sidecar_conn.execute(
         "SELECT 1 FROM encounters WHERE id = ?", (encounter_id,)
@@ -193,13 +201,16 @@ def _repair_one(
     cfg: LinkerConfig,
     summary: RepairSummary,
     touched: set[str],
+    stamper: Stamper | None = None,
 ) -> None:
     atom_id = row["atom_id"]
     encounter_id = str(row["encounter_id"])
     frow = _frigate_row(frigate_conn, atom_id)
 
     if frow is None:
-        _remove_and_track(sidecar_conn, atom_id, encounter_id, now, summary, touched)
+        _remove_and_track(
+            sidecar_conn, atom_id, encounter_id, now, summary, touched, stamper
+        )
         return
 
     f_start = frow["start_time"]
@@ -207,14 +218,18 @@ def _repair_one(
 
     if f_start is None or f_start <= 0:
         # Frigate itself has no usable start -- nothing to repair from.
-        _remove_and_track(sidecar_conn, atom_id, encounter_id, now, summary, touched)
+        _remove_and_track(
+            sidecar_conn, atom_id, encounter_id, now, summary, touched, stamper
+        )
         return
 
     if f_end is None:
         if now - f_start > cfg.max_duration_s:
             # Ancient and still "open" -- Frigate would have closed a real
             # segment long ago. Never invent an end_time; delete instead.
-            _remove_and_track(sidecar_conn, atom_id, encounter_id, now, summary, touched)
+            _remove_and_track(
+            sidecar_conn, atom_id, encounter_id, now, summary, touched, stamper
+        )
             return
         # Genuinely still young/open -- only fix start if needed, leave
         # end_time null.
@@ -261,3 +276,51 @@ def _repair_one(
             store.set_direction(sidecar_conn, atom_id, direction, commit=False)
     except Exception:  # noqa: BLE001 -- direction is best-effort, never fatal
         pass
+
+
+def restamp(
+    conn: sqlite3.Connection,
+    stamper: Stamper,
+    *,
+    since: float | None = None,
+    dry_run: bool = False,
+) -> dict[str, object]:
+    """`marcellus encounters restamp`: re-run the notability stamper over
+    existing encounters (those starting at or after `since`, default all), in
+    batches of 200. Rewrites each encounter's aggregates and tag/place/outcome/
+    tag_reason from its members via `store.recompute`; `updated_at` and the
+    seal state are left alone. `dry_run` computes the same counts without
+    writing. Returns `{scanned, by_tag, by_reason}`."""
+    sql = "SELECT id FROM encounters"
+    params: list[float] = []
+    if since is not None:
+        sql += " WHERE start_time >= ?"
+        params.append(since)
+    ids = [r["id"] for r in conn.execute(sql + " ORDER BY start_time, id", params).fetchall()]
+
+    by_tag: dict[str, int] = {}
+    by_reason: dict[str, int] = {}
+    scanned = 0
+    for start in range(0, len(ids), _BATCH_SIZE):
+        batch = ids[start : start + _BATCH_SIZE]
+        for encounter_id in batch:
+            if dry_run:
+                members = store.stamp_inputs(conn, encounter_id)
+                if not members:
+                    continue
+                stamp = stamper(members)
+                tag, reason = stamp.tag, stamp.reason
+            else:
+                store.recompute(conn, encounter_id, stamper=stamper)
+                row = conn.execute(
+                    "SELECT tag, tag_reason FROM encounters WHERE id = ?", (encounter_id,)
+                ).fetchone()
+                if row is None or row["tag"] is None:  # no members: nothing stamped
+                    continue
+                tag, reason = row["tag"], row["tag_reason"]
+            scanned += 1
+            by_tag[tag] = by_tag.get(tag, 0) + 1
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+        if not dry_run:
+            conn.commit()
+    return {"scanned": scanned, "by_tag": by_tag, "by_reason": by_reason}

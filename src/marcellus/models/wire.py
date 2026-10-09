@@ -75,6 +75,8 @@ class UnifiProtectCapabilities(_Wire):
 class EncountersCapabilities(_Wire):
     enabled: bool
     loops: bool
+    tags: bool
+    filters: list[str]
 
 
 class CapabilitiesResponse(_Wire):
@@ -344,6 +346,11 @@ class EncounterSummary(_Wire):
     peak_severity: str
     atom_count: int
     stops: list[EncounterStop]
+    #: Notability stamp (`encounters/notability.py`), fixed when the members
+    #: last changed; None = never stamped (clients treat that as notable).
+    tag: str | None = None
+    place: str | None = None
+    outcome: str | None = None
 
 
 class EncountersResponse(_Wire):

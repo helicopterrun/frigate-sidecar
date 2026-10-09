@@ -711,6 +711,29 @@ class EncountersSection(BaseModel):
     # `use_learned_gaps`.
     transition_slack: float = 1.5
 
+    # Notability (encounters/notability.py): an encounter that stays at least
+    # this many seconds is "notable" ("lingered") rather than a passer-by.
+    linger_s: float = 60.0
+
+    # Where the property is, for the "night" rule (sun below the horizon).
+    # Both unset: night falls back to 22:00-06:00 server-local time.
+    latitude: float | None = None
+    longitude: float | None = None
+
+    @field_validator("latitude")
+    @classmethod
+    def _check_latitude(cls, v: float | None) -> float | None:
+        if v is not None and not -90.0 <= v <= 90.0:
+            raise ValueError("encounters.latitude must be between -90 and 90")
+        return v
+
+    @field_validator("longitude")
+    @classmethod
+    def _check_longitude(cls, v: float | None) -> float | None:
+        if v is not None and not -180.0 <= v <= 180.0:
+            raise ValueError("encounters.longitude must be between -180 and 180")
+        return v
+
     # M4 /v1/timeline: hard cap (seconds) on the [start, end] window a single
     # request may ask for -- a global multi-camera composition is far more
     # expensive per second of window than one reel, so this is deliberately

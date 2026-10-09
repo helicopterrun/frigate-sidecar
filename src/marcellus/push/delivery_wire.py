@@ -28,7 +28,7 @@ import logging
 import math
 import secrets
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -145,28 +145,35 @@ _SUBJECT_COPY = {
 }
 
 
-def classify_subject(event: ReviewEvent) -> str:
-    """Observable-subject classification (routing v2): label, camera, zone
-    only. Identity (sub_label/plate) is never consulted at create time —
-    it arrives later via recognition and only relaxes a running story."""
-    labels = set(event.labels)
-    if "person" in labels:
+def subject_for_labels(labels: Iterable[str]) -> str:
+    """Observable-subject classification for a bag of Frigate labels (the
+    label-only half of `classify_subject`, shared with
+    `encounters.notability`)."""
+    label_set = set(labels)
+    if "person" in label_set:
         return "person"
-    if labels & _VEHICLE_LABELS:
+    if label_set & _VEHICLE_LABELS:
         return "vehicle"
-    if labels & _ANIMAL_LABELS:
+    if label_set & _ANIMAL_LABELS:
         return "animal"
     # V3 subjects (one alerts stack): the labels that used to pick an LA
     # *family* off a `thing` card now classify the subject itself, so the
     # outcome ladder is the single authority on what they do. `thing`
     # remains the fallback for labels nothing claims.
-    if "package" in labels:
+    if "package" in label_set:
         return "package"
-    if labels & live_activities.BIN_LABELS:
+    if label_set & live_activities.BIN_LABELS:
         return "bin"
-    if labels & live_activities.OPENING_LABELS:
+    if label_set & live_activities.OPENING_LABELS:
         return "opening"
     return "thing"
+
+
+def classify_subject(event: ReviewEvent) -> str:
+    """Observable-subject classification (routing v2): label, camera, zone
+    only. Identity (sub_label/plate) is never consulted at create time —
+    it arrives later via recognition and only relaxes a running story."""
+    return subject_for_labels(event.labels)
 
 
 def zone_place(zone: str, zone_classes: dict[str, str]) -> str:
