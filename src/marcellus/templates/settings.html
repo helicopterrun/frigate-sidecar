@@ -12,6 +12,7 @@
     <a href="#cameras" class="page-link">Cameras</a>
     <a href="#alignment" class="page-link">Alignment</a>
     <a href="#push" class="page-link">Push</a>
+    <a href="#location" class="page-link">Location</a>
     <a href="#tuning" class="page-link">Tuning</a>
     <a href="#config" class="page-link">Config</a>
     <a href="#data" class="page-link">Data</a>
@@ -32,6 +33,18 @@
     {# Skeletons: cleared when zones.js renders the real rows. #}
     <div class="skeleton-row" style="flex:1 1 300px"></div>
     <div class="skeleton-row" style="flex:1 1 300px"></div>
+    <div class="skeleton-row" style="flex:1 1 300px"></div>
+  </div>
+
+  <h4 class="sub-title">Cameras</h4>
+  <p class="help page-intro">
+    Used when something is seen outside every zone. Only Marcellus's
+    <a href="/guide/encounters" class="page-link">encounter</a> tags use this
+    (so a front-door camera's zoneless sightings read as Entry / exit);
+    push notifications are not affected.
+  </p>
+  <div id="camera-places" class="stat-row zones-grid skeleton"
+       data-places='{{ camera_places|tojson }}'>
     <div class="skeleton-row" style="flex:1 1 300px"></div>
   </div>
 
@@ -210,7 +223,7 @@
   <div id="tuning-restart-banner" class="help page-intro" style="display:none"></div>
   <div id="tuning-sections">
     {% for sec in tuning_sections %}
-    <details class="tuning-section" open data-section="{{ sec.name }}" id="{{ sec.name }}">
+    <details class="tuning-section" open data-section="{{ sec.name }}"{% if sec.name == 'location' %} id="location"{% else %} id="{{ sec.name }}"{% endif %}>
       <summary>{{ sec.title }}</summary>
       <div class="tuning-grid" id="tuning-grid-{{ sec.name or 'root' }}"></div>
     </details>

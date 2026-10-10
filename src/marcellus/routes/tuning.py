@@ -7,11 +7,13 @@ docs/settings-dial): effective config + user overrides for every knob the
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
 from marcellus import tuning
+from marcellus.encounters import notability
 from marcellus.zones import configured_camera_names
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,7 @@ _ERR_STALE_REV = "stale_rev"
 
 _SECTION_TITLES: dict[str, str] = {
     "": "General",
+    "location": "Location",
     "sidecar": "Sidecar",
     "frigate": "Frigate",
     "push": "Push",
@@ -39,6 +42,15 @@ def _sections() -> list[dict[str, str]]:
     return [{"name": name, "title": title} for name, title in _SECTION_TITLES.items()]
 
 
+def _location_state(settings: Any) -> dict[str, Any]:
+    """Whether the sun is up at the saved location right now, so the owner can
+    sanity-check it. `sun_up` is null when no location is saved."""
+    loc = settings.location
+    if loc.latitude is None or loc.longitude is None:
+        return {"sun_up": None}
+    return {"sun_up": not notability.is_night(time.time(), loc.latitude, loc.longitude)}
+
+
 @router.get("/tuning")
 async def get_tuning(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
@@ -50,6 +62,7 @@ async def get_tuning(request: Request) -> dict[str, Any]:
         "pending_restart": tuning.pending_restart(settings, overrides),
         "sections": _sections(),
         "overrides": overrides,
+        "location": _location_state(settings),
     }
 
 
@@ -147,4 +160,5 @@ async def put_tuning(request: Request) -> dict[str, Any]:
         "pending_restart": tuning.pending_restart(settings, new_overrides),
         "sections": _sections(),
         "overrides": new_overrides,
+        "location": _location_state(settings),
     }

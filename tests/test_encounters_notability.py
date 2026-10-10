@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from marcellus.config import EncountersSection, Settings
+from marcellus.config import EncountersSection, LocationSection, Settings
 from marcellus.encounters import notability
 from marcellus.encounters.notability import Stamp, is_night, solar_elevation_deg, stamp
 from marcellus.push import ladder_policy, policy_settings
@@ -214,11 +214,28 @@ def test_rule6_linger_boundary() -> None:
     assert _stamp(_m(end=NOON + 60.0), linger_s=61.0).tag == "background"
 
 
-def test_rule6_span_across_members_uses_open_member_start() -> None:
+def test_rule6_open_member_has_no_duration() -> None:
     open_member = _m(start=NOON + 70)
     open_member["end_time"] = None
+    # Still-open members count as 0 s: the encounter's 70 s+ span is irrelevant.
     s = _stamp(_m(), open_member)
-    assert s.reason == "lingered"
+    assert (s.tag, s.reason) == ("background", "passer_by")
+
+
+def test_rule6_chained_passers_by_are_not_lingering() -> None:
+    # Three 10 s sightings spread over five minutes on one camera: a busy
+    # sidewalk chained into one encounter, nobody stayed.
+    s = _stamp(
+        _m(start=NOON, end=NOON + 10),
+        _m(start=NOON + 150, end=NOON + 160),
+        _m(start=NOON + 290, end=NOON + 300),
+    )
+    assert (s.tag, s.reason) == ("background", "passer_by")
+
+
+def test_rule6_one_long_member_is_lingering() -> None:
+    s = _stamp(_m(start=NOON, end=NOON + 10), _m(start=NOON + 100, end=NOON + 170))
+    assert (s.tag, s.reason) == ("notable", "lingered")
 
 
 def test_rule7_night_by_location() -> None:
@@ -249,7 +266,7 @@ def test_members_accept_raw_json_columns() -> None:
 
 
 def test_stamper_for_reads_zone_classes_at_call_time() -> None:
-    settings = Settings(encounters=EncountersSection(latitude=47.6, longitude=-122.3))
+    settings = Settings(location=LocationSection(latitude=47.6, longitude=-122.3))
     stamper = notability.stamper_for(settings)
     member = _m(zones=("zz_unlisted",))
     before = stamper([member])
@@ -261,7 +278,10 @@ def test_stamper_for_reads_zone_classes_at_call_time() -> None:
 
 
 def test_stamper_for_uses_configured_linger() -> None:
-    settings = Settings(encounters=EncountersSection(linger_s=5.0, latitude=47.6, longitude=-122.3))
+    settings = Settings(
+        encounters=EncountersSection(linger_s=5.0),
+        location=LocationSection(latitude=47.6, longitude=-122.3),
+    )
     s = notability.stamper_for(settings)([_m(end=NOON + 6)])
     assert s.reason == "lingered"
 
@@ -272,7 +292,84 @@ def test_stamp_values_are_in_policy_vocabularies() -> None:
     assert s.outcome in policy_settings.OUTCOMES
 
 
-@pytest.mark.parametrize("field,value", [("latitude", 91), ("latitude", -91), ("longitude", 181)])
-def test_config_range_validation(field: str, value: float) -> None:
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"latitude": 91, "longitude": 0},
+        {"latitude": -91, "longitude": 0},
+        {"latitude": 0, "longitude": 181},
+        {"latitude": 0, "longitude": float("nan")},
+        {"latitude": 47.6},  # both or neither
+        {"longitude": -122.3},
+    ],
+)
+def test_location_validation(kwargs: dict[str, float]) -> None:
     with pytest.raises(ValueError):
-        EncountersSection(**{field: value})
+        LocationSection(**kwargs)
+
+
+def test_location_label_needs_no_coordinates() -> None:
+    assert LocationSection(label="home").latitude is None
+
+
+# ---- a place for cameras (zoneless members) ---------------------------------
+
+
+def _stamp_cams(*members: dict[str, Any], camera_classes: dict[str, str]) -> Stamp:
+    return stamp(
+        list(members),
+        zone_classes=ZONES,
+        camera_classes=camera_classes,
+        linger_s=60.0,
+        latitude=SEATTLE[0],
+        longitude=SEATTLE[1],
+    )
+
+
+def test_zoneless_member_takes_its_cameras_place() -> None:
+    s = _stamp_cams(_m(zones=()), camera_classes={"cam-a": "doors"})
+    assert (s.place, s.tag, s.reason) == ("doors", "notable", "left_public")
+    # Evaluated at that place, exactly like a member seen in a doors zone.
+    assert s.outcome == _stamp(_m(zones=("porch",))).outcome == "notify"
+
+
+def test_zoneless_member_without_an_entry_uses_the_name_guess() -> None:
+    assert _stamp_cams(_m(zones=(), camera="front-door"), camera_classes={}).place == "doors"
+    # No hint in the name: falls back to Semi-private (yard), not Public.
+    s = _stamp_cams(_m(zones=()), camera_classes={})
+    assert (s.place, s.reason) == ("yard", "left_public")
+
+
+def test_camera_place_street_keeps_a_zoneless_member_a_passer_by() -> None:
+    s = _stamp_cams(_m(zones=()), camera_classes={"cam-a": "street"})
+    assert s == Stamp("background", "street", "log", "passer_by")
+
+
+def test_camera_place_ignored_when_the_member_has_zones() -> None:
+    s = _stamp_cams(_m(zones=("sidewalk",)), camera_classes={"cam-a": "private"})
+    assert s == Stamp("background", "street", "log", "passer_by")
+
+
+def test_camera_place_joins_the_most_private_place_across_members() -> None:
+    s = _stamp_cams(
+        _m(zones=("lawn",)),
+        _m(zones=(), start=NOON + 5),
+        camera_classes={"cam-a": "private"},
+    )
+    assert s.place == "private"
+
+
+def test_no_camera_classes_means_zoneless_is_public() -> None:
+    assert _stamp(_m(zones=())).place == "street"  # stamp() default: None
+
+
+def test_stamper_for_reads_camera_classes_at_call_time() -> None:
+    settings = Settings(location=LocationSection(latitude=47.6, longitude=-122.3))
+    stamper = notability.stamper_for(settings)
+    member = _m(zones=(), camera="cam-q")
+    assert stamper([member]).place == "yard"  # name guess
+    policy_settings._active = {
+        **policy_settings.default_settings(),
+        "camera_classes": {"cam-q": "street"},
+    }
+    assert stamper([member]).place == "street"

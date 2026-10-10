@@ -549,3 +549,55 @@ def test_stale_rev_still_conflicts_after_restart(
 
     fresh = restarted.put("/v1/push/settings", json={**doc, "rev": current_rev})
     assert fresh.status_code == 200
+
+
+# ---- camera_classes: a place per camera, for the encounter stamp only -------
+
+
+def test_camera_classes_absent_by_default_so_the_app_document_is_unchanged(client: TestClient):
+    settings = client.get("/v1/push/settings").json()["settings"]
+    assert "camera_classes" not in settings
+    assert settings == policy_settings.default_settings()
+
+
+def test_camera_classes_round_trip_and_default_to_the_name_guess(client: TestClient):
+    resp = client.put("/v1/push/settings", json={"camera_classes": {"backyard": "private"}})
+    assert resp.status_code == 200, resp.text
+    got = client.get("/v1/push/settings").json()["settings"]["camera_classes"]
+    assert got == {"backyard": "private"}
+    active = policy_settings.get_active()["camera_classes"]
+    assert policy_settings.camera_place("backyard", active) == "private"  # override
+    assert policy_settings.camera_place("doorbell", active) == "doors"  # name guess
+    assert policy_settings.camera_place("cam-1", active) == "yard"  # fallback
+    assert policy_settings.camera_place("cam-1") == "yard"
+
+
+def test_camera_classes_rejects_unknown_place_and_non_object(client: TestClient):
+    bad = client.put("/v1/push/settings", json={"camera_classes": {"backyard": "moat"}})
+    assert bad.status_code == 400
+    assert "camera_classes.backyard" in json.dumps(bad.json())
+    assert client.put("/v1/push/settings", json={"camera_classes": ["x"]}).status_code == 400
+
+
+def test_camera_classes_preserved_across_an_app_shaped_put(client: TestClient):
+    """The app PUTs the whole document it decoded and drops keys it does not
+    know, so an omitted `camera_classes` must keep the saved assignments."""
+    assert client.put(
+        "/v1/push/settings", json={"camera_classes": {"doorbell": "off_limits"}}
+    ).status_code == 200
+    assert client.put("/v1/push/settings", json={"mute_sounds": True}).status_code == 200
+    got = client.get("/v1/push/settings").json()["settings"]
+    assert got["camera_classes"] == {"doorbell": "off_limits"}
+    # An explicit object replaces; an empty one clears the key entirely.
+    assert client.put("/v1/push/settings", json={"camera_classes": {}}).status_code == 200
+    assert "camera_classes" not in client.get("/v1/push/settings").json()["settings"]
+
+
+def test_camera_classes_survive_in_the_settings_file(client: TestClient, tmp_path: Path):
+    client.put("/v1/push/settings", json={"camera_classes": {"street": "street"}})
+    on_disk = json.loads((tmp_path / "push_settings.json").read_text())
+    assert on_disk["camera_classes"] == {"street": "street"}
+    assert policy_settings.load_settings(tmp_path / "push_settings.json")["camera_classes"] == {
+        "street": "street"
+    }
+

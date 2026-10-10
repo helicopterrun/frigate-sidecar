@@ -19,7 +19,7 @@ from marcellus import __version__, db
 from marcellus.push import policy_settings, store
 from marcellus.routes import scrub as scrub_routes
 from marcellus.routes.tuning import _sections as _tuning_sections
-from marcellus.zones import load_camera_zones
+from marcellus.zones import configured_camera_names, load_camera_zones
 
 router = APIRouter(tags=["settings"])
 
@@ -50,6 +50,18 @@ def _camera_summary(settings: Any) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _camera_places(settings: Any, camera_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Every camera Frigate knows (including ones with no zones, which are the
+    ones the picker is for -- `load_camera_zones` skips them) and each one's
+    name-based place guess, i.e. what the picker's "guess" option means."""
+    names = configured_camera_names(settings.frigate.config_path)
+    cameras = sorted(names) if names else [c["camera"] for c in camera_rows]
+    return {
+        "cameras": cameras,
+        "guesses": {c: policy_settings.camera_place(c) for c in cameras},
+    }
 
 
 #: Shared display vocabulary (mirrors zones.js / the app).
@@ -154,6 +166,7 @@ async def settings_view(request: Request) -> Any:
     devices = await db.with_sidecar(settings.sidecar.db_path, store.list_devices)
 
     caps = await scrub_routes.capabilities(request)
+    camera_rows = _camera_summary(settings)
 
     return templates.TemplateResponse(
         request,
@@ -162,7 +175,8 @@ async def settings_view(request: Request) -> Any:
             "devices": devices,
             "push_enabled": settings.push.enabled,
             "transport": settings.push.transport,
-            "camera_rows": _camera_summary(settings),
+            "camera_rows": camera_rows,
+            "camera_places": _camera_places(settings, camera_rows),
             "tuning_sections": _tuning_sections(),
             "ladder": _ladder_matrix(),
             "notif_examples": _notification_examples(),

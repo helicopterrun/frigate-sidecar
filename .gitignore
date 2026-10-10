@@ -55,3 +55,6 @@ src/marcellus/static/triage_batch*.html
 config/mqtt-capture.jsonl*
 config/push_settings.json
 config/push_settings.json.bak*
+
+config/tuning.json
+config/tuning.json.tmp

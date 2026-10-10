@@ -11,6 +11,7 @@ Loading precedence (highest wins):
 from __future__ import annotations
 
 import logging
+import math
 import os
 import types
 from collections.abc import Mapping
@@ -715,25 +716,6 @@ class EncountersSection(BaseModel):
     # this many seconds is "notable" ("lingered") rather than a passer-by.
     linger_s: float = 60.0
 
-    # Where the property is, for the "night" rule (sun below the horizon).
-    # Both unset: night falls back to 22:00-06:00 server-local time.
-    latitude: float | None = None
-    longitude: float | None = None
-
-    @field_validator("latitude")
-    @classmethod
-    def _check_latitude(cls, v: float | None) -> float | None:
-        if v is not None and not -90.0 <= v <= 90.0:
-            raise ValueError("encounters.latitude must be between -90 and 90")
-        return v
-
-    @field_validator("longitude")
-    @classmethod
-    def _check_longitude(cls, v: float | None) -> float | None:
-        if v is not None and not -180.0 <= v <= 180.0:
-            raise ValueError("encounters.longitude must be between -180 and 180")
-        return v
-
     # M4 /v1/timeline: hard cap (seconds) on the [start, end] window a single
     # request may ask for -- a global multi-camera composition is far more
     # expensive per second of window than one reel, so this is deliberately
@@ -1100,6 +1082,42 @@ class UnifiProtectSection(BaseModel):
         return v
 
 
+class LocationSection(BaseModel):
+    """Where the property is -- a general Marcellus setting (today it only
+    decides what "night" means for encounters; other features can read it
+    later). Optional: with no coordinates, night falls back to 22:00-06:00 on
+    the server's clock. Editable live from /settings (a tuning override), so
+    no restart is needed. Both coordinates or neither."""
+
+    # Decimal degrees, north-positive.
+    latitude: float | None = None
+    # Decimal degrees, east-positive.
+    longitude: float | None = None
+    # Free text shown next to the coordinates (usually the address that was
+    # looked up). Display only; nothing reads it.
+    label: str | None = None
+
+    @field_validator("latitude")
+    @classmethod
+    def _check_latitude(cls, v: float | None) -> float | None:
+        if v is not None and not (math.isfinite(v) and -90.0 <= v <= 90.0):
+            raise ValueError("location.latitude must be between -90 and 90")
+        return v
+
+    @field_validator("longitude")
+    @classmethod
+    def _check_longitude(cls, v: float | None) -> float | None:
+        if v is not None and not (math.isfinite(v) and -180.0 <= v <= 180.0):
+            raise ValueError("location.longitude must be between -180 and 180")
+        return v
+
+    @model_validator(mode="after")
+    def _both_or_neither(self) -> LocationSection:
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("location.latitude and location.longitude must be set together")
+        return self
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix=_ENV_PREFIX,
@@ -1116,6 +1134,7 @@ class Settings(BaseSettings):
     proxy: ProxySection = Field(default_factory=ProxySection)
     push: PushSection = Field(default_factory=PushSection)
     encounters: EncountersSection = Field(default_factory=EncountersSection)
+    location: LocationSection = Field(default_factory=LocationSection)
     unifi_protect: UnifiProtectSection = Field(default_factory=UnifiProtectSection)
     log_level: str = "INFO"
 
@@ -1287,13 +1306,22 @@ def load_settings(config_path: str | os.PathLike[str] | None = None) -> Settings
     # The file is hand-editable and may predate a rename or a tightened
     # range: drop any entry that fails validation (one at a time, so a single
     # bad key does not take the rest down) rather than trusting it blindly.
-    for key in list(applicable):
-        problems = tuning.validate({key: applicable[key]}, settings)
+    # Keys that only make sense together (location.latitude/longitude) are
+    # validated as one unit and dropped together.
+    units: dict[str, list[str]] = {}
+    for key in applicable:
+        units.setdefault(tuning.validation_unit(key), []).append(key)
+    for unit_keys in units.values():
+        problems = tuning.validate({k: applicable[k] for k in unit_keys}, settings)
         if problems:
             logger.warning(
-                "tuning: ignoring %s from %s: %s", key, overrides_file, "; ".join(problems)
+                "tuning: ignoring %s from %s: %s",
+                ", ".join(unit_keys),
+                overrides_file,
+                "; ".join(problems),
             )
-            del applicable[key]
+            for key in unit_keys:
+                del applicable[key]
     if applicable:
         tuning.apply_overrides(settings, applicable)
         logger.info(

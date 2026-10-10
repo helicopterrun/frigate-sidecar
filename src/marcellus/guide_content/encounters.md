@@ -154,16 +154,32 @@ The first rule that matches decides, in this order:
 4. **Recognised**: anyone or anything was recognised by name.
 5. **Animal**: an animal was seen. A person together with a dog counts as a
    dog walker, so the dog is ignored.
-6. **Lingered**: it lasted at least `linger_s` seconds.
+6. **Lingered**: someone stayed in view for at least `linger_s` seconds --
+   judged by the longest single sighting, not by how long the encounter
+   spans (a busy sidewalk chains passers-by into one long encounter, and
+   nobody in it stayed).
 7. **Night**: it began after dark.
 8. Otherwise it is background, a passer-by.
 
 The tag is fixed when the visit is recorded and refreshed only when its
 members change. Later changes to your alert settings or zones do not rewrite
 older encounters; `fsc encounters restamp` re-applies the current rules to
-past ones on request. Night means the sun is below the horizon at the spot
-set by `latitude` and `longitude`; without them it falls back to 22:00 to
-06:00 server time.
+past ones on request. It prints counts by tag and reason, per camera (for
+single-camera encounters), how many encounters have a sighting outside every
+zone, and how many tags changed (or would, with `--dry-run`); `--json` prints
+one JSON object instead.
+
+Night means the sun is below the horizon at the
+property's [Location](/guide/location), a general setting you can edit live
+on [Settings](/settings#location); without one it falls back to 22:00 to
+06:00 server time, which is wrong if the server runs in UTC.
+
+**Cameras as places.** A sighting outside every zone takes the place of the
+camera that saw it. Assign each camera a place under **Cameras** on the
+[Settings](/settings#zones) page (the picker's default is a guess from the
+camera's name, falling back to Semi-private). So a front-door camera's
+zoneless detections are Entry / exit, not Public. This is used only for the
+encounter tag, never for push notifications.
 
 ## Retention
 
@@ -200,9 +216,7 @@ cycle, with no restart; the others need a restart.
 | `min_copresence_s` | `3.0` | yes | Minimum span overlap for two atoms to count as companions with no shared label family. |
 | `adjacency` | `[]` | yes | Extra camera-pair edges (`[[a, b], ...]`) beyond what shared zone names already imply. |
 | `not_adjacent` | `[]` | yes | Camera-pair edges to remove despite a shared zone name; config always beats the zone-derived graph. |
-| `linger_s` | `60.0` | no | Seconds an encounter must last to be tagged notable ("lingered") rather than a passer-by. |
-| `latitude` | unset | no | Property latitude (-90 to 90), used with `longitude` to decide when it is night. Unset: night is 22:00-06:00 server time. |
-| `longitude` | unset | no | Property longitude (-180 to 180); see `latitude`. |
+| `linger_s` | `60.0` | no | Seconds one sighting (a single member of the encounter) must last for the encounter to be tagged notable ("lingered") rather than a passer-by. |
 | `retention_days` | `30` | no | Age at which the hourly prune drops sealed encounters; unsealed ones are never pruned. |
 | `transitions_enabled` | `false` | no | Whether the learner writes per-camera-pair transition times into `camera_transitions`. |
 | `transition_min_samples` | `8` | yes | Samples an edge needs before its own percentiles are trusted (`learned`) rather than defaulted. |

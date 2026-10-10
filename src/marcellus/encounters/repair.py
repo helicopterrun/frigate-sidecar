@@ -290,7 +290,18 @@ def restamp(
     batches of 200. Rewrites each encounter's aggregates and tag/place/outcome/
     tag_reason from its members via `store.recompute`; `updated_at` and the
     seal state are left alone. `dry_run` computes the same counts without
-    writing. Returns `{scanned, by_tag, by_reason}`."""
+    writing.
+
+    Returns `{dry_run, scanned, by_tag, by_reason, by_camera,
+    by_camera_reason, zoneless, changed, changes}`:
+
+    - `by_camera` / `by_camera_reason`: single-camera encounters only, per
+      camera, counts by tag / by reason.
+    - `zoneless`: encounters with at least one member that has no zones.
+    - `changed`: encounters whose *tag* differs from the one stored (it did
+      change, or with `dry_run` would); `changes` breaks that down as
+      `{"from→to": n}`, a never-stamped row reading "unstamped".
+    """
     sql = "SELECT id FROM encounters"
     params: list[float] = []
     if since is not None:
@@ -300,14 +311,21 @@ def restamp(
 
     by_tag: dict[str, int] = {}
     by_reason: dict[str, int] = {}
+    by_camera: dict[str, dict[str, int]] = {}
+    by_camera_reason: dict[str, dict[str, int]] = {}
+    changes: dict[str, int] = {}
+    zoneless = 0
     scanned = 0
     for start in range(0, len(ids), _BATCH_SIZE):
         batch = ids[start : start + _BATCH_SIZE]
         for encounter_id in batch:
+            members = store.stamp_inputs(conn, encounter_id)
+            if not members:  # nothing to stamp
+                continue
+            stored = conn.execute(
+                "SELECT tag FROM encounters WHERE id = ?", (encounter_id,)
+            ).fetchone()["tag"]
             if dry_run:
-                members = store.stamp_inputs(conn, encounter_id)
-                if not members:
-                    continue
                 stamp = stamper(members)
                 tag, reason = stamp.tag, stamp.reason
             else:
@@ -315,12 +333,78 @@ def restamp(
                 row = conn.execute(
                     "SELECT tag, tag_reason FROM encounters WHERE id = ?", (encounter_id,)
                 ).fetchone()
-                if row is None or row["tag"] is None:  # no members: nothing stamped
-                    continue
                 tag, reason = row["tag"], row["tag_reason"]
             scanned += 1
             by_tag[tag] = by_tag.get(tag, 0) + 1
             by_reason[reason] = by_reason.get(reason, 0) + 1
+            cameras = {m["camera"] for m in members}
+            if len(cameras) == 1:
+                camera = str(next(iter(cameras)))
+                per_tag = by_camera.setdefault(camera, {})
+                per_tag[tag] = per_tag.get(tag, 0) + 1
+                per_reason = by_camera_reason.setdefault(camera, {})
+                per_reason[reason] = per_reason.get(reason, 0) + 1
+            if any(not m["zones"] for m in members):
+                zoneless += 1
+            if stored != tag:
+                key = f"{stored or 'unstamped'}\u2192{tag}"
+                changes[key] = changes.get(key, 0) + 1
         if not dry_run:
             conn.commit()
-    return {"scanned": scanned, "by_tag": by_tag, "by_reason": by_reason}
+    return {
+        "dry_run": dry_run,
+        "scanned": scanned,
+        "by_tag": by_tag,
+        "by_reason": by_reason,
+        "by_camera": by_camera,
+        "by_camera_reason": by_camera_reason,
+        "zoneless": zoneless,
+        "changed": sum(changes.values()),
+        "changes": changes,
+    }
+
+
+def format_restamp(result: dict[str, object]) -> str:
+    """The `restamp` result as aligned, human-readable text."""
+
+    def counts(title: str, data: object) -> list[str]:
+        pairs = data.items() if isinstance(data, dict) else []
+        rows = sorted(pairs, key=lambda kv: (-kv[1], kv[0]))
+        out = [title]
+        if not rows:
+            return out + ["  (none)"]
+        width = max(len(str(k)) for k, _ in rows)
+        num = max(len(str(v)) for _, v in rows)
+        return out + [f"  {str(k):<{width}}  {v:>{num}}" for k, v in rows]
+
+    dry = bool(result["dry_run"])
+    lines = [
+        f"{'Dry run: ' if dry else ''}scanned {result['scanned']} encounters",
+        f"with a zoneless member: {result['zoneless']}",
+        f"tag {'would change' if dry else 'changed'}: {result['changed']}",
+    ]
+    if result["changes"]:
+        lines += counts("", result["changes"])[1:]
+    lines += [""] + counts("by tag", result["by_tag"])
+    lines += [""] + counts("by reason", result["by_reason"])
+    by_camera = result["by_camera"]
+    by_camera_reason = result["by_camera_reason"]
+    lines += ["", "single-camera encounters, per camera"]
+    if isinstance(by_camera, dict) and by_camera:
+        width = max(len(str(c)) for c in by_camera)
+        for camera in sorted(by_camera):
+            tags = by_camera[camera]
+            total = sum(tags.values())
+            lines.append(
+                f"  {camera:<{width}}  {total:>5}  "
+                f"background {tags.get('background', 0):>5}  notable {tags.get('notable', 0):>5}"
+            )
+            reasons = by_camera_reason.get(camera, {}) if isinstance(by_camera_reason, dict) else {}
+            detail = ", ".join(
+                f"{r} {n}" for r, n in sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))
+            )
+            if detail:
+                lines.append(f"  {'':<{width}}         {detail}")
+    else:
+        lines.append("  (none)")
+    return "\n".join(lines)
