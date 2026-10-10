@@ -247,4 +247,12 @@ push:
   # handle-redemption fetch) stays valid.
   handle_ttl_s: 3600.0
 
+# Where the property is (optional). Used to decide when it is night for
+# encounters; without it night is 22:00-06:00 on the server's clock. Both or
+# neither. Also editable live on /settings (Location), which wins over this.
+# location:
+#   latitude: 47.6
+#   longitude: -122.3
+#   label: "Home"
+
 log_level: INFO

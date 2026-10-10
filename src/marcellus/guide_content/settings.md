@@ -14,6 +14,12 @@ the sidecar's own knobs in one place.
 - **Zones** (`/settings#zones`) — the zone routing policy that decides which
   zones matter for alerts, zone neighbor relationships, and export/import of
   the whole policy as JSON.
+  Under the zones, **Cameras** gives each camera a place for sightings
+  outside every zone; only the [encounter](/guide/encounters) tag uses it,
+  never push.
+- **Location** (`/settings#location`) — where the property is, with an
+  optional address lookup and a live "Sun is up / down" check; see
+  [Location](/guide/location).
 - **Routing** (`/settings#routing`) — the outcomes matrix (subject × place →
   Off/Log/Glance/Notify/Alarm), recognition relaxation for known people and
   vehicles, and per-zone overrides; edits here replace the old read-only

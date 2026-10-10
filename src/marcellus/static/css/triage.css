@@ -839,6 +839,15 @@ select[data-level="alarm"] { background: var(--danger-bg); color: var(--danger-t
   border-radius: var(--radius-sm); padding: 3px 6px; width: 100%; box-sizing: border-box;
 }
 .tuning-control textarea.invalid { border-color: var(--danger-text); }
+/* Settings › Location block (tuning.js renderLocationBlock). */
+.loc-block { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; }
+.loc-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.loc-field { display: flex; flex-direction: column; gap: 2px; }
+.loc-field input { width: 12em; }
+.loc-field.loc-address input { width: 24em; max-width: 100%; }
+.loc-results { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.loc-match { text-align: left; max-width: 100%; }
+.loc-sun { font-weight: 600; }
 .tuning-value { color: var(--muted); font-family: var(--font-mono); word-break: break-word; }
 .tuning-dict { display: flex; flex-wrap: wrap; gap: 8px; }
 .tuning-dict-item { display: inline-flex; align-items: center; gap: 4px; }

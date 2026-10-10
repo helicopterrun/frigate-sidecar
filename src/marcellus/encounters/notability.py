@@ -12,10 +12,12 @@ version):
 
 1. two or more distinct cameras            -> notable, ``multi_camera``
 2. reached a place other than the street   -> notable, ``left_public``
+   (a member with no zones counts as its camera's place)
 3. alert ladder says more than "log"       -> notable, ``alerted``
 4. anyone/anything was recognised          -> notable, ``recognised``
 5. an animal was seen (dog-walker aside)   -> notable, ``animal``
-6. stayed at least `linger_s`              -> notable, ``lingered``
+6. someone stayed in view `linger_s`      -> notable, ``lingered``
+   (the longest single member, not the span)
 7. it happened at night                    -> notable, ``night``
 8. otherwise                               -> background, ``passer_by``
 """
@@ -154,24 +156,40 @@ def _strs(member: Mapping[str, Any], key: str) -> list[str]:
     return [str(x) for x in value]
 
 
+def _member_duration(member: Mapping[str, Any]) -> float:
+    """Seconds one member was in view; 0 while it is still open."""
+    end = member.get("end_time")
+    if end is None:
+        return 0.0
+    return max(0.0, float(end) - float(member["start_time"]))
+
+
 def _loudest(outcomes: Sequence[str]) -> str:
     order = policy_settings.OUTCOMES
     return max(outcomes, key=order.index, default="off")
 
 
 def _member_outcome(
-    labels: Sequence[str], zones: Sequence[str], zone_classes: dict[str, str]
+    labels: Sequence[str],
+    zones: Sequence[str],
+    zone_classes: dict[str, str],
+    camera_place: str | None = None,
 ) -> str:
     """The alert ladder's answer for one member: the loudest outcome across
-    the ladder subjects present in its labels, every modifier at default."""
+    the ladder subjects present in its labels, every modifier at default.
+    A member with no zones is evaluated at its camera's place (zone "") when
+    `camera_place` is given."""
     subjects: dict[str, str] = {}  # subject -> a label that maps to it
     for label in labels:
         subjects.setdefault(delivery_wire.subject_for_labels([label]), label)
     outcomes: list[str] = []
     for subject, label in subjects.items():
-        zone, place = delivery_wire.most_severe_zone(
-            zones, subject=subject, zone_classes=zone_classes
-        )
+        if zones or camera_place is None:
+            zone, place = delivery_wire.most_severe_zone(
+                zones, subject=subject, zone_classes=zone_classes
+            )
+        else:
+            zone, place = "", camera_place
         level = ladder.evaluate_ladder(
             ladder.Snapshot(subject=subject, place=place, zone=zone, label=label)
         )
@@ -185,13 +203,19 @@ def stamp(
     members: Sequence[Mapping[str, Any]],
     *,
     zone_classes: Mapping[str, str],
+    camera_classes: Mapping[str, str] | None = None,
     linger_s: float,
     latitude: float | None,
     longitude: float | None,
 ) -> Stamp:
     """Classify an encounter from its members (dicts carrying `camera`,
     `start_time`, `end_time`, and `labels`/`zones`/`sub_labels` as lists or
-    as the raw `*_json` strings)."""
+    as the raw `*_json` strings).
+
+    A member with no zones takes its camera's place -- `camera_classes[camera]`,
+    else the name-based guess -- both for the encounter's place and for its
+    ladder evaluation. With `camera_classes=None` (the default) cameras have no
+    place of their own and a zoneless member counts as Public."""
     if not members:
         return Stamp(TAG_NOTABLE, "street", "off", "empty")
 
@@ -210,11 +234,15 @@ def stamp(
     for m in members:
         zones = [z for z in _strs(m, "zones") if z]
         labels = [lb for lb in _strs(m, "labels") if not (drop_dog and lb == _DOG)]
+        cam_place: str | None = None
         if zones:
             for z in zones:
                 place_idx = max(place_idx, place_order.index(delivery_wire.zone_place(z, classes)))
-        # A member with no zones counts as street (index 0): nothing to raise.
-        outcomes.append(_member_outcome(labels, zones, classes))
+        elif camera_classes is not None:
+            cam_place = policy_settings.camera_place(str(m.get("camera") or ""), camera_classes)
+            place_idx = max(place_idx, place_order.index(cam_place))
+        # Otherwise a member with no zones counts as street (index 0).
+        outcomes.append(_member_outcome(labels, zones, classes, cam_place))
         animal = animal or any(lb in _ANIMAL_LABELS for lb in labels)
         recognised = recognised or any(s.strip() for s in _strs(m, "sub_labels"))
 
@@ -233,12 +261,11 @@ def stamp(
     if animal:
         return Stamp(TAG_NOTABLE, place, outcome, "animal")
 
+    # Lingering is one member's own time in view. The encounter's span is
+    # useless here: the linker chains successive passers-by on a busy sidewalk
+    # into one encounter, so a long span says nothing about anyone staying.
     first = min(float(m["start_time"]) for m in members)
-    last = max(
-        float(m["end_time"]) if m.get("end_time") is not None else float(m["start_time"])
-        for m in members
-    )
-    if last - first >= linger_s:
+    if max(_member_duration(m) for m in members) >= linger_s:
         return Stamp(TAG_NOTABLE, place, outcome, "lingered")
     if is_night(first, latitude, longitude):
         return Stamp(TAG_NOTABLE, place, outcome, "night")
@@ -246,19 +273,21 @@ def stamp(
 
 
 def stamper_for(settings: Settings) -> Stamper:
-    """The production stamper: closes over `settings.encounters` and reads
-    the live zone -> place assignments at call time, so a settings change
-    affects only encounters stamped afterwards."""
+    """The production stamper: closes over `settings` and reads the live
+    zone/camera -> place assignments and the saved location at call time, so
+    a settings change (including one made from the web UI) affects only
+    encounters stamped afterwards."""
 
     def _stamper(members: list[dict[str, Any]]) -> Stamp:
-        enc = settings.encounters
-        zone_classes = policy_settings.get_active().get("zone_classes") or {}
+        active = policy_settings.get_active()
+        loc = settings.location
         return stamp(
             members,
-            zone_classes=zone_classes,
-            linger_s=enc.linger_s,
-            latitude=enc.latitude,
-            longitude=enc.longitude,
+            zone_classes=active.get("zone_classes") or {},
+            camera_classes=active.get("camera_classes") or {},
+            linger_s=settings.encounters.linger_s,
+            latitude=loc.latitude,
+            longitude=loc.longitude,
         )
 
     return _stamper

@@ -178,23 +178,32 @@ def seeded_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     db_path = tmp_path / "sidecar.db"
     cfg = tmp_path / "marcellus.yml"
     cfg.write_text(
-        f"sidecar:\n  db_path: {db_path}\nencounters:\n  latitude: 47.6\n  longitude: -122.3\n"
+        f"sidecar:\n  db_path: {db_path}\nlocation:\n  latitude: 47.6\n  longitude: -122.3\n"
     )
     monkeypatch.setenv("MARCELLUS_CONFIG", str(cfg))
     c = db.open_sidecar(db_path)
     try:
         noon = 1_782_165_600.0  # 2026-06-22 12:00 Pacific
-        store.upsert_atom(c, _atom("p1", start=noon), LinkDecision("e_bg", "new", 1.0), noon)
+        walk = ("sidewalk",)  # in a Public zone, so camera places do not apply
         store.upsert_atom(
-            c, _atom("c1", start=noon + 900, labels=("cat",)),
+            c, _atom("p1", start=noon, zones=walk), LinkDecision("e_bg", "new", 1.0), noon
+        )
+        store.upsert_atom(
+            c, _atom("c1", start=noon + 900, labels=("cat",), zones=walk),
             LinkDecision("e_cat", "new", 1.0), noon,
         )
         store.upsert_atom(
-            c, _atom("m1", start=noon + 2000), LinkDecision("e_multi", "new", 1.0), noon
+            c, _atom("m1", start=noon + 2000, zones=walk),
+            LinkDecision("e_multi", "new", 1.0), noon,
         )
         store.upsert_atom(
-            c, _atom("m2", camera="cam-b", start=noon + 2001),
+            c, _atom("m2", camera="cam-b", start=noon + 2001, zones=walk),
             LinkDecision("e_multi", "adjacent", 0.9), noon,
+        )
+        # One zoneless sighting on a doorbell camera (name guess: Entry / exit).
+        store.upsert_atom(
+            c, _atom("z1", camera="front-door", start=noon + 5000),
+            LinkDecision("e_zoneless", "new", 1.0), noon,
         )
         c.commit()
     finally:
@@ -213,30 +222,77 @@ def _tags(db_path: Path) -> dict[str, tuple[Any, Any]]:
 def test_restamp_dry_run_reports_without_writing(seeded_cli: Path) -> None:
     result = CliRunner().invoke(app, ["encounters", "restamp", "--dry-run"])
     assert result.exit_code == 0, result.output
+    assert "Dry run: scanned 4 encounters" in result.output
+    result = CliRunner().invoke(app, ["encounters", "restamp", "--dry-run", "--json"])
+    assert result.exit_code == 0, result.output
     out = json.loads(result.output)
-    assert out["scanned"] == 3
-    assert out["by_tag"] == {"background": 1, "notable": 2}
-    assert out["by_reason"] == {"passer_by": 1, "animal": 1, "multi_camera": 1}
-    assert set(_tags(seeded_cli).values()) == {(None, None)}
+    assert out["scanned"] == 4
+    assert out["by_tag"] == {"background": 1, "notable": 3}
+    assert out["by_reason"] == {
+        "passer_by": 1, "animal": 1, "multi_camera": 1, "left_public": 1,
+    }
+    assert out["dry_run"] is True
+    assert set(_tags(seeded_cli).values()) == {(None, None)}  # nothing written
 
 
 def test_restamp_writes_and_honours_since(seeded_cli: Path) -> None:
     noon = 1_782_165_600.0
-    result = CliRunner().invoke(app, ["encounters", "restamp", "--since", str(noon + 1000)])
+    result = CliRunner().invoke(
+        app, ["encounters", "restamp", "--json", "--since", str(noon + 1000)]
+    )
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["scanned"] == 1
+    assert json.loads(result.output)["scanned"] == 2
     assert _tags(seeded_cli) == {
         "e_bg": (None, None),
         "e_cat": (None, None),
         "e_multi": ("notable", "multi_camera"),
+        "e_zoneless": ("notable", "left_public"),
     }
-    result = CliRunner().invoke(app, ["encounters", "restamp"])
-    assert json.loads(result.output)["scanned"] == 3
+    result = CliRunner().invoke(app, ["encounters", "restamp", "--json"])
+    out = json.loads(result.output)
+    assert out["scanned"] == 4
+    # Two were already stamped by the first run; the other two were not.
+    assert out["changes"] == {"unstamped\u2192background": 1, "unstamped\u2192notable": 1}
+    assert out["changed"] == 2
     assert _tags(seeded_cli) == {
         "e_bg": ("background", "passer_by"),
         "e_cat": ("notable", "animal"),
         "e_multi": ("notable", "multi_camera"),
+        "e_zoneless": ("notable", "left_public"),
     }
+
+
+def test_restamp_diagnostics(seeded_cli: Path) -> None:
+    result = CliRunner().invoke(app, ["encounters", "restamp", "--dry-run", "--json"])
+    out = json.loads(result.output)
+    # Single-camera encounters only: e_multi spans two cameras and is left out.
+    assert out["by_camera"] == {
+        "cam-a": {"background": 1, "notable": 1},
+        "front-door": {"notable": 1},
+    }
+    assert out["by_camera_reason"] == {
+        "cam-a": {"passer_by": 1, "animal": 1},
+        "front-door": {"left_public": 1},
+    }
+    assert out["zoneless"] == 1
+    assert out["changed"] == 4
+    assert out["changes"] == {"unstamped\u2192background": 1, "unstamped\u2192notable": 3}
+
+
+def test_restamp_text_output_is_aligned_and_readable(seeded_cli: Path) -> None:
+    result = CliRunner().invoke(app, ["encounters", "restamp", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "with a zoneless member: 1" in out
+    assert "tag would change: 4" in out
+    assert "unstamped\u2192notable" in out
+    assert "front-door" in out and "left_public 1" in out
+    assert not out.lstrip().startswith("{")
+    # Second run writes; a third finds nothing left to change.
+    CliRunner().invoke(app, ["encounters", "restamp"])
+    again = CliRunner().invoke(app, ["encounters", "restamp", "--json"])
+    assert json.loads(again.output)["changed"] == 0
+    assert "tag changed: 0" in CliRunner().invoke(app, ["encounters", "restamp"]).output
 
 
 def test_restamp_batches_of_200(sidecar_db_path: Path) -> None:
@@ -249,7 +305,12 @@ def test_restamp_batches_of_200(sidecar_db_path: Path) -> None:
             )
         c.commit()
         out = repair.restamp(c, _fake("background", "bulk"))
-        assert out == {"scanned": 450, "by_tag": {"background": 450}, "by_reason": {"bulk": 450}}
+        assert out["scanned"] == 450
+        assert out["by_tag"] == {"background": 450}
+        assert out["by_reason"] == {"bulk": 450}
+        assert out["by_camera"] == {"cam-a": {"background": 450}}
+        assert out["zoneless"] == 450
+        assert out["changes"] == {"unstamped\u2192background": 450}
         n = c.execute("SELECT COUNT(*) AS n FROM encounters WHERE tag = 'background'").fetchone()
         assert n["n"] == 450
     finally:
@@ -302,3 +363,19 @@ def test_service_reconcile_stamps_encounters(tmp_path: Path) -> None:
         assert row is not None and row["tag_reason"] != "multi_camera"
     finally:
         c.close()
+
+
+def test_restamp_reports_tag_changes_against_what_is_stored(conn: sqlite3.Connection) -> None:
+    for i in range(3):
+        store.upsert_atom(
+            conn, _atom(f"c{i}", start=NOON + i * 10_000.0), LinkDecision(f"e{i}", "new", 1.0),
+            NOON, stamper=_fake("background", "old"),
+        )
+    conn.commit()
+    dry = repair.restamp(conn, _fake("notable", "new"), dry_run=True)
+    assert (dry["changed"], dry["changes"]) == (3, {"background→notable": 3})
+    n = conn.execute("SELECT COUNT(*) AS n FROM encounters WHERE tag = 'background'").fetchone()
+    assert n["n"] == 3  # dry run wrote nothing
+    real = repair.restamp(conn, _fake("notable", "new"))
+    assert (real["changed"], real["dry_run"]) == (3, False)
+    assert repair.restamp(conn, _fake("notable", "new"))["changed"] == 0

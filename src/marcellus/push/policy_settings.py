@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -269,6 +270,17 @@ def guess_zone_class(name: str, cameras: tuple[str, ...] = ()) -> str:
     return "yard"
 
 
+def camera_place(camera: str, camera_classes: Mapping[str, str] | None = None) -> str:
+    """The place class of a camera, used only by the encounter stamp for a
+    detection seen outside every zone: the user's `camera_classes` entry, else
+    the name-based guess (which falls back to yard)."""
+    if camera_classes:
+        place = camera_classes.get(camera)
+        if place in PLACES:
+            return place
+    return guess_zone_class(camera)
+
+
 def _looks_like_opening(name: str) -> bool:
     low = name.lower()
     return any(hint in low for hint in _OPENING_NAME_HINTS)
@@ -470,6 +482,15 @@ def validate_settings(data: Any) -> list[str]:
             for zone, place in zone_classes.items():
                 if place not in PLACES:
                     errors.append(f"zone_classes.{zone} must be one of {PLACES}, got {place!r}")
+
+    camera_classes = data.get("camera_classes")
+    if camera_classes is not None:
+        if not isinstance(camera_classes, dict):
+            errors.append("camera_classes must be an object")
+        else:
+            for camera, place in camera_classes.items():
+                if place not in PLACES:
+                    errors.append(f"camera_classes.{camera} must be one of {PLACES}, got {place!r}")
 
     zone_overrides = data.get("zone_overrides")
     if zone_overrides is not None:
@@ -793,6 +814,16 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
         merged["zone_classes"] = {
             str(zone): place for zone, place in zone_classes.items() if place in PLACES
         }
+
+    # Server/web-only; absent from the document until a camera is assigned
+    # (so the app-facing default document is unchanged).
+    camera_classes = data.get("camera_classes")
+    if isinstance(camera_classes, dict):
+        cleaned_cameras = {
+            str(camera): place for camera, place in camera_classes.items() if place in PLACES
+        }
+        if cleaned_cameras:
+            merged["camera_classes"] = cleaned_cameras
 
     zone_overrides = data.get("zone_overrides")
     if isinstance(zone_overrides, dict):
@@ -1226,6 +1257,15 @@ def save_and_apply(path: str | Path, body: dict[str, Any]) -> tuple[dict[str, An
     ):
         if not isinstance(body.get(sticky_key), dict):
             merged[sticky_key] = get_active().get(sticky_key, {})
+    # Sticky like the keys above: the Elsinore app PUTs the whole document it
+    # decoded and does not carry `camera_classes`, so an omitted key keeps the
+    # saved assignments. An explicit object (even `{}`) replaces them.
+    if not isinstance(body.get("camera_classes"), dict):
+        kept = get_active().get("camera_classes")
+        if kept:
+            merged["camera_classes"] = dict(kept)
+        else:
+            merged.pop("camera_classes", None)
     for nullable_key in ("secure_area", "map_scale_ft", "floorplan"):
         if nullable_key not in body:
             merged[nullable_key] = get_active().get(nullable_key)

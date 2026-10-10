@@ -365,6 +365,171 @@
     return row;
   }
 
+  // ---- Location block (location.latitude/longitude/label) ----
+  // One custom block instead of three generic rows: coordinates, the saved
+  // label, and an address lookup that runs in the browser against
+  // OpenStreetMap's Nominatim. Edits go into the same `overrides` dict as
+  // every other knob and are sent by "Save tuning"; nothing is stored by the
+  // lookup itself.
+  var NOMINATIM = "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q=";
+  var LOC_KEYS = ["location.latitude", "location.longitude", "location.label"];
+
+  function roundCoord(n) { return Math.round(n * 10000) / 10000; }
+
+  function renderLocationBlock(grid, data) {
+    var latKnob = knobsByKey["location.latitude"];
+    var lonKnob = knobsByKey["location.longitude"];
+    var labelKnob = knobsByKey["location.label"];
+    if (!latKnob || !lonKnob || !labelKnob) return;
+    var locked = LOC_KEYS.some(function (k) { return knobsByKey[k] && knobsByKey[k].locked; });
+
+    var block = el("div", { class: "loc-block tuning-control", "data-key": "location" });
+
+    function numField(labelText, knob) {
+      var input = el("input", { type: "number", step: "any", min: knob.min, max: knob.max });
+      input.value = knob.value === null || knob.value === undefined ? "" : knob.value;
+      input.disabled = locked;
+      var wrap = el("label", { class: "loc-field" }, [
+        el("span", { class: "help", text: labelText }),
+        input,
+      ]);
+      return { wrap: wrap, input: input };
+    }
+    var lat = numField("Latitude", latKnob);
+    var lon = numField("Longitude", lonKnob);
+    block.appendChild(el("div", { class: "loc-fields" }, [lat.wrap, lon.wrap]));
+
+    var label = labelKnob.value || "";
+    var labelLine = el("div", { class: "help" });
+    function showLabel() {
+      labelLine.textContent = label ? "Saved as: " + label : "";
+      labelLine.style.display = label ? "" : "none";
+    }
+    showLabel();
+    block.appendChild(labelLine);
+
+    // Push the three fields into `overrides`, or flag the block invalid.
+    function commit() {
+      var latText = lat.input.value.trim();
+      var lonText = lon.input.value.trim();
+      if (latText === "" && lonText === "") {
+        LOC_KEYS.forEach(function (k) { delete overrides[k]; pendingKeys[k] = true; });
+        setRowInvalid("location", block, false);
+        markDirty();
+        return;
+      }
+      var la = parseFloat(latText);
+      var lo = parseFloat(lonText);
+      var ok = latText !== "" && lonText !== "" && !isNaN(la) && !isNaN(lo) &&
+        la >= -90 && la <= 90 && lo >= -180 && lo <= 180;
+      setRowInvalid("location", block, !ok);
+      if (!ok) return;
+      overrides["location.latitude"] = la;
+      overrides["location.longitude"] = lo;
+      delete pendingKeys["location.latitude"];
+      delete pendingKeys["location.longitude"];
+      if (label) {
+        overrides["location.label"] = label;
+        delete pendingKeys["location.label"];
+      } else {
+        delete overrides["location.label"];
+        pendingKeys["location.label"] = true;
+      }
+      markDirty();
+    }
+
+    // Typing coordinates by hand means the old label no longer describes them.
+    [lat.input, lon.input].forEach(function (input) {
+      input.addEventListener("change", function () {
+        label = "";
+        showLabel();
+        commit();
+      });
+    });
+
+    var addrInput = el("input", { type: "text", placeholder: "e.g. 1600 Pennsylvania Ave, Washington" });
+    addrInput.disabled = locked;
+    var lookupBtn = el("button", { type: "button", class: "btn-neutral", text: "Look up" });
+    lookupBtn.disabled = locked;
+    var addrWrap = el("label", { class: "loc-field loc-address" }, [
+      el("span", { class: "help", text: "Address" }),
+      addrInput,
+    ]);
+    block.appendChild(el("div", { class: "loc-fields" }, [addrWrap, lookupBtn]));
+    block.appendChild(el("div", {
+      class: "help",
+      text: "Looking up an address sends it from your browser to OpenStreetMap. " +
+        "Or type the coordinates yourself.",
+    }));
+    var msg = el("div", { class: "help" });
+    var results = el("div", { class: "loc-results" });
+    block.appendChild(msg);
+    block.appendChild(results);
+
+    var lookupSeq = 0;
+    async function lookup() {
+      var q = addrInput.value.trim();
+      if (!q) return;
+      var seq = ++lookupSeq;
+      results.textContent = "";
+      msg.textContent = "Looking up...";
+      var matches;
+      try {
+        var resp = await fetch(NOMINATIM + encodeURIComponent(q));
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        matches = await resp.json();
+      } catch (err) {
+        if (seq !== lookupSeq) return;
+        msg.textContent = "Couldn't reach OpenStreetMap (" + err.message + "). " +
+          "Check your connection, or type the coordinates yourself.";
+        return;
+      }
+      if (seq !== lookupSeq) return;
+      matches = (Array.isArray(matches) ? matches : []).filter(function (m) {
+        return !isNaN(parseFloat(m.lat)) && !isNaN(parseFloat(m.lon));
+      }).slice(0, 5);
+      if (!matches.length) {
+        msg.textContent = "No matches for that address. Try fewer words, or type the coordinates yourself.";
+        return;
+      }
+      msg.textContent = "Pick the right match:";
+      matches.forEach(function (m) {
+        var btn = el("button", { type: "button", class: "btn-neutral loc-match", text: m.display_name });
+        btn.addEventListener("click", function () {
+          lat.input.value = roundCoord(parseFloat(m.lat));
+          lon.input.value = roundCoord(parseFloat(m.lon));
+          label = m.display_name;
+          showLabel();
+          results.textContent = "";
+          msg.textContent = "Filled in. Press Save tuning to keep it.";
+          commit();
+        });
+        results.appendChild(btn);
+      });
+    }
+    lookupBtn.addEventListener("click", lookup);
+    addrInput.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        lookup();
+      }
+    });
+
+    var loc = (data && data.location) || {};
+    if (loc.sun_up === true || loc.sun_up === false) {
+      block.appendChild(el("div", {
+        class: "help loc-sun",
+        text: loc.sun_up ? "Sun is up" : "Sun is down",
+      }));
+    }
+    if (locked) {
+      block.appendChild(el("div", {
+        class: "help", text: "Pinned by an environment variable; change it there.",
+      }));
+    }
+    grid.appendChild(block);
+  }
+
   function renderSections(data) {
     knobsByKey = {};
     (data.knobs || []).forEach(function (k) { knobsByKey[k.key] = k; });
@@ -373,6 +538,10 @@
       if (!grid) return;
       grid.textContent = "";
       var rows = (data.knobs || []).filter(function (k) { return k.section === sec.name; });
+      if (sec.name === "location" && rows.length) {
+        renderLocationBlock(grid, data);
+        return;
+      }
       if (!rows.length) {
         var det = grid.closest ? grid.closest("details") : null;
         if (det) det.style.display = "none";

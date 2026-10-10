@@ -14,6 +14,7 @@
   var banner = document.getElementById("zones-banner");
   var zonesList = document.getElementById("zones-list");
   var neighborsList = document.getElementById("neighbors-list");
+  var cameraPlaces = document.getElementById("camera-places");
   var saveBtn = document.getElementById("save-btn");
   var saveState = document.getElementById("save-state");
 
@@ -115,6 +116,50 @@
     return card;
   }
 
+  // Per-camera place, used by the encounter stamp for sightings outside every
+  // zone (settings.camera_classes; never read by push). Same picker as zones.
+  // The camera list and name-based guesses are rendered into the page: every
+  // camera in Frigate's config, including ones with no zones (which
+  // /v1/push/settings' available_cameras leaves out).
+  function renderCameraPlaces() {
+    if (!cameraPlaces) return;
+    var info = {};
+    try { info = JSON.parse(cameraPlaces.getAttribute("data-places") || "{}"); } catch (e) { /* none */ }
+    var cameras = info.cameras || [];
+    var guesses = info.guesses || {};
+    cameraPlaces.textContent = "";
+    cameraPlaces.classList.remove("skeleton");
+    cameras.forEach(function (camera) {
+      var card = el("div", { class: "stat-card" });
+      card.appendChild(el("div", { class: "stat-label" }, [el("strong", { text: camera })]));
+      var row = el("div", { style: "margin:0.25em 0" });
+      row.appendChild(el("span", { text: "Place: ", class: "help" }));
+      var select = el("select", { "aria-label": "place for " + camera });
+      var current = (doc.camera_classes || {})[camera] || "";
+      select.appendChild(el("option", {
+        value: "",
+        text: guesses[camera] ? "guess: " + PLACE_LABELS[guesses[camera]] : "guess from name",
+      }));
+      PLACES.forEach(function (p) {
+        var opt = el("option", { value: p, text: PLACE_LABELS[p] });
+        if (p === current) opt.selected = true;
+        select.appendChild(opt);
+      });
+      select.addEventListener("change", function () {
+        if (!doc.camera_classes) doc.camera_classes = {};
+        if (select.value) doc.camera_classes[camera] = select.value;
+        else delete doc.camera_classes[camera];
+        markDirty();
+      });
+      row.appendChild(select);
+      card.appendChild(row);
+      cameraPlaces.appendChild(card);
+    });
+    if (!cameras.length) {
+      cameraPlaces.appendChild(el("div", { class: "empty", text: "No cameras found in the Frigate config." }));
+    }
+  }
+
   function neighborSet(camera) {
     // Symmetric closure for display; edits write only the explicit map.
     var table = doc.camera_neighbors || {};
@@ -200,6 +245,7 @@
     (data.available_zones || []).forEach(function (zone) {
       zonesList.appendChild(renderZone(zone));
     });
+    renderCameraPlaces();
     renderNeighbors(data.available_cameras || []);
     notifyPolicyLoaded();
     return data;
@@ -281,6 +327,7 @@
       (fresh.available_zones || []).forEach(function (zone) {
         zonesList.appendChild(renderZone(zone));
       });
+      renderCameraPlaces();
       renderNeighbors(fresh.available_cameras || []);
     } catch (err) {
       saveState.textContent = "error: " + err.message;

@@ -34,6 +34,7 @@ from marcellus.config import (
     FaceCaptureSection,
     FaceEnrichSection,
     FrigateSection,
+    LocationSection,
     ProxySection,
     PushSection,
     ScrubSection,
@@ -86,6 +87,7 @@ _SECTION_MODELS: dict[str, type[BaseModel]] = {
     "scrub": ScrubSection,
     "proxy": ProxySection,
     "encounters": EncountersSection,
+    "location": LocationSection,
     "push": PushSection,
 }
 
@@ -167,6 +169,10 @@ _LIVE_KEYS = {
     "log_level",
     "face_enrich.interval_s",
     "encounters.timeline_max_window_s",
+    # Read at call time by encounters/notability.py (the "night" rule).
+    "location.latitude",
+    "location.longitude",
+    "location.label",
 }
 #: `face_enrich.*` is live=True except `interval_s` (already above) and
 #: `model_dir` (still wiring -- see `_field_editable`/`_field_kind`).
@@ -193,10 +199,15 @@ _RANGE_OVERRIDES: dict[str, tuple[float | None, float | None]] = {
     "encounters.continuation_w_class": (0, 1),
     "encounters.continuation_min_score": (0, 1),
     "encounters.continuation_likely_score": (0, 1),
+    "location.latitude": (-90, 90),
+    "location.longitude": (-180, 180),
 }
 
 _HELP_OVERRIDES: dict[str, str] = {
     "log_level": "Root/uvicorn logger level.",
+    "location.latitude": "Property latitude, -90 to 90 (north is positive). Set with longitude.",
+    "location.longitude": "Property longitude, -180 to 180 (east is positive). Set with latitude.",
+    "location.label": "Free text shown next to the coordinates, usually the address looked up.",
     "encounters.gap_s": "Max gap (s) before a new atom starts a new encounter, by label family.",
     "encounters.adjacency": (
         "Extra camera-pair edges added to the zone-derived adjacency graph, "
@@ -570,6 +581,13 @@ def _type_errors(knob: Knob, value: Any) -> list[str]:
             return [f"{knob.key}: a camera pair can't name the same camera twice"]
         return []
     return []  # pragma: no cover -- exhaustive over KnobKind
+
+
+def validation_unit(key: str) -> str:
+    """Overrides that must be valid *together* share a unit: the location
+    coordinates are both-or-neither, so `config.load_settings` validates
+    (and drops) them as one."""
+    return "location" if key.startswith("location.") else key
 
 
 def normalise_pairs(value: list[list[str]]) -> list[list[str]]:

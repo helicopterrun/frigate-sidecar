@@ -439,11 +439,14 @@ def encounters_restamp(
         None, "--since", help="Only encounters starting at or after this epoch (default: all)."
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Report counts without writing."),
+    as_json: bool = typer.Option(False, "--json", help="Print one JSON object instead of text."),
 ) -> None:
     """Re-run the background/notable stamp over existing encounters with the
-    current alert settings and zones, in batches of 200. Prints counts by tag
-    and by reason. Idempotent; stamps otherwise only change when an
-    encounter's members do."""
+    current alert settings, zones, camera places and location, in batches of
+    200. Prints counts by tag and reason, per camera, how many encounters have
+    a zoneless member, and how many tags changed (would change, with
+    --dry-run). Idempotent; stamps otherwise only change when an encounter's
+    members do."""
     from marcellus import db
     from marcellus.encounters import notability
     from marcellus.encounters import repair as repair_mod
@@ -463,7 +466,7 @@ def encounters_restamp(
         )
     finally:
         conn.close()
-    typer.echo(json.dumps(result))
+    typer.echo(json.dumps(result) if as_json else repair_mod.format_restamp(result))
 
 
 @face_capture_app.command("stats")

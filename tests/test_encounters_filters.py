@@ -217,6 +217,7 @@ def test_decision_route_restamps_with_live_settings(
     assert resp.status_code == 200, resp.text
     body: dict[str, Any] = resp.json()["encounter"]
     assert body["tag"] in ("background", "notable")
-    assert body["place"] == "street"
+    # No zones: the camera's own place, here the name-based guess for "porch".
+    assert body["place"] == "yard"
     donor = client.get(f"/v1/encounters/{enc}").json()["encounter"]
     assert donor["tag"] in ("background", "notable")
